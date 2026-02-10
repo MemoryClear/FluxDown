@@ -105,7 +105,7 @@ pub async fn run(db_dir: PathBuf) {
             Some(signal) = create_recv.recv() => {
                 let msg = signal.message;
                 manager
-                    .create_task(msg.url, msg.save_dir, msg.file_name, msg.segments)
+                    .create_task(msg.url, msg.save_dir, msg.file_name, msg.segments, msg.cookies)
                     .await;
             }
             Some(signal) = control_recv.recv() => {
@@ -162,8 +162,9 @@ pub async fn run(db_dir: PathBuf) {
             // --- Native Messaging: browser extension download requests ---
             Some(req) = native_msg_rx.recv() => {
                 rinf::debug_print!(
-                    "[actor] external download request from browser: url={}",
-                    req.url
+                    "[actor] external download request from browser: url={}, cookies_len={}",
+                    req.url,
+                    req.cookies.len()
                 );
                 // Forward to Dart UI so it can pop the quick-download dialog.
                 ExternalDownloadRequest {
@@ -172,6 +173,7 @@ pub async fn run(db_dir: PathBuf) {
                     referrer: req.referrer,
                     file_size: req.file_size.map(|s| s as i64).unwrap_or(0),
                     mime_type: req.mime_type.unwrap_or_default(),
+                    cookies: req.cookies,
                 }
                 .send_signal_to_dart();
             }
@@ -179,11 +181,12 @@ pub async fn run(db_dir: PathBuf) {
             Some(signal) = confirm_ext_recv.recv() => {
                 let msg = signal.message;
                 rinf::debug_print!(
-                    "[actor] user confirmed external download: url={}",
-                    msg.url
+                    "[actor] user confirmed external download: url={}, cookies_len={}",
+                    msg.url,
+                    msg.cookies.len()
                 );
                 manager
-                    .create_task(msg.url, msg.save_dir, msg.file_name, msg.segments)
+                    .create_task(msg.url, msg.save_dir, msg.file_name, msg.segments, msg.cookies)
                     .await;
             }
             Some(done) = done_rx.recv() => {

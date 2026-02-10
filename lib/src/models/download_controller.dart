@@ -161,16 +161,18 @@ class DownloadController extends ChangeNotifier {
     required String saveDir,
     String fileName = '',
     int segments = 0,
+    String cookies = '',
   }) {
     logInfo(
       _tag,
-      'createTask: url=$url, dir=$saveDir, file=$fileName, seg=$segments',
+      'createTask: url=$url, dir=$saveDir, file=$fileName, seg=$segments, cookies_len=${cookies.length}',
     );
     CreateTask(
       url: url,
       saveDir: saveDir,
       fileName: fileName,
       segments: segments,
+      cookies: cookies,
     ).sendSignalToRust();
   }
 

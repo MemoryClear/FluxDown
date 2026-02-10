@@ -52,6 +52,43 @@ export default defineBackground(() => {
     console.log('[FluxDown] i18n initialized');
   });
 
+  // ===== 请求头缓存 =====
+  // 用 webRequest.onSendHeaders 捕获浏览器实际发出的请求头（含 Cookie、Authorization 等）
+  // 这比 chrome.cookies API 更可靠，因为它捕获的是浏览器真正发出去的完整头。
+  const requestHeaderCache = new Map<string, { cookies: string; headers: Record<string, string>; ts: number }>();
+
+  // Chrome MV3: 需要 'extraHeaders' 才能看到 Cookie / Authorization 等敏感头
+  try {
+    chrome.webRequest.onSendHeaders.addListener(
+      (details) => {
+        if (!details.requestHeaders) return;
+        const headers: Record<string, string> = {};
+        let cookies = '';
+        for (const h of details.requestHeaders) {
+          if (h.name && h.value) {
+            headers[h.name] = h.value;
+            if (h.name.toLowerCase() === 'cookie') {
+              cookies = h.value;
+            }
+          }
+        }
+        requestHeaderCache.set(details.url, { cookies, headers, ts: Date.now() });
+
+        // 清理 60 秒前的缓存条目
+        for (const [url, entry] of requestHeaderCache) {
+          if (Date.now() - entry.ts > 60_000) {
+            requestHeaderCache.delete(url);
+          }
+        }
+      },
+      { urls: ['<all_urls>'] },
+      ['requestHeaders', 'extraHeaders'],
+    );
+    console.log('[FluxDown] webRequest.onSendHeaders listener registered');
+  } catch (e) {
+    console.warn('[FluxDown] Failed to register webRequest listener:', e);
+  }
+
   // ===== 右键菜单 =====
   chrome.runtime.onInstalled.addListener(async () => {
     // 确保 i18n 已初始化
@@ -171,10 +208,36 @@ export default defineBackground(() => {
   ) {
     const settings = await loadSettings();
 
+    // === 提取认证信息（Cookie / Authorization 等） ===
+    // 策略 1：从 webRequest 缓存获取（最可靠 — 浏览器真正发出的请求头）
+    let cookieString = '';
+    const cached = requestHeaderCache.get(url);
+    if (cached) {
+      cookieString = cached.cookies;
+      console.log('[FluxDown] Cookies from webRequest cache:', cookieString.length, 'chars');
+      requestHeaderCache.delete(url); // 使用后清理
+    }
+
+    // 策略 2：通过 chrome.cookies API 提取（兜底）
+    if (!cookieString) {
+      try {
+        const cookies = await chrome.cookies.getAll({ url });
+        cookieString = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+        console.log('[FluxDown] Cookies from cookies API:', cookies.length, 'cookies,', cookieString.length, 'chars');
+      } catch (e) {
+        console.warn('[FluxDown] Failed to extract cookies via API:', e);
+      }
+    }
+
+    if (!cookieString) {
+      console.log('[FluxDown] No cookies available for URL:', url);
+    }
+
     const request: DownloadRequest = {
       url,
       filename: filename || '',
       referrer: referrer || '',
+      cookies: cookieString,
       fileSize,
       mimeType,
     };

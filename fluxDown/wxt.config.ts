@@ -8,12 +8,15 @@ export default defineConfig({
     version: '1.0.0',
     permissions: [
       'downloads',
+      'cookies',
+      'webRequest',
       'contextMenus',
       'storage',
       'notifications',
       'activeTab',
       'tabs',
     ],
+    host_permissions: ['<all_urls>'],
     action: {
       default_icon: {
         16: '/icon/16.png',

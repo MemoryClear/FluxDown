@@ -10,6 +10,8 @@ pub struct CreateTask {
     pub save_dir: String,
     pub file_name: String, // empty = auto detect from server
     pub segments: i32,     // 0 = auto (default 8)
+    #[serde(default)]
+    pub cookies: String, // browser cookies for authenticated downloads
 }
 
 /// Control an existing task (pause/resume/cancel/delete)
@@ -76,6 +78,7 @@ pub struct ExternalDownloadRequest {
     pub referrer: String,
     pub file_size: i64,    // 0 = unknown
     pub mime_type: String, // empty = unknown
+    pub cookies: String,   // browser cookies for authenticated downloads
 }
 
 /// Dart → Rust: user confirmed the external download request.
@@ -85,6 +88,8 @@ pub struct ConfirmExternalDownload {
     pub save_dir: String,
     pub file_name: String, // empty = auto detect
     pub segments: i32,     // 0 = auto
+    #[serde(default)]
+    pub cookies: String, // browser cookies for authenticated downloads
 }
 
 // ========== Config signals ==========

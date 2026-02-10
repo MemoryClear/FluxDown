@@ -93,10 +93,11 @@ class ExternalDownloadService {
       final saveDir = data['saveDir'] as String? ?? '';
       final fileName = data['fileName'] as String? ?? '';
       final segments = data['segments'] as int? ?? 0;
+      final cookies = data['cookies'] as String? ?? '';
 
       logInfo(
         _tag,
-        'confirmed download: url=$url, dir=$saveDir, file=$fileName',
+        'confirmed download: url=$url, dir=$saveDir, file=$fileName, cookies_len=${cookies.length}',
       );
 
       // 发送确认信号到 Rust
@@ -105,6 +106,7 @@ class ExternalDownloadService {
         saveDir: saveDir,
         fileName: fileName,
         segments: segments,
+        cookies: cookies,
       ).sendSignalToRust();
     } catch (e, stack) {
       logError(_tag, 'failed to parse confirm data', e, stack);
@@ -148,6 +150,7 @@ class ExternalDownloadService {
             'filename': req.filename,
             'fileSize': req.fileSize,
             'mimeType': req.mimeType,
+            'cookies': req.cookies,
             'defaultSaveDir': settingsProvider.defaultSaveDir,
             'colorScheme': themeProvider.colorScheme.name,
             'isDark': isDark,

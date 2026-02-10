@@ -1,5 +1,6 @@
+import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
-import { Monitor, Apple, Terminal, Download, Check } from "lucide-react";
+import { Monitor, Apple, Terminal, Download, Check, Loader2, ChevronDown } from "lucide-react";
 import { LampEffect } from "@/components/ui/lamp-effect";
 import { useLocale } from "@/lib/i18n";
 
@@ -10,8 +11,43 @@ const techStack = [
   { name: "SQLite", color: "text-success" },
 ];
 
+interface ReleaseAsset {
+  name: string;
+  size: number;
+  download_url: string;
+}
+
+interface ReleaseInfo {
+  version: string;
+  tag: string;
+  published_at: string;
+  assets: {
+    setup: ReleaseAsset | null;
+    portable: ReleaseAsset | null;
+  };
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export default function DownloadSection() {
   const { t } = useLocale();
+  const [release, setRelease] = useState<ReleaseInfo | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [showPortable, setShowPortable] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/release")
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .then((data: ReleaseInfo) => setRelease(data))
+      .catch((err) => console.error("Failed to fetch release info:", err))
+      .finally(() => setLoading(false));
+  }, []);
 
   const platforms = [
     { name: t("dl.windows"), icon: Monitor, arch: "x64", available: true, primary: true, badge: t("dl.availableNow") },
@@ -20,9 +56,9 @@ export default function DownloadSection() {
   ];
 
   return (
-    <section id="download" className="relative pt-20 pb-32 overflow-hidden bg-dark-bg">
+    <section id="download" className="relative pt-16 sm:pt-20 pb-20 sm:pb-32 overflow-hidden bg-dark-bg">
       <LampEffect>
-        <div className="mx-auto max-w-7xl px-6 lg:px-8 relative z-10">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 relative z-10">
           <motion.div
             className="text-center max-w-2xl mx-auto mb-16"
             initial={{ opacity: 0, y: 20 }}
@@ -76,11 +112,66 @@ export default function DownloadSection() {
                   </div>
                   <h3 className="text-base font-semibold text-dark-text">{p.name}</h3>
                   <p className="text-xs text-dark-text-muted mt-1">{p.arch}</p>
+
+                  {/* 版本号 */}
+                  {p.primary && release && (
+                    <p className="text-[10px] text-dark-text-muted mt-1">
+                      {t("dl.version", { version: release.version })}
+                      {release.assets.setup && (
+                        <span className="ml-1.5">({formatSize(release.assets.setup.size)})</span>
+                      )}
+                    </p>
+                  )}
+
                   {p.available ? (
-                    <a href="#" className="mt-4 inline-flex items-center justify-center gap-2 w-full rounded-lg bg-brand-blue px-5 py-2.5 text-xs font-semibold text-white hover:bg-brand-blue/90 transition-colors shadow-lg shadow-brand-blue/20">
-                      <Download className="w-3.5 h-3.5" />
-                      {t("dl.downloadBtn")}
-                    </a>
+                    <div className="mt-4 flex flex-col gap-2">
+                      {/* 主下载按钮（安装包） */}
+                      {loading ? (
+                        <div className="inline-flex items-center justify-center gap-2 w-full rounded-lg bg-brand-blue/50 px-5 py-2.5 text-xs font-semibold text-white/70 cursor-wait">
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          {t("dl.loading")}
+                        </div>
+                      ) : release?.assets.setup ? (
+                        <a
+                          href={release.assets.setup.download_url}
+                          className="inline-flex items-center justify-center gap-2 w-full rounded-lg bg-brand-blue px-5 py-2.5 text-xs font-semibold text-white hover:bg-brand-blue/90 transition-colors shadow-lg shadow-brand-blue/20"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          {t("dl.downloadBtn")} — {t("dl.installPkg")}
+                        </a>
+                      ) : (
+                        <a
+                          href="#"
+                          className="inline-flex items-center justify-center gap-2 w-full rounded-lg bg-brand-blue px-5 py-2.5 text-xs font-semibold text-white hover:bg-brand-blue/90 transition-colors shadow-lg shadow-brand-blue/20"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          {t("dl.downloadBtn")}
+                        </a>
+                      )}
+
+                      {/* 便携版下载（折叠） */}
+                      {release?.assets.portable && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => setShowPortable(!showPortable)}
+                            className="inline-flex items-center justify-center gap-1 text-[10px] text-dark-text-muted hover:text-dark-text-secondary transition-colors"
+                          >
+                            {t("dl.portablePkg")}
+                            <ChevronDown className={`w-3 h-3 transition-transform ${showPortable ? "rotate-180" : ""}`} />
+                          </button>
+                          {showPortable && (
+                            <a
+                              href={release.assets.portable.download_url}
+                              className="inline-flex items-center justify-center gap-2 w-full rounded-lg border border-dark-border px-5 py-2 text-[10px] font-medium text-dark-text-secondary hover:bg-dark-surface3 transition-colors"
+                            >
+                              <Download className="w-3 h-3" />
+                              {t("dl.portablePkg")} ({formatSize(release.assets.portable.size)})
+                            </a>
+                          )}
+                        </>
+                      )}
+                    </div>
                   ) : (
                     <div className="mt-4 inline-flex items-center justify-center gap-2 w-full rounded-lg border border-dark-border px-5 py-2.5 text-xs font-medium text-dark-text-muted">
                       {t("dl.comingSoon")}
@@ -99,11 +190,11 @@ export default function DownloadSection() {
             viewport={{ once: true }}
             transition={{ duration: 0.5, delay: 0.3 }}
           >
-            <div className="inline-flex items-center gap-6 rounded-full border border-dark-border bg-dark-surface1/50 px-6 py-3 backdrop-blur-sm">
+            <div className="inline-flex items-center gap-3 sm:gap-6 rounded-full border border-dark-border bg-dark-surface1/50 px-4 sm:px-6 py-2.5 sm:py-3 backdrop-blur-sm">
               {techStack.map((ts, i) => (
                 <span key={ts.name}>
-                  <span className={`text-xs font-semibold ${ts.color}`}>{ts.name}</span>
-                  {i < techStack.length - 1 && <span className="ml-6 inline-block h-4 w-px bg-dark-border" />}
+                  <span className={`text-[10px] sm:text-xs font-semibold ${ts.color}`}>{ts.name}</span>
+                  {i < techStack.length - 1 && <span className="ml-3 sm:ml-6 inline-block h-3 sm:h-4 w-px bg-dark-border" />}
                 </span>
               ))}
             </div>

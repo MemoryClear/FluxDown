@@ -67,10 +67,10 @@ export default function ExtensionSection() {
   };
 
   return (
-    <section id="extension" className="relative py-32 overflow-hidden">
+    <section id="extension" className="relative py-20 sm:py-32 overflow-hidden">
       <DotBackground className="absolute inset-0 -z-10" />
 
-      <div className="mx-auto max-w-7xl px-6 lg:px-8 relative z-10">
+      <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 relative z-10">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-16 items-center">
           {/* Left: Content */}
           <motion.div

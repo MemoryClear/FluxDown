@@ -58,7 +58,7 @@ jobs:
 
       # ── Build ──
       - name: Build Flutter Windows app
-        run: flutter build windows --release
+        run: flutter build windows --release --dart-define=APP_VERSION=${{ steps.version.outputs.VERSION }}
 
       # ── Inno Setup installer ──
       - name: Download Inno Setup Chinese Simplified language file

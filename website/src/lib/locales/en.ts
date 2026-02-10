@@ -114,6 +114,10 @@ const en = {
   "dl.availableNow": "Available Now",
   "dl.comingSoon": "Coming Soon",
   "dl.downloadBtn": "Download",
+  "dl.version": "v{version}",
+  "dl.loading": "Loading...",
+  "dl.installPkg": "Installer",
+  "dl.portablePkg": "Portable",
 
   // Footer
   "footer.desc": "A modern multi-protocol download manager powered by Rust. Fast, reliable, and free to use.",

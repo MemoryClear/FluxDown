@@ -178,6 +178,7 @@ pub async fn probe_bandwidth(
     url: &str,
     supports_range: bool,
     cancel_token: &CancellationToken,
+    cookies: &str,
 ) -> Option<f64> {
     use futures_util::StreamExt;
 
@@ -186,6 +187,9 @@ pub async fn probe_bandwidth(
     let mut req = client.get(url);
     if supports_range {
         req = req.header("Range", format!("bytes=0-{}", PROBE_BYTES - 1));
+    }
+    if !cookies.is_empty() {
+        req = req.header("Cookie", cookies);
     }
 
     let start = std::time::Instant::now();

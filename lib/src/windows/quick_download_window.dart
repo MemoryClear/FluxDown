@@ -38,6 +38,7 @@ class _QuickDownloadWindowState extends State<QuickDownloadWindow> {
   String get filename => widget.args['filename'] as String? ?? '';
   int get fileSize => widget.args['fileSize'] as int? ?? 0;
   String get mimeType => widget.args['mimeType'] as String? ?? '';
+  String get cookies => widget.args['cookies'] as String? ?? '';
   String get defaultSaveDir => widget.args['defaultSaveDir'] as String? ?? '';
   String get mainWindowId => widget.args['mainWindowId'] as String? ?? '0';
 
@@ -105,6 +106,7 @@ class _QuickDownloadWindowState extends State<QuickDownloadWindow> {
           'saveDir': saveDir,
           'fileName': rename,
           'segments': segments,
+          'cookies': cookies,
         }),
       );
     } catch (e) {

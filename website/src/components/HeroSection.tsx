@@ -278,10 +278,10 @@ export default function HeroSection() {
   return (
     <section className="relative min-h-screen w-full overflow-hidden">
       <GridBackground className="absolute inset-0 -z-10" />
-      <div className="absolute top-1/4 left-1/4 w-[600px] h-[600px] rounded-full bg-[#38bdf8]/5 blur-[128px] animate-pulse -z-10" />
-      <div className="absolute bottom-1/4 right-1/4 w-[500px] h-[500px] rounded-full bg-[#06b6d4]/5 blur-[128px] animate-pulse [animation-delay:1s] -z-10" />
+      <div className="absolute top-1/4 left-1/4 w-[300px] h-[300px] sm:w-[600px] sm:h-[600px] rounded-full bg-[#38bdf8]/5 blur-[80px] sm:blur-[128px] animate-pulse -z-10" />
+      <div className="absolute bottom-1/4 right-1/4 w-[250px] h-[250px] sm:w-[500px] sm:h-[500px] rounded-full bg-[#06b6d4]/5 blur-[80px] sm:blur-[128px] animate-pulse [animation-delay:1s] -z-10" />
 
-      <div className="relative z-10 mx-auto max-w-7xl px-6 pt-32 pb-20">
+      <div className="relative z-10 mx-auto max-w-7xl px-4 sm:px-6 pt-24 sm:pt-32 pb-16 sm:pb-20">
         {/* Badge */}
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }} className="flex justify-center mb-8">
           <span className="inline-flex items-center gap-2 rounded-full border border-dark-border bg-dark-surface1/50 px-4 py-1.5 text-xs font-medium text-dark-text-secondary backdrop-blur-sm">
@@ -311,7 +311,7 @@ export default function HeroSection() {
           </a>
         </motion.div>
 
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.8, delay: 0.5 }} className="mt-16 flex flex-wrap items-center justify-center gap-8 sm:gap-16">
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.8, delay: 0.5 }} className="mt-16 flex items-center justify-center gap-6 sm:gap-16">
           <StatItem value={t("hero.stat1.value")} label={t("hero.stat1.label")} />
           <div className="h-8 w-px bg-dark-border" />
           <StatItem value={t("hero.stat2.value")} label={t("hero.stat2.label")} />
@@ -328,7 +328,7 @@ export default function HeroSection() {
             maxWidth: selectedTaskData ? 1360 : 1024,
           }}
           transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
-          className="mt-20 relative mx-auto"
+          className="mt-12 sm:mt-20 relative mx-auto"
           style={{ width: "100%" }}
         >
           <div className="absolute -inset-4 rounded-2xl blur-2xl opacity-60" style={{ background: `linear-gradient(to bottom, ${theme.glowFrom}, ${theme.glowFrom}33, transparent)` }} />
@@ -344,50 +344,51 @@ export default function HeroSection() {
             }}
           >
             {/* ── Title Bar ── */}
-            <div className="flex items-center justify-between" style={{ height: "42px", backgroundColor: theme.surface1, borderBottom: `1px solid ${theme.border}`, transition: "background-color 0.3s, border-color 0.3s" }}>
-              <div className="flex items-center pl-4" style={{ gap: "9px" }}>
-                <img src="/logo.svg" alt="" style={{ width: "22px", height: "22px", borderRadius: "5px" }} />
+            <div className="flex items-center justify-between" style={{ height: "36px", backgroundColor: theme.surface1, borderBottom: `1px solid ${theme.border}`, transition: "background-color 0.3s, border-color 0.3s" }}>
+              <div className="flex items-center pl-3 sm:pl-4" style={{ gap: "6px" }}>
+                <img src="/logo.svg" alt="" style={{ width: "18px", height: "18px", borderRadius: "4px" }} />
                 <span style={{ letterSpacing: "0.3px" }}>
-                  <span style={{ fontSize: "13px", fontWeight: 600, color: theme.accent }}>Flux</span>
-                  <span style={{ fontSize: "13px", fontWeight: 500, color: theme.textPrimary, transition: "color 0.3s" }}>Down</span>
+                  <span style={{ fontSize: "12px", fontWeight: 600, color: theme.accent }}>Flux</span>
+                  <span style={{ fontSize: "12px", fontWeight: 500, color: theme.textPrimary, transition: "color 0.3s" }}>Down</span>
                 </span>
               </div>
               <div className="flex items-center">
+                {/* Action buttons — hidden on small screens */}
                 {[
                   <><rect x="6" y="4" width="4" height="16" rx="1" /><rect x="14" y="4" width="4" height="16" rx="1" /></>,
                   <polygon points="6 3 20 12 6 21" />,
                   <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></>,
                 ].map((icon, i) => (
-                  <div key={i} className="flex items-center justify-center transition-colors" style={{ width: "36px", height: "42px", cursor: "pointer", backgroundColor: "transparent" }}
+                  <div key={i} className="hidden sm:flex items-center justify-center transition-colors" style={{ width: "32px", height: "36px", cursor: "pointer", backgroundColor: "transparent" }}
                     onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = theme.sidebarHover; }}
                     onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "transparent"; }}>
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={theme.textSecondary} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{icon}</svg>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={theme.textSecondary} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{icon}</svg>
                   </div>
                 ))}
                 {/* Theme toggle */}
-                <div onClick={handleThemeToggle} className="flex items-center justify-center transition-colors" style={{ width: "36px", height: "42px", cursor: "pointer", backgroundColor: "transparent" }}
+                <div onClick={handleThemeToggle} className="flex items-center justify-center transition-colors" style={{ width: "32px", height: "36px", cursor: "pointer", backgroundColor: "transparent" }}
                   onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = theme.sidebarHover; }}
                   onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "transparent"; }}>
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={theme.textSecondary} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={theme.textSecondary} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     {isDark
                       ? <><circle cx="12" cy="12" r="5" /><line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" /><line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" /><line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" /><line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" /></>
                       : <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
                     }
                   </svg>
                 </div>
-                <div style={{ width: "1px", height: "20px", backgroundColor: theme.border, margin: "0 2px", transition: "background-color 0.3s" }} />
-                <div className="flex items-center justify-center transition-colors" style={{ width: "36px", height: "42px", cursor: "pointer", backgroundColor: "transparent" }}
+                <div className="hidden sm:block" style={{ width: "1px", height: "16px", backgroundColor: theme.border, margin: "0 2px", transition: "background-color 0.3s" }} />
+                <div className="hidden sm:flex items-center justify-center transition-colors" style={{ width: "32px", height: "36px", cursor: "pointer", backgroundColor: "transparent" }}
                   onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = theme.sidebarHover; }}
                   onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "transparent"; }}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={theme.textSecondary} strokeWidth="2" strokeLinecap="round"><line x1="5" y1="12" x2="19" y2="12" /></svg>
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={theme.textSecondary} strokeWidth="2" strokeLinecap="round"><line x1="5" y1="12" x2="19" y2="12" /></svg>
                 </div>
-                <div className="flex items-center justify-center transition-colors" style={{ width: "36px", height: "42px", cursor: "pointer", backgroundColor: "transparent" }}
+                <div className="hidden sm:flex items-center justify-center transition-colors" style={{ width: "32px", height: "36px", cursor: "pointer", backgroundColor: "transparent" }}
                   onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = theme.sidebarHover; }}
                   onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "transparent"; }}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={theme.textSecondary} strokeWidth="2" strokeLinecap="round"><rect x="3" y="3" width="18" height="18" rx="2" /></svg>
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={theme.textSecondary} strokeWidth="2" strokeLinecap="round"><rect x="3" y="3" width="18" height="18" rx="2" /></svg>
                 </div>
-                <div className="flex items-center justify-center hover:bg-[#EF4444]/10 transition-colors" style={{ width: "36px", height: "42px", cursor: "pointer" }}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={theme.textSecondary} strokeWidth="2" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                <div className="flex items-center justify-center hover:bg-[#EF4444]/10 transition-colors" style={{ width: "32px", height: "36px", cursor: "pointer" }}>
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={theme.textSecondary} strokeWidth="2" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
                 </div>
               </div>
             </div>
@@ -395,11 +396,12 @@ export default function HeroSection() {
             {/* ── Main Area: Sidebar + Content + Detail Panel ── */}
             <motion.div
               className="flex"
-              animate={{ height: selectedTaskData ? 540 : 440 }}
+              animate={{ height: selectedTaskData ? 540 : 340 }}
               transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+              style={{ minHeight: 260 }}
             >
               {/* Sidebar */}
-              <div className="flex flex-col shrink-0 hidden md:flex" style={{ width: "224px", backgroundColor: theme.surface1, borderRight: `1px solid ${theme.border}`, transition: "background-color 0.3s, border-color 0.3s" }}>
+              <div className="flex-col shrink-0 hidden md:flex" style={{ width: "200px", backgroundColor: theme.surface1, borderRight: `1px solid ${theme.border}`, transition: "background-color 0.3s, border-color 0.3s" }}>
                 <div style={{ padding: "4px 16px", fontSize: "10.5px", fontWeight: 500, color: theme.textMuted, letterSpacing: "0.5px", marginTop: "4px", transition: "color 0.3s" }}>{t("mockup.category")}</div>
                 <nav className="flex-1 mt-1">
                   {SIDEBAR_ICONS.map((item) => (
@@ -416,17 +418,17 @@ export default function HeroSection() {
 
               {/* Content area */}
               <div className="flex-1 flex flex-col" style={{ backgroundColor: theme.bg, transition: "background-color 0.3s" }}>
-                <div className="flex items-center" style={{ height: "38px", padding: "0 16px", borderBottom: `1px solid ${theme.border}`, transition: "border-color 0.3s" }}>
+                <div className="flex items-center overflow-x-auto scrollbar-none" style={{ height: "34px", padding: "0 12px", borderBottom: `1px solid ${theme.border}`, transition: "border-color 0.3s" }}>
                   {TAB_KEYS.map((tab) => (
                     <TabItem key={tab.key} label={`${t(tab.labelKey)} (${countByTab(tab.key)})`} active={activeTab === tab.key}
                       onClick={() => { setActiveTab(tab.key); setSelectedTask(null); }} theme={theme} />
                   ))}
                 </div>
-                <div className="flex items-center" style={{ height: "36px", padding: "0 16px", backgroundColor: theme.surface1, borderBottom: `1px solid ${theme.border}`, transition: "background-color 0.3s, border-color 0.3s" }}>
-                  <div className="flex-1" style={{ fontSize: "11px", fontWeight: 500, color: theme.textMuted, transition: "color 0.3s" }}>{t("mockup.colFilename")}</div>
-                  <div style={{ width: "150px", fontSize: "11px", fontWeight: 500, color: theme.textMuted, textAlign: "center", transition: "color 0.3s" }}>{t("mockup.colProgress")}</div>
-                  <div className="hidden sm:block" style={{ width: "100px", fontSize: "11px", fontWeight: 500, color: theme.textMuted, textAlign: "center", transition: "color 0.3s" }}>{t("mockup.colSpeed")}</div>
-                  <div className="hidden sm:block" style={{ width: "60px", fontSize: "11px", fontWeight: 500, color: theme.textMuted, textAlign: "right", transition: "color 0.3s" }}>{t("mockup.colStatus")}</div>
+                <div className="flex items-center" style={{ height: "30px", padding: "0 10px", backgroundColor: theme.surface1, borderBottom: `1px solid ${theme.border}`, transition: "background-color 0.3s, border-color 0.3s" }}>
+                  <div className="flex-1 min-w-0" style={{ fontSize: "10px", fontWeight: 500, color: theme.textMuted, transition: "color 0.3s" }}>{t("mockup.colFilename")}</div>
+                  <div className="shrink-0" style={{ width: "120px", fontSize: "10px", fontWeight: 500, color: theme.textMuted, textAlign: "center", transition: "color 0.3s" }}>{t("mockup.colProgress")}</div>
+                  <div className="hidden sm:block shrink-0" style={{ width: "80px", fontSize: "10px", fontWeight: 500, color: theme.textMuted, textAlign: "center", transition: "color 0.3s" }}>{t("mockup.colSpeed")}</div>
+                  <div className="hidden sm:block shrink-0" style={{ width: "56px", fontSize: "10px", fontWeight: 500, color: theme.textMuted, textAlign: "right", transition: "color 0.3s" }}>{t("mockup.colStatus")}</div>
                 </div>
                 <div className="flex-1 overflow-hidden">
                   <AnimatePresence mode="popLayout">
@@ -444,16 +446,16 @@ export default function HeroSection() {
                     </div>
                   )}
                 </div>
-                <div className="flex items-center" style={{ height: "28px", padding: "0 16px", backgroundColor: theme.surface1, borderTop: `1px solid ${theme.border}`, gap: "20px", transition: "background-color 0.3s, border-color 0.3s" }}>
-                  <div className="flex items-center" style={{ gap: "6px" }}>
-                    <div style={{ width: "8px", height: "8px", borderRadius: "50%", backgroundColor: "#22C55E" }} />
-                    <span style={{ fontSize: "10.5px", color: theme.textMuted, transition: "color 0.3s" }}>{t("mockup.downloading")}</span>
-                  </div>
+                <div className="flex items-center" style={{ height: "24px", padding: "0 10px", backgroundColor: theme.surface1, borderTop: `1px solid ${theme.border}`, gap: "12px", transition: "background-color 0.3s, border-color 0.3s" }}>
                   <div className="flex items-center" style={{ gap: "4px" }}>
-                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#22C55E" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><polyline points="19 12 12 19 5 12" /></svg>
-                    <span style={{ fontSize: "10.5px", color: theme.textMuted, fontVariantNumeric: "tabular-nums", transition: "color 0.3s" }}>12.8 MB/s</span>
+                    <div style={{ width: "6px", height: "6px", borderRadius: "50%", backgroundColor: "#22C55E" }} />
+                    <span style={{ fontSize: "9.5px", color: theme.textMuted, transition: "color 0.3s" }}>{t("mockup.downloading")}</span>
                   </div>
-                  <span style={{ fontSize: "10.5px", color: theme.textMuted, transition: "color 0.3s" }}>{t("mockup.statusActive", { n: "2", p: "1", t: "5" })}</span>
+                  <div className="flex items-center" style={{ gap: "3px" }}>
+                    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="#22C55E" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><polyline points="19 12 12 19 5 12" /></svg>
+                    <span style={{ fontSize: "9.5px", color: theme.textMuted, fontVariantNumeric: "tabular-nums", transition: "color 0.3s" }}>12.8 MB/s</span>
+                  </div>
+                  <span className="hidden sm:inline" style={{ fontSize: "9.5px", color: theme.textMuted, transition: "color 0.3s" }}>{t("mockup.statusActive", { n: "2", p: "1", t: "5" })}</span>
                 </div>
               </div>
 
@@ -718,10 +720,10 @@ function SidebarItem({ icon, label, count, selected, onClick, theme }: {
 
 function TabItem({ label, active, onClick, theme }: { label: string; active?: boolean; onClick: () => void; theme: MockupTheme }) {
   return (
-    <div onClick={onClick} className="relative flex items-center cursor-pointer transition-colors" style={{ padding: "0 12px", height: "38px", backgroundColor: "transparent" }}
+    <div onClick={onClick} className="relative flex items-center cursor-pointer transition-colors shrink-0" style={{ padding: "0 8px", height: "34px", backgroundColor: "transparent" }}
       onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = theme.rowHover; }}
       onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "transparent"; }}>
-      <span style={{ fontSize: "13px", fontWeight: active ? 500 : 400, color: active ? theme.textPrimary : theme.textMuted, transition: "color 0.15s" }}>{label}</span>
+      <span style={{ fontSize: "11px", fontWeight: active ? 500 : 400, color: active ? theme.textPrimary : theme.textMuted, transition: "color 0.15s", whiteSpace: "nowrap" }}>{label}</span>
       {active && <motion.div layoutId="heroActiveTab" style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: "2px", backgroundColor: theme.accent }} transition={{ duration: 0.25, ease: "easeInOut" }} />}
     </div>
   );
@@ -736,22 +738,22 @@ function TaskRow({ task, progress, subtitle, statusText, selected, hovered, onCl
   return (
     <div onClick={onClick} onMouseEnter={() => onHover(true)} onMouseLeave={() => onHover(false)}
       className="flex items-center cursor-pointer transition-colors duration-100"
-      style={{ height: "64px", padding: "8px 16px", borderBottom: `1px solid ${theme.border}`, backgroundColor: bgColor }}>
-      <div className="flex items-center flex-1 min-w-0" style={{ gap: "12px" }}>
-        <div className="flex items-center justify-center shrink-0" style={{ width: "34px", height: "34px", backgroundColor: selected ? "rgba(59,130,246,0.15)" : theme.surface2, borderRadius: "6px", fontSize: "10px", fontWeight: 600, color: selected ? theme.accent : theme.textSecondary, transition: "all 0.15s" }}>{task.ext}</div>
+      style={{ height: "52px", padding: "6px 10px", borderBottom: `1px solid ${theme.border}`, backgroundColor: bgColor }}>
+      <div className="flex items-center flex-1 min-w-0" style={{ gap: "8px" }}>
+        <div className="flex items-center justify-center shrink-0" style={{ width: "28px", height: "28px", backgroundColor: selected ? "rgba(59,130,246,0.15)" : theme.surface2, borderRadius: "5px", fontSize: "9px", fontWeight: 600, color: selected ? theme.accent : theme.textSecondary, transition: "all 0.15s" }}>{task.ext}</div>
         <div className="flex flex-col min-w-0">
-          <div style={{ fontSize: "13px", color: selected ? theme.accent : theme.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", transition: "color 0.15s" }}>{task.name}</div>
-          <div style={{ fontSize: "11px", color: theme.textMuted, marginTop: "2px", transition: "color 0.3s" }}>{subtitle}</div>
+          <div style={{ fontSize: "11.5px", color: selected ? theme.accent : theme.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", transition: "color 0.15s" }}>{task.name}</div>
+          <div style={{ fontSize: "10px", color: theme.textMuted, marginTop: "1px", transition: "color 0.3s" }}>{subtitle}</div>
         </div>
       </div>
-      <div className="flex items-center shrink-0" style={{ width: "150px", gap: "8px", paddingRight: "12px" }}>
+      <div className="flex items-center shrink-0" style={{ width: "120px", gap: "6px", paddingRight: "8px" }}>
         <div style={{ flex: 1, height: "3px", backgroundColor: theme.surface3, borderRadius: "1.5px", overflow: "hidden", transition: "background-color 0.3s" }}>
           <motion.div style={{ height: "100%", backgroundColor: task.barColor, borderRadius: "1.5px" }} animate={{ width: `${progress}%` }} transition={{ duration: 0.3, ease: "linear" }} />
         </div>
-        <span style={{ fontSize: "12px", color: theme.textSecondary, fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap", transition: "color 0.3s" }}>{progress.toFixed(1)}%</span>
+        <span style={{ fontSize: "10px", color: theme.textSecondary, fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap", transition: "color 0.3s" }}>{progress.toFixed(1)}%</span>
       </div>
-      <div className="hidden sm:block" style={{ width: "100px", fontSize: "12px", color: task.speedColor, textAlign: "center", fontVariantNumeric: "tabular-nums" }}>{task.speed}</div>
-      <div className="hidden sm:block" style={{ width: "60px", fontSize: "12px", color: task.statusColor, textAlign: "right" }}>{statusText}</div>
+      <div className="hidden sm:block shrink-0" style={{ width: "80px", fontSize: "10.5px", color: task.speedColor, textAlign: "center", fontVariantNumeric: "tabular-nums" }}>{task.speed}</div>
+      <div className="hidden sm:block shrink-0" style={{ width: "56px", fontSize: "10.5px", color: task.statusColor, textAlign: "right" }}>{statusText}</div>
     </div>
   );
 }

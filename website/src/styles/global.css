@@ -75,6 +75,15 @@ body {
   background: var(--color-dark-text-muted);
 }
 
+/* ===== Hide scrollbar utility ===== */
+.scrollbar-none {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
 /* ===== Theme transition ===== */
 html.theme-transitioning *,
 html.theme-transitioning *::before,

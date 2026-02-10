@@ -94,12 +94,12 @@ export function FloatingNavbar({
             {/* Separator */}
             <div className="h-4 w-px bg-dark-border mx-1" />
 
-            {/* Nav links */}
+            {/* Nav links — hidden on very small screens */}
             {navItems.map((item) => (
               <a
                 key={item.link}
                 href={item.link}
-                className="text-xs font-medium text-dark-text-secondary hover:text-dark-text px-3 py-1.5 rounded-full hover:bg-dark-surface3/50 transition-all duration-200"
+                className="hidden sm:inline-block text-xs font-medium text-dark-text-secondary hover:text-dark-text px-3 py-1.5 rounded-full hover:bg-dark-surface3/50 transition-all duration-200"
               >
                 {item.name}
               </a>
@@ -130,8 +130,8 @@ export function FloatingNavbar({
               </svg>
             </button>
 
-            {/* Separator */}
-            <div className="h-4 w-px bg-dark-border mx-1" />
+            {/* Separator — hidden on very small screens */}
+            <div className="hidden sm:block h-4 w-px bg-dark-border mx-1" />
 
             {/* CTA */}
             <a

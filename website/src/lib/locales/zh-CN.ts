@@ -116,6 +116,10 @@ const zhCN: Messages = {
   "dl.availableNow": "立即可用",
   "dl.comingSoon": "即将推出",
   "dl.downloadBtn": "下载",
+  "dl.version": "v{version}",
+  "dl.loading": "加载中...",
+  "dl.installPkg": "安装包",
+  "dl.portablePkg": "便携版",
 
   // Footer
   "footer.desc": "由 Rust 驱动的现代多协议下载管理器。高速、可靠、完全免费。",

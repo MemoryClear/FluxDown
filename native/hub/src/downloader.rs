@@ -80,6 +80,9 @@ pub struct DownloadParams {
     pub cancel_token: CancellationToken,
     /// Global speed limiter — shared across all concurrent downloads.
     pub speed_limiter: SpeedLimiter,
+    /// Browser cookies for authenticated downloads (e.g. GitHub private repos).
+    /// Format: "name1=val1; name2=val2"
+    pub cookies: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -155,10 +158,10 @@ const PROBE_RETRY_DELAY: Duration = Duration::from_secs(2);
 /// On Windows, the very first HTTPS request from a new process can fail due to
 /// DNS resolver cold-start, rustls TLS session initialisation, or firewall
 /// first-connection inspection.  Retrying transparently hides this from users.
-pub async fn resolve_file_info(client: &Client, url: &str) -> Result<FileInfo, DownloadError> {
+pub async fn resolve_file_info(client: &Client, url: &str, cookies: &str) -> Result<FileInfo, DownloadError> {
     let mut last_err = None;
     for attempt in 0..PROBE_MAX_RETRIES {
-        match resolve_file_info_once(client, url).await {
+        match resolve_file_info_once(client, url, cookies).await {
             Ok(info) => return Ok(info),
             Err(e) => {
                 rinf::debug_print!(
@@ -179,17 +182,35 @@ pub async fn resolve_file_info(client: &Client, url: &str) -> Result<FileInfo, D
     }))
 }
 
-async fn resolve_file_info_once(client: &Client, url: &str) -> Result<FileInfo, DownloadError> {
+async fn resolve_file_info_once(client: &Client, url: &str, cookies: &str) -> Result<FileInfo, DownloadError> {
     // --- Phase 1: HEAD probe for size & range info --------------------------
-    let head_ok = client.head(url).timeout(PROBE_TIMEOUT).send().await;
+    let mut head_req = client.head(url).timeout(PROBE_TIMEOUT);
+    if !cookies.is_empty() {
+        head_req = head_req.header("Cookie", cookies);
+    }
+    let head_ok = head_req.send().await;
 
-    let (mut headers, mut final_url) = match head_ok {
+    let (mut headers, mut final_url) = match &head_ok {
         Ok(r) if r.status().is_success() => {
             let u = r.url().clone();
             (r.headers().clone(), u)
         }
-        _ => {
-            // HEAD failed or returned error — we'll rely on GET below.
+        Ok(r) => {
+            rinf::debug_print!(
+                "[resolve] HEAD failed: status={}, url={}, cookies_len={}",
+                r.status(),
+                r.url(),
+                cookies.len()
+            );
+            (reqwest::header::HeaderMap::new(), reqwest::Url::parse(url)
+                .unwrap_or_else(|_| reqwest::Url::parse("http://invalid").unwrap_or_else(|_| unreachable!())))
+        }
+        Err(e) => {
+            rinf::debug_print!(
+                "[resolve] HEAD network error: {}, cookies_len={}",
+                e,
+                cookies.len()
+            );
             (reqwest::header::HeaderMap::new(), reqwest::Url::parse(url)
                 .unwrap_or_else(|_| reqwest::Url::parse("http://invalid").unwrap_or_else(|_| unreachable!())))
         }
@@ -202,12 +223,14 @@ async fn resolve_file_info_once(client: &Client, url: &str) -> Result<FileInfo, 
         || headers.is_empty();
 
     if need_get {
-        match client
+        let mut get_req = client
             .get(url)
             .header("Range", "bytes=0-0")
-            .timeout(PROBE_TIMEOUT)
-            .send()
-            .await
+            .timeout(PROBE_TIMEOUT);
+        if !cookies.is_empty() {
+            get_req = get_req.header("Cookie", cookies);
+        }
+        match get_req.send().await
         {
             Ok(r) if r.status().is_success() => {
                 let get_url = r.url().clone();
@@ -240,11 +263,30 @@ async fn resolve_file_info_once(client: &Client, url: &str) -> Result<FileInfo, 
                         }
                 }
             }
-            _ => {
-                // GET also failed — we'll work with whatever HEAD gave us
+            Ok(r) => {
+                let status = r.status();
+                let resp_url = r.url().clone();
+                rinf::debug_print!(
+                    "[resolve] GET failed: status={}, url={}, cookies_len={}",
+                    status,
+                    resp_url,
+                    cookies.len()
+                );
                 if headers.is_empty() {
                     return Err(DownloadError::Other(
-                        "both HEAD and GET probes failed".to_string(),
+                        format!("both HEAD and GET probes failed (GET status={})", status),
+                    ));
+                }
+            }
+            Err(e) => {
+                rinf::debug_print!(
+                    "[resolve] GET network error: {}, cookies_len={}",
+                    e,
+                    cookies.len()
+                );
+                if headers.is_empty() {
+                    return Err(DownloadError::Other(
+                        format!("both HEAD and GET probes failed (GET error: {})", e),
                     ));
                 }
             }
@@ -613,7 +655,7 @@ async fn compute_segments_with_advisor(p: &DownloadParams, info: &FileInfo) -> i
 
     let result = if static_advice.segments > 1 {
         // Phase 2: bandwidth probe to refine the recommendation.
-        match probe_bandwidth(&p.client, &p.url, info.supports_range, &p.cancel_token).await {
+        match probe_bandwidth(&p.client, &p.url, info.supports_range, &p.cancel_token, &p.cookies).await {
             Some(bw) => {
                 let bw_advice = advise_with_bandwidth(&advisor_input, bw);
                 rinf::debug_print!(
@@ -655,7 +697,7 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
     let client = &p.client;
 
     rinf::debug_print!("[download] task {} resolving file info...", p.task_id);
-    let info = resolve_file_info(client, &p.url).await?;
+    let info = resolve_file_info(client, &p.url, &p.cookies).await?;
     rinf::debug_print!(
         "[download] task {} resolved: name={}, size={}, range={}",
         p.task_id,
@@ -754,6 +796,7 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
             &p.progress_tx,
             &p.cancel_token,
             &p.speed_limiter,
+            &p.cookies,
         )
         .await?;
     } else {
@@ -768,6 +811,7 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
             &p.progress_tx,
             &p.cancel_token,
             &p.speed_limiter,
+            &p.cookies,
         )
         .await?;
     }
@@ -834,6 +878,7 @@ async fn download_single(
     progress_tx: &mpsc::Sender<ProgressUpdate>,
     cancel_token: &CancellationToken,
     speed_limiter: &SpeedLimiter,
+    cookies: &str,
 ) -> Result<(), DownloadError> {
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -853,6 +898,9 @@ async fn download_single(
     let mut file;
 
     let mut req = client.get(url);
+    if !cookies.is_empty() {
+        req = req.header("Cookie", cookies);
+    }
     if resume {
         req = req.header("Range", format!("bytes={}-", existing_len));
         downloaded = existing_len;
@@ -985,6 +1033,7 @@ async fn download_multi_segment(
     progress_tx: &mpsc::Sender<ProgressUpdate>,
     cancel_token: &CancellationToken,
     speed_limiter: &SpeedLimiter,
+    cookies: &str,
 ) -> Result<(), DownloadError> {
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -1111,6 +1160,7 @@ async fn download_multi_segment(
         let progress_tx = progress_tx.clone();
         let total = total_bytes;
         let limiter = speed_limiter.clone();
+        let cookies = cookies.to_string();
 
         let handle = tokio::spawn(async move {
             do_segment_with_retry(
@@ -1129,6 +1179,7 @@ async fn download_multi_segment(
                 &progress_tx,
                 &seg_states,
                 &limiter,
+                &cookies,
             )
             .await
         });
@@ -1187,6 +1238,7 @@ async fn do_segment_with_retry(
     progress_tx: &mpsc::Sender<ProgressUpdate>,
     seg_states: &Arc<StdMutex<Vec<SegmentProgressInfo>>>,
     speed_limiter: &SpeedLimiter,
+    cookies: &str,
 ) -> Result<(), DownloadError> {
     let mut attempts = 0u32;
 
@@ -1207,6 +1259,7 @@ async fn do_segment_with_retry(
             progress_tx,
             seg_states,
             speed_limiter,
+            cookies,
         )
         .await
         {
@@ -1257,11 +1310,16 @@ async fn do_segment(
     progress_tx: &mpsc::Sender<ProgressUpdate>,
     seg_states: &Arc<StdMutex<Vec<SegmentProgressInfo>>>,
     speed_limiter: &SpeedLimiter,
+    cookies: &str,
 ) -> Result<(), DownloadError> {
     let range = format!("bytes={}-{}", actual_start, seg_end);
-    let resp = client
+    let mut req = client
         .get(url)
-        .header("Range", range)
+        .header("Range", range);
+    if !cookies.is_empty() {
+        req = req.header("Cookie", cookies);
+    }
+    let resp = req
         .send()
         .await?
         .error_for_status()?;

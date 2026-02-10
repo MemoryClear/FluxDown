@@ -50,7 +50,7 @@ class Sidebar extends StatelessWidget {
                   ),
               ]),
               const Spacer(),
-              _buildFooter(c, ctrl),
+              _buildFooter(c),
             ],
           ),
         );
@@ -129,28 +129,20 @@ class Sidebar extends StatelessWidget {
     );
   }
 
-  Widget _buildFooter(AppColors c, DownloadController ctrl) {
-    final dlSpeed = DownloadTask.formatBytes(ctrl.totalDownloadSpeed);
+  Widget _buildFooter(AppColors c) {
+    const version = String.fromEnvironment('APP_VERSION', defaultValue: 'dev');
     return Container(
-      padding: const EdgeInsets.all(16),
+      height: 28,
+      padding: const EdgeInsets.symmetric(horizontal: 16),
       decoration: BoxDecoration(
         border: Border(top: BorderSide(color: c.border, width: 1)),
       ),
-      child: Row(
-        children: [
-          const Icon(LucideIcons.arrowDown, size: 11, color: AppColors.green),
-          const SizedBox(width: 4),
-          Text('下载', style: TextStyle(fontSize: 11, color: c.textSecondary)),
-          const SizedBox(width: 6),
-          Text(
-            '$dlSpeed/s',
-            style: TextStyle(
-              fontSize: 11,
-              color: AppColors.green,
-              fontFeatures: const [FontFeature.tabularFigures()],
-            ),
-          ),
-        ],
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Text(
+          version == 'dev' ? 'dev' : 'v$version',
+          style: TextStyle(fontSize: 10.5, color: c.textMuted),
+        ),
       ),
     );
   }

@@ -51,6 +51,7 @@ struct QueuedTask {
     file_name: String,
     segments: i32,
     is_resume: bool,
+    cookies: String,
 }
 
 pub struct DownloadManager {
@@ -153,6 +154,7 @@ impl DownloadManager {
                     queued.save_dir,
                     queued.file_name,
                     queued.segments,
+                    queued.cookies,
                 )
                 .await;
             }
@@ -236,6 +238,7 @@ impl DownloadManager {
         save_dir: String,
         file_name: String,
         segments: i32,
+        cookies: String,
     ) {
         let task_id = Uuid::new_v4().to_string();
         // When segments <= 0 ("auto"), store 0 in DB and let the downloader
@@ -267,7 +270,7 @@ impl DownloadManager {
 
         // Check concurrency limit before starting.
         if self.has_capacity() {
-            self.do_start_task(task_id, url, save_dir, file_name, seg)
+            self.do_start_task(task_id, url, save_dir, file_name, seg, cookies)
                 .await;
         } else {
             rinf::debug_print!(
@@ -283,6 +286,7 @@ impl DownloadManager {
                 file_name,
                 segments: seg,
                 is_resume: false,
+                cookies,
             });
         }
     }
@@ -295,6 +299,7 @@ impl DownloadManager {
         save_dir: String,
         file_name: String,
         segments: i32,
+        cookies: String,
     ) {
         self.generation += 1;
         let spawn_gen = self.generation;
@@ -316,6 +321,7 @@ impl DownloadManager {
             progress_tx: self.progress_tx.clone(),
             cancel_token,
             speed_limiter: self.speed_limiter.clone(),
+            cookies,
         };
 
         let done_tx = self.done_tx.clone();
@@ -440,6 +446,7 @@ impl DownloadManager {
                     file_name: t.file_name,
                     segments: 0, // not used for resume
                     is_resume: true,
+                    cookies: String::new(), // cookies not available for resume from DB
                 });
             }
         }
@@ -477,6 +484,7 @@ impl DownloadManager {
             progress_tx: self.progress_tx.clone(),
             cancel_token,
             speed_limiter: self.speed_limiter.clone(),
+            cookies: String::new(), // cookies not available for resume from DB
         };
 
         let done_tx = self.done_tx.clone();

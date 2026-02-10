@@ -54,7 +54,7 @@ export default function FeaturesSection() {
       title: t("features.segTitle"),
       description: t("features.segDesc"),
       icon: <div className="inline-flex items-center justify-center w-10 h-10 rounded-lg bg-[#06b6d4]/10"><Layers className="w-5 h-5 text-[#06b6d4]" /></div>,
-      className: "lg:col-span-2",
+      className: "md:col-span-2 lg:col-span-2",
       header: <IDMGridVisualization />,
     },
     {
@@ -79,15 +79,15 @@ export default function FeaturesSection() {
       title: t("features.browserTitle"),
       description: t("features.browserDesc"),
       icon: <div className="inline-flex items-center justify-center w-10 h-10 rounded-lg bg-[#EC4899]/10"><Chrome className="w-5 h-5 text-[#EC4899]" /></div>,
-      className: "lg:col-span-2",
+      className: "md:col-span-2 lg:col-span-2",
     },
   ];
 
   return (
-    <section id="features" className="relative py-32 overflow-hidden">
+    <section id="features" className="relative py-20 sm:py-32 overflow-hidden">
       <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[400px] bg-brand-blue/[0.02] blur-[160px] rounded-full -z-10" />
 
-      <div className="mx-auto max-w-7xl px-6 lg:px-8">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
         <motion.div
           className="text-center max-w-2xl mx-auto mb-16"
           initial={{ opacity: 0, y: 20 }}
