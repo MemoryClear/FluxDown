@@ -1,0 +1,95 @@
+name: Build Windows Installer
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build FluxDown Windows Installer
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get version from tag
+        id: version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      # ── Rust toolchain ──
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-
+
+      # ── Flutter SDK ──
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Flutter version info
+        run: flutter --version
+
+      - name: Install Flutter dependencies
+        run: flutter pub get
+
+      # ── Rinf code generation ──
+      - name: Install Rinf CLI
+        run: cargo install rinf_cli
+
+      - name: Generate Rinf bindings
+        run: rinf gen
+
+      # ── Build ──
+      - name: Build Flutter Windows app
+        run: flutter build windows --release
+
+      # ── Inno Setup installer ──
+      - name: Build installer with Inno Setup
+        run: |
+          iscc /DMyAppVersion=${{ steps.version.outputs.VERSION }} installer\windows\setup.iss
+
+      # ── Upload artifacts ──
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FluxDown-${{ steps.version.outputs.VERSION }}-windows-setup
+          path: build/installer/FluxDown-*.exe
+
+      - name: Upload portable build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FluxDown-${{ steps.version.outputs.VERSION }}-windows-portable
+          path: build/windows/x64/runner/Release/
+
+      # ── Compress portable version ──
+      - name: Create portable zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "build\windows\x64\runner\Release\*" -DestinationPath "build\installer\FluxDown-${{ steps.version.outputs.VERSION }}-windows-portable.zip"
+
+      # ── Upload to GitHub Release ──
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/installer/FluxDown-*.exe
+            build/installer/FluxDown-*-portable.zip
+          draft: true
+          generate_release_notes: true

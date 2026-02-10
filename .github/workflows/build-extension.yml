@@ -1,0 +1,73 @@
+name: Build Browser Extension
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-extension:
+    name: Build FluxDown Extension
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: fluxDown
+
+      - name: Build Chrome extension
+        run: npm run zip
+        working-directory: fluxDown
+
+      - name: Build Firefox extension
+        run: npm run zip:firefox
+        working-directory: fluxDown
+
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Rename artifacts
+        run: |
+          cd fluxDown
+          # WXT outputs zip files to .output/ directory
+          mkdir -p ../build/extension
+          for f in .output/*.zip; do
+            if [ -f "$f" ]; then
+              cp "$f" ../build/extension/
+            fi
+          done
+          # List what we got
+          ls -la ../build/extension/
+
+      - name: Upload Chrome extension artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fluxdown-chrome-extension-${{ steps.version.outputs.VERSION }}
+          path: build/extension/*chrome*.zip
+          if-no-files-found: warn
+
+      - name: Upload Firefox extension artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fluxdown-firefox-extension-${{ steps.version.outputs.VERSION }}
+          path: build/extension/*firefox*.zip
+          if-no-files-found: warn
+
+      - name: Upload all extension zips to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/extension/*.zip
+          draft: true
+          generate_release_notes: true
