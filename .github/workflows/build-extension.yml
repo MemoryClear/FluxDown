@@ -53,7 +53,7 @@ jobs:
           VERSION=${{ steps.version.outputs.VERSION }}
           mkdir -p build/extension/FluxDown-${VERSION}-extension
           cp -r fluxDown/.output/chrome-mv3 build/extension/FluxDown-${VERSION}-extension/chrome
-          cp -r fluxDown/.output/firefox-mv3 build/extension/FluxDown-${VERSION}-extension/firefox
+          cp -r fluxDown/.output/firefox-mv2 build/extension/FluxDown-${VERSION}-extension/firefox
           cd build/extension
           zip -r FluxDown-${VERSION}-extension.zip FluxDown-${VERSION}-extension/
           ls -la
