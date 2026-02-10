@@ -258,30 +258,16 @@ class _SettingsSidebar extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = AppColors.of(context);
     return Container(
-      width: 200,
+      width: 180,
       color: c.surface1,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const SizedBox(height: 16),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-            child: Text(
-              LocaleScope.of(context).settings,
-              style: TextStyle(
-                fontSize: 10.5,
-                fontWeight: FontWeight.w500,
-                color: c.textMuted,
-                letterSpacing: 0.5,
-              ),
-            ),
-          ),
-          const SizedBox(height: 4),
           for (final cat in SettingsCategory.values)
             _SettingsNavItem(
               icon: cat.icon,
               label: cat.localizedLabel,
-              description: cat.localizedDesc,
               isSelected: selected == cat,
               onTap: () => onSelect(cat),
             ),
@@ -294,14 +280,12 @@ class _SettingsSidebar extends StatelessWidget {
 class _SettingsNavItem extends StatefulWidget {
   final IconData icon;
   final String label;
-  final String description;
   final bool isSelected;
   final VoidCallback onTap;
 
   const _SettingsNavItem({
     required this.icon,
     required this.label,
-    required this.description,
     required this.isSelected,
     required this.onTap,
   });
@@ -326,56 +310,43 @@ class _SettingsNavItemState extends State<_SettingsNavItem> {
         onTap: widget.onTap,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 150),
-          margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          margin: const EdgeInsets.only(bottom: 2),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
           decoration: BoxDecoration(
             color: selected
                 ? c.accentBg
                 : _isHovered
                 ? c.hoverBg
                 : c.hoverBg.withValues(alpha: 0),
-            borderRadius: BorderRadius.circular(8),
+            borderRadius: BorderRadius.circular(7),
           ),
           child: Row(
             children: [
-              Container(
-                width: 32,
-                height: 32,
-                decoration: BoxDecoration(
-                  color: selected
-                      ? c.accent.withValues(alpha: 0.12)
-                      : c.surface2,
-                  borderRadius: BorderRadius.circular(7),
-                ),
-                child: Icon(
-                  widget.icon,
-                  size: 15,
-                  color: selected ? c.accent : c.textSecondary,
-                ),
+              Icon(
+                widget.icon,
+                size: 15,
+                color: selected ? c.accent : c.textSecondary,
               ),
               const SizedBox(width: 10),
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      widget.label,
-                      style: TextStyle(
-                        fontSize: 12.5,
-                        color: selected ? c.accent : c.textPrimary,
-                        fontWeight: selected
-                            ? FontWeight.w600
-                            : FontWeight.w500,
-                      ),
-                    ),
-                    const SizedBox(height: 1),
-                    Text(
-                      widget.description,
-                      style: TextStyle(fontSize: 10.5, color: c.textMuted),
-                    ),
-                  ],
+                child: Text(
+                  widget.label,
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: selected ? c.accent : c.textPrimary,
+                    fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                  ),
                 ),
               ),
+              if (selected)
+                Container(
+                  width: 3,
+                  height: 14,
+                  decoration: BoxDecoration(
+                    color: c.accent,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
             ],
           ),
         ),
@@ -400,16 +371,16 @@ class _SettingsContent extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SingleChildScrollView(
-      padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 28),
+      padding: const EdgeInsets.symmetric(horizontal: 36, vertical: 24),
       child: Align(
         alignment: Alignment.topCenter,
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 600),
+          constraints: const BoxConstraints(maxWidth: 560),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               _SectionHeader(category: category),
-              const SizedBox(height: 24),
+              const SizedBox(height: 20),
               AnimatedSwitcher(
                 duration: const Duration(milliseconds: 200),
                 layoutBuilder: (currentChild, previousChildren) {
@@ -459,27 +430,21 @@ class _SectionHeader extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            Icon(category.icon, size: 18, color: c.accent),
-            const SizedBox(width: 10),
-            Text(
-              category.localizedLabel,
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.w600,
-                color: c.textPrimary,
-              ),
-            ),
-          ],
+        Text(
+          category.localizedLabel,
+          style: TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.w600,
+            color: c.textPrimary,
+          ),
         ),
         const SizedBox(height: 4),
         Text(
           category.localizedDesc,
-          style: TextStyle(fontSize: 13, color: c.textMuted),
+          style: TextStyle(fontSize: 12, color: c.textMuted),
         ),
-        const SizedBox(height: 16),
-        Divider(height: 1, color: c.border),
+        const SizedBox(height: 14),
+        Divider(height: 1, color: c.border.withValues(alpha: 0.5)),
       ],
     );
   }
@@ -506,11 +471,11 @@ class _SettingCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = AppColors.of(context);
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       decoration: BoxDecoration(
         color: c.surface1,
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: c.border, width: 1),
+        border: Border.all(color: c.border.withValues(alpha: 0.6), width: 1),
       ),
       child: vertical
           ? Column(
@@ -527,9 +492,9 @@ class _SettingCard extends StatelessWidget {
                 const SizedBox(height: 2),
                 Text(
                   description,
-                  style: TextStyle(fontSize: 12, color: c.textMuted),
+                  style: TextStyle(fontSize: 11.5, color: c.textMuted),
                 ),
-                const SizedBox(height: 14),
+                const SizedBox(height: 12),
                 child,
               ],
             )
@@ -550,7 +515,7 @@ class _SettingCard extends StatelessWidget {
                       const SizedBox(height: 2),
                       Text(
                         description,
-                        style: TextStyle(fontSize: 12, color: c.textMuted),
+                        style: TextStyle(fontSize: 11.5, color: c.textMuted),
                       ),
                     ],
                   ),
@@ -609,7 +574,7 @@ class _GeneralContent extends StatelessWidget {
                 },
               ),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
             _SettingCard(
               label: LocaleScope.of(context).closeToTray,
               description: LocaleScope.of(context).closeToTrayDesc,
@@ -643,14 +608,14 @@ class _AppearanceContent extends StatelessWidget {
           vertical: true,
           child: const _LanguageSelector(),
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 10),
         _SettingCard(
           label: LocaleScope.of(context).themeMode,
           description: LocaleScope.of(context).themeModeDesc,
           vertical: true,
           child: const _ThemeModeSelector(),
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 10),
         _SettingCard(
           label: LocaleScope.of(context).themeColor,
           description: LocaleScope.of(context).themeColorDesc,
@@ -684,19 +649,19 @@ class _DownloadContent extends StatelessWidget {
               vertical: true,
               child: _SaveDirPicker(settingsProvider: settingsProvider),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
             _SettingCard(
               label: LocaleScope.of(context).defaultThreads,
               description: LocaleScope.of(context).defaultThreadsDesc,
               child: _SegmentSelector(settingsProvider: settingsProvider),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
             _SettingCard(
               label: LocaleScope.of(context).maxConcurrent,
               description: LocaleScope.of(context).maxConcurrentDesc,
               child: _ConcurrentSelector(settingsProvider: settingsProvider),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
             _SettingCard(
               label: LocaleScope.of(context).speedLimit,
               description: LocaleScope.of(context).speedLimitDesc,
@@ -896,9 +861,11 @@ class _LanguageSelector extends StatelessWidget {
       (pref: kLocaleEn, label: s.languageEnglish, icon: LucideIcons.languages),
     ];
 
-    return Row(
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
       children: [
-        for (final item in options) ...[
+        for (final item in options)
           _ThemeModeCard(
             icon: item.icon,
             label: item.label,
@@ -906,8 +873,6 @@ class _LanguageSelector extends StatelessWidget {
             colors: c,
             onTap: () => localeNotifier.setLocale(item.pref),
           ),
-          if (item != options.last) const SizedBox(width: 10),
-        ],
       ],
     );
   }
@@ -937,9 +902,11 @@ class _ThemeModeSelector extends StatelessWidget {
       (mode: ThemeMode.dark, label: s.themeModeDark, icon: LucideIcons.moon),
     ];
 
-    return Row(
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
       children: [
-        for (final item in modes) ...[
+        for (final item in modes)
           _ThemeModeCard(
             icon: item.icon,
             label: item.label,
@@ -947,8 +914,6 @@ class _ThemeModeSelector extends StatelessWidget {
             colors: c,
             onTap: () => provider.setThemeMode(item.mode),
           ),
-          if (item != modes.last) const SizedBox(width: 10),
-        ],
       ],
     );
   }
@@ -983,7 +948,7 @@ class _ThemeModeCardState extends State<_ThemeModeCard> {
     final selected = widget.selected;
     final borderColor = selected ? theme.colorScheme.primary : c.border;
     final bgColor = selected
-        ? theme.colorScheme.primary.withValues(alpha: 0.06)
+        ? theme.colorScheme.primary.withValues(alpha: 0.08)
         : _isHovered
         ? c.hoverBg
         : c.bg;
@@ -996,22 +961,21 @@ class _ThemeModeCardState extends State<_ThemeModeCard> {
         onTap: widget.onTap,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 150),
-          width: 96,
-          padding: const EdgeInsets.symmetric(vertical: 14),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
           decoration: BoxDecoration(
             color: bgColor,
-            borderRadius: BorderRadius.circular(10),
+            borderRadius: BorderRadius.circular(8),
             border: Border.all(color: borderColor, width: selected ? 1.5 : 1),
           ),
-          child: Column(
+          child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
               Icon(
                 widget.icon,
-                size: 20,
+                size: 14,
                 color: selected ? theme.colorScheme.primary : c.textSecondary,
               ),
-              const SizedBox(height: 8),
+              const SizedBox(width: 6),
               Text(
                 widget.label,
                 style: TextStyle(
@@ -1042,8 +1006,8 @@ class _ColorSchemeSelector extends StatelessWidget {
     final c = AppColors.of(context);
 
     return Wrap(
-      spacing: 10,
-      runSpacing: 10,
+      spacing: 8,
+      runSpacing: 8,
       children: [
         for (final scheme in AppColorScheme.values)
           _ColorDot(
@@ -1090,8 +1054,8 @@ class _ColorDotState extends State<_ColorDot> {
           onTap: widget.onTap,
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 150),
-            width: 34,
-            height: 34,
+            width: 28,
+            height: 28,
             decoration: BoxDecoration(
               color: widget.scheme.previewColor,
               shape: BoxShape.circle,
@@ -1099,7 +1063,7 @@ class _ColorDotState extends State<_ColorDot> {
                 color: selected
                     ? widget.colors.textPrimary
                     : _isHovered
-                    ? widget.colors.textSecondary
+                    ? widget.colors.textSecondary.withValues(alpha: 0.6)
                     : widget.scheme.previewColor,
                 width: selected
                     ? 2.5
@@ -1111,16 +1075,16 @@ class _ColorDotState extends State<_ColorDot> {
                   ? [
                       BoxShadow(
                         color: widget.scheme.previewColor.withValues(
-                          alpha: 0.3,
+                          alpha: 0.25,
                         ),
-                        blurRadius: 8,
-                        spreadRadius: 1,
+                        blurRadius: 6,
+                        spreadRadius: 0,
                       ),
                     ]
                   : null,
             ),
             child: selected
-                ? const Icon(LucideIcons.check, size: 15, color: Colors.white)
+                ? const Icon(LucideIcons.check, size: 13, color: Colors.white)
                 : null,
           ),
         ),
@@ -1178,7 +1142,7 @@ class _AboutContent extends StatelessWidget {
                 ],
               ),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
             // Update card
             _SettingCard(
               label: LocaleScope.of(context).softwareUpdate,
