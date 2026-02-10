@@ -20,6 +20,10 @@ class DownloadController extends ChangeNotifier {
   FileCategory _categoryFilter = FileCategory.all;
   StatusTab _statusTab = StatusTab.all;
 
+  // 管理模式（多选）
+  bool _isManageMode = false;
+  final Set<String> _checkedTaskIds = {};
+
   /// 下载完成回调 — 当任务状态从非 completed 变为 completed 时触发
   void Function(DownloadTask task)? onTaskCompleted;
 
@@ -118,6 +122,77 @@ class DownloadController extends ChangeNotifier {
   int countForCategory(FileCategory category) {
     if (category == FileCategory.all) return _tasks.length;
     return _tasks.where((t) => t.fileCategory == category).length;
+  }
+
+  // ---------------------------------------------------------------------------
+  // 管理模式（多选批量操作）
+  // ---------------------------------------------------------------------------
+
+  bool get isManageMode => _isManageMode;
+  Set<String> get checkedTaskIds => _checkedTaskIds;
+  int get checkedCount => _checkedTaskIds.length;
+
+  /// 进入/退出管理模式
+  void toggleManageMode() {
+    _isManageMode = !_isManageMode;
+    if (!_isManageMode) _checkedTaskIds.clear();
+    _safeNotifyListeners();
+  }
+
+  void exitManageMode() {
+    if (!_isManageMode) return;
+    _isManageMode = false;
+    _checkedTaskIds.clear();
+    _safeNotifyListeners();
+  }
+
+  /// 切换单个任务的选中状态
+  void toggleTaskChecked(String taskId) {
+    if (_checkedTaskIds.contains(taskId)) {
+      _checkedTaskIds.remove(taskId);
+    } else {
+      _checkedTaskIds.add(taskId);
+    }
+    _safeNotifyListeners();
+  }
+
+  /// 全选当前筛选列表中的任务
+  void selectAllFiltered() {
+    for (final t in filteredTasks) {
+      _checkedTaskIds.add(t.id);
+    }
+    _safeNotifyListeners();
+  }
+
+  /// 取消全选
+  void deselectAll() {
+    _checkedTaskIds.clear();
+    _safeNotifyListeners();
+  }
+
+  /// 当前筛选列表是否已全选
+  bool get isAllFilteredChecked {
+    final filtered = filteredTasks;
+    if (filtered.isEmpty) return false;
+    return filtered.every((t) => _checkedTaskIds.contains(t.id));
+  }
+
+  /// 批量删除选中的任务
+  void deleteCheckedTasks({required bool deleteFiles}) {
+    final ids = _checkedTaskIds.toList();
+    logInfo(
+      _tag,
+      'deleteCheckedTasks: ${ids.length} tasks, deleteFiles=$deleteFiles',
+    );
+    for (final id in ids) {
+      final action = deleteFiles ? 3 : 4;
+      ControlTask(taskId: id, action: action).sendSignalToRust();
+      _tasks.removeWhere((t) => t.id == id);
+      if (_selectedTaskId == id) _selectedTaskId = null;
+    }
+    _checkedTaskIds.clear();
+    _isManageMode = false;
+    _safeNotifyListeners();
   }
 
   String? get selectedTaskId => _selectedTaskId;

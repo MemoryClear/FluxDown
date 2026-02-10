@@ -1,53 +1,52 @@
 import 'dart:async';
-import 'dart:convert';
+import 'dart:ffi';
+import 'dart:io';
 
-import 'package:desktop_multi_window/desktop_multi_window.dart';
+import 'package:ffi/ffi.dart';
 import 'package:flutter/material.dart';
 import 'package:rinf/rinf.dart';
+import 'package:window_manager/window_manager.dart';
 
 import '../bindings/bindings.dart';
 import '../models/settings_provider.dart';
-import '../theme/theme_provider.dart';
+import '../widgets/quick_download_dialog.dart';
 import 'log_service.dart';
 
 const _tag = 'ExtDownSvc';
 
-/// 监听来自浏览器扩展的外部下载请求，弹出独立的快速下载确认窗口。
+/// 监听来自浏览器扩展的外部下载请求，弹出主窗口内的快速下载确认对话框。
 ///
 /// 架构：
 /// 1. Rust HTTP server 收到浏览器扩展的下载请求
 /// 2. Rust 发送 ExternalDownloadRequest 信号到 Dart
-/// 3. 本服务监听该信号，创建一个独立的子窗口（desktop_multi_window）
-/// 4. 用户在子窗口中确认下载参数
-/// 5. 子窗口通过 WindowMethodChannel 将确认数据回传主窗口
-/// 6. 主窗口发送 ConfirmExternalDownload 信号到 Rust
+/// 3. 本服务监听该信号，在主窗口内弹出 Dialog（无需创建独立子窗口）
+/// 4. 用户在 Dialog 中确认下载参数
+/// 5. Dialog 直接发送 ConfirmExternalDownload 信号到 Rust
 class ExternalDownloadService {
   static ExternalDownloadService? _instance;
 
   final SettingsProvider settingsProvider;
-  final ThemeProvider themeProvider;
+  final GlobalKey<NavigatorState> navigatorKey;
   StreamSubscription<RustSignalPack<ExternalDownloadRequest>>? _sub;
-  StreamSubscription<dynamic>? _windowChangeSub;
-  bool _windowOpen = false;
+  bool _dialogOpen = false;
 
   ExternalDownloadService._({
     required this.settingsProvider,
-    required this.themeProvider,
+    required this.navigatorKey,
   });
 
   /// 初始化单例。应在 app 启动时调用一次。
   static void init({
     required SettingsProvider settingsProvider,
-    required ThemeProvider themeProvider,
+    required GlobalKey<NavigatorState> navigatorKey,
   }) {
     logInfo(_tag, 'init');
     _instance?._teardown();
     _instance = ExternalDownloadService._(
       settingsProvider: settingsProvider,
-      themeProvider: themeProvider,
+      navigatorKey: navigatorKey,
     );
     _instance!._startListening();
-    _instance!._registerMethodHandler();
   }
 
   static void shutdown() {
@@ -59,59 +58,10 @@ class ExternalDownloadService {
   void _teardown() {
     logInfo(_tag, '_teardown');
     _sub?.cancel();
-    _windowChangeSub?.cancel();
-    _windowChangeSub = null;
   }
 
   void _startListening() {
     _sub = ExternalDownloadRequest.rustSignalStream.listen(_onRequest);
-  }
-
-  /// 注册主窗口的方法处理器，接收子窗口回传的确认数据
-  void _registerMethodHandler() {
-    // 获取主窗口的 controller 并注册方法处理
-    WindowController.fromCurrentEngine()
-        .then((controller) {
-          controller.setWindowMethodHandler((call) async {
-            logInfo(_tag, 'received method: ${call.method}');
-            if (call.method == 'confirm_download') {
-              _onConfirmDownload(call.arguments as String);
-            }
-          });
-          logInfo(_tag, 'method handler registered');
-        })
-        .catchError((e) {
-          logError(_tag, 'failed to register method handler', e);
-        });
-  }
-
-  /// 处理子窗口回传的下载确认数据
-  void _onConfirmDownload(String jsonStr) {
-    try {
-      final data = jsonDecode(jsonStr) as Map<String, dynamic>;
-      final url = data['url'] as String? ?? '';
-      final saveDir = data['saveDir'] as String? ?? '';
-      final fileName = data['fileName'] as String? ?? '';
-      final segments = data['segments'] as int? ?? 0;
-      final cookies = data['cookies'] as String? ?? '';
-
-      logInfo(
-        _tag,
-        'confirmed download: url=$url, dir=$saveDir, file=$fileName, cookies_len=${cookies.length}',
-      );
-
-      // 发送确认信号到 Rust
-      ConfirmExternalDownload(
-        url: url,
-        saveDir: saveDir,
-        fileName: fileName,
-        segments: segments,
-        cookies: cookies,
-      ).sendSignalToRust();
-    } catch (e, stack) {
-      logError(_tag, 'failed to parse confirm data', e, stack);
-    }
-    _windowOpen = false;
   }
 
   void _onRequest(RustSignalPack<ExternalDownloadRequest> pack) async {
@@ -122,69 +72,215 @@ class ExternalDownloadService {
     );
 
     // 防止重复弹窗
-    if (_windowOpen) {
-      logInfo(_tag, 'window already open, ignoring request');
+    if (_dialogOpen) {
+      logInfo(_tag, 'dialog already open, ignoring request');
       return;
     }
 
-    _windowOpen = true;
+    final context = navigatorKey.currentContext;
+    if (context == null) {
+      logError(_tag, 'navigatorKey has no context, cannot show dialog');
+      return;
+    }
+
+    _dialogOpen = true;
 
     try {
-      // 获取主窗口 ID 用于子窗口回传
-      final mainController = await WindowController.fromCurrentEngine();
+      // 确保主窗口可见并强制前台激活
+      await _bringWindowToFront();
 
-      // 判断当前是否为暗色模式
-      final isDark =
-          themeProvider.themeMode == ThemeMode.dark ||
-          (themeProvider.themeMode == ThemeMode.system &&
-              WidgetsBinding.instance.platformDispatcher.platformBrightness ==
-                  Brightness.dark);
+      if (!context.mounted) {
+        logError(_tag, 'context not mounted after window restore');
+        _dialogOpen = false;
+        return;
+      }
 
-      logInfo(_tag, 'creating quick download sub-window...');
-      // 创建独立子窗口
-      final windowController = await WindowController.create(
-        WindowConfiguration(
-          arguments: jsonEncode({
-            'windowType': 'quick_download',
-            'url': req.url,
-            'filename': req.filename,
-            'fileSize': req.fileSize,
-            'mimeType': req.mimeType,
-            'cookies': req.cookies,
-            'defaultSaveDir': settingsProvider.defaultSaveDir,
-            'colorScheme': themeProvider.colorScheme.name,
-            'isDark': isDark,
-            'mainWindowId': mainController.windowId,
-          }),
-        ),
+      logInfo(_tag, 'showing quick download dialog...');
+      showQuickDownloadDialog(
+        context,
+        url: req.url,
+        filename: req.filename,
+        fileSize: req.fileSize.toInt(),
+        mimeType: req.mimeType,
+        cookies: req.cookies,
+        defaultSaveDir: settingsProvider.defaultSaveDir,
       );
-      logInfo(_tag, 'sub-window created: id=${windowController.windowId}');
-
-      // 监听子窗口关闭以重置标志（取消之前的监听，避免泄漏）
-      _windowChangeSub?.cancel();
-      _windowChangeSub = onWindowsChanged.listen((_) async {
-        try {
-          final windows = await WindowController.getAll();
-          final stillExists = windows.any(
-            (w) => w.windowId == windowController.windowId,
-          );
-          if (!stillExists) {
-            logInfo(_tag, 'sub-window closed, resetting _windowOpen');
-            _windowOpen = false;
-            _windowChangeSub?.cancel();
-            _windowChangeSub = null;
-          }
-        } catch (e) {
-          // 窗口查询失败（如进程退出中），安全重置
-          logError(_tag, 'onWindowsChanged query error', e);
-          _windowOpen = false;
-          _windowChangeSub?.cancel();
-          _windowChangeSub = null;
-        }
-      });
+      logInfo(_tag, 'dialog shown');
     } catch (e, stack) {
-      logError(_tag, 'failed to create sub-window', e, stack);
-      _windowOpen = false;
+      logError(_tag, 'failed to show dialog', e, stack);
+    } finally {
+      // showShadDialog 是非阻塞调用，用 microtask 延迟重置标志
+      Future.microtask(() {
+        _dialogOpen = false;
+      });
     }
   }
+
+  /// 强制将主窗口带到前台。
+  ///
+  /// Windows 限制后台进程调用 SetForegroundWindow，单纯的
+  /// windowManager.show() + focus() 在窗口被其他应用遮挡时
+  /// 可能只闪烁任务栏图标而不真正弹到前台。
+  ///
+  /// 使用经典 Win32 技巧：先 HWND_TOPMOST 再 HWND_NOTOPMOST，
+  /// 强制窗口到最上层后立刻取消置顶，效果等价于用户手动点击任务栏。
+  Future<void> _bringWindowToFront() async {
+    // 先确保窗口可见（从托盘/最小化恢复）
+    await windowManager.show();
+    await windowManager.restore();
+
+    if (Platform.isWindows) {
+      _forceActivateWindow();
+    }
+
+    await windowManager.focus();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Win32 FFI — 仅用于强制前台激活
+// ---------------------------------------------------------------------------
+
+const int _swpNoMove = 0x0002;
+const int _swpNoSize = 0x0001;
+const int _hwndTopmost = -1;
+const int _hwndNotopmost = -2;
+const int _swpShowWindow = 0x0040;
+
+typedef _FindWindowNative =
+    IntPtr Function(Pointer<Int8> lpClassName, Pointer<Int8> lpWindowName);
+typedef _FindWindowDart =
+    int Function(Pointer<Int8> lpClassName, Pointer<Int8> lpWindowName);
+
+typedef _GetForegroundWindowNative = IntPtr Function();
+typedef _GetForegroundWindowDart = int Function();
+
+typedef _GetWindowThreadProcessIdNative =
+    Uint32 Function(IntPtr hWnd, Pointer<Uint32> lpdwProcessId);
+typedef _GetWindowThreadProcessIdDart =
+    int Function(int hWnd, Pointer<Uint32> lpdwProcessId);
+
+typedef _AttachThreadInputNative =
+    Int32 Function(Uint32 idAttach, Uint32 idAttachTo, Int32 fAttach);
+typedef _AttachThreadInputDart =
+    int Function(int idAttach, int idAttachTo, int fAttach);
+
+typedef _SetForegroundWindowNative = Int32 Function(IntPtr hWnd);
+typedef _SetForegroundWindowDart = int Function(int hWnd);
+
+typedef _SetWindowPosNative =
+    Int32 Function(
+      IntPtr hWnd,
+      IntPtr hWndInsertAfter,
+      Int32 x,
+      Int32 y,
+      Int32 cx,
+      Int32 cy,
+      Uint32 uFlags,
+    );
+typedef _SetWindowPosDart =
+    int Function(
+      int hWnd,
+      int hWndInsertAfter,
+      int x,
+      int y,
+      int cx,
+      int cy,
+      int uFlags,
+    );
+
+typedef _GetCurrentThreadIdNative = Uint32 Function();
+typedef _GetCurrentThreadIdDart = int Function();
+
+final _user32 = DynamicLibrary.open('user32.dll');
+final _kernel32 = DynamicLibrary.open('kernel32.dll');
+
+final _getForegroundWindow = _user32
+    .lookupFunction<_GetForegroundWindowNative, _GetForegroundWindowDart>(
+      'GetForegroundWindow',
+    );
+
+final _getWindowThreadProcessId = _user32
+    .lookupFunction<
+      _GetWindowThreadProcessIdNative,
+      _GetWindowThreadProcessIdDart
+    >('GetWindowThreadProcessId');
+
+final _attachThreadInput = _user32
+    .lookupFunction<_AttachThreadInputNative, _AttachThreadInputDart>(
+      'AttachThreadInput',
+    );
+
+final _setForegroundWindow = _user32
+    .lookupFunction<_SetForegroundWindowNative, _SetForegroundWindowDart>(
+      'SetForegroundWindow',
+    );
+
+final _setWindowPos = _user32
+    .lookupFunction<_SetWindowPosNative, _SetWindowPosDart>('SetWindowPos');
+
+final _getCurrentThreadId = _kernel32
+    .lookupFunction<_GetCurrentThreadIdNative, _GetCurrentThreadIdDart>(
+      'GetCurrentThreadId',
+    );
+
+final _findWindow = _user32.lookupFunction<_FindWindowNative, _FindWindowDart>(
+  'FindWindowA',
+);
+
+/// 使用 Win32 API 强制将当前应用窗口激活到前台。
+///
+/// 两层策略：
+/// 1. AttachThreadInput — 将当前线程附加到前台线程的输入队列，
+///    使 SetForegroundWindow 不被系统拒绝。
+/// 2. TOPMOST → NOTOPMOST — 先置顶再取消，强制 Z-order 到最上层。
+void _forceActivateWindow() {
+  // 找到 Flutter 主窗口句柄（FlutterWindow 类名固定为 FLUTTER_RUNNER_WIN32_WINDOW）
+  final className = 'FLUTTER_RUNNER_WIN32_WINDOW'.toNativeUtf8();
+  final hwnd = _findWindow(className.cast(), Pointer.fromAddress(0));
+  calloc.free(className);
+
+  if (hwnd == 0) return;
+
+  final foregroundHwnd = _getForegroundWindow();
+
+  if (foregroundHwnd != 0 && foregroundHwnd != hwnd) {
+    // 获取前台窗口的线程 ID
+    final pidPtr = calloc<Uint32>();
+    final foregroundThreadId = _getWindowThreadProcessId(
+      foregroundHwnd,
+      pidPtr,
+    );
+    final currentThreadId = _getCurrentThreadId();
+    calloc.free(pidPtr);
+
+    // 附加到前台线程的输入队列，使 SetForegroundWindow 被系统接受
+    if (foregroundThreadId != currentThreadId) {
+      _attachThreadInput(currentThreadId, foregroundThreadId, 1);
+      _setForegroundWindow(hwnd);
+      _attachThreadInput(currentThreadId, foregroundThreadId, 0);
+    } else {
+      _setForegroundWindow(hwnd);
+    }
+  }
+
+  // 兜底：TOPMOST → NOTOPMOST 强制 Z-order 刷新
+  _setWindowPos(
+    hwnd,
+    _hwndTopmost,
+    0,
+    0,
+    0,
+    0,
+    _swpNoMove | _swpNoSize | _swpShowWindow,
+  );
+  _setWindowPos(
+    hwnd,
+    _hwndNotopmost,
+    0,
+    0,
+    0,
+    0,
+    _swpNoMove | _swpNoSize | _swpShowWindow,
+  );
 }

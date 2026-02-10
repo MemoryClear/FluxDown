@@ -18,7 +18,6 @@ import 'src/services/tray_service.dart';
 import 'src/theme/app_theme.dart';
 import 'src/theme/theme_provider.dart';
 import 'src/windows/download_complete_window.dart';
-import 'src/windows/quick_download_window.dart';
 
 Future<void> main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -45,11 +44,7 @@ Future<void> main(List<String> args) async {
     // 导致主窗口隐藏到托盘后恢复时崩溃。
     // 子窗口应通过 WindowController 管理自身。
 
-    if (windowType == 'quick_download') {
-      runApp(
-        QuickDownloadApp(windowController: windowController, args: windowArgs),
-      );
-    } else if (windowType == 'download_complete') {
+    if (windowType == 'download_complete') {
       runApp(
         DownloadCompleteApp(
           windowController: windowController,
@@ -168,7 +163,7 @@ class _FluxDownAppState extends State<FluxDownApp> with WindowListener {
     // 初始化外部下载服务 — 监听浏览器扩展的下载请求
     ExternalDownloadService.init(
       settingsProvider: _settingsForExternal,
-      themeProvider: themeProvider,
+      navigatorKey: _navigatorKey,
     );
     // 请求加载配置，确保 settingsProvider 有默认保存目录等数据
     _settingsForExternal.requestConfig();

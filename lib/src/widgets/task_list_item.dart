@@ -15,6 +15,11 @@ class TaskListItem extends StatefulWidget {
   final VoidCallback onResume;
   final void Function({required bool deleteFiles}) onDelete;
 
+  /// 管理模式相关
+  final bool isManageMode;
+  final bool isChecked;
+  final VoidCallback? onToggleChecked;
+
   const TaskListItem({
     super.key,
     required this.task,
@@ -23,6 +28,9 @@ class TaskListItem extends StatefulWidget {
     required this.onPause,
     required this.onResume,
     required this.onDelete,
+    this.isManageMode = false,
+    this.isChecked = false,
+    this.onToggleChecked,
   });
 
   @override
@@ -46,19 +54,23 @@ class _TaskListItemState extends State<TaskListItem> {
   @override
   Widget build(BuildContext context) {
     final c = AppColors.of(context);
+    final isManage = widget.isManageMode;
+    final isChecked = widget.isChecked;
 
     return MouseRegion(
       onEnter: (_) => setState(() => _isHovered = true),
       onExit: (_) => setState(() => _isHovered = false),
       cursor: SystemMouseCursors.click,
       child: GestureDetector(
-        onTap: widget.onTap,
-        onSecondaryTapDown: _showContextMenu,
+        onTap: isManage ? widget.onToggleChecked : widget.onTap,
+        onSecondaryTapDown: isManage ? null : _showContextMenu,
         child: Container(
           height: 64,
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
           decoration: BoxDecoration(
-            color: widget.isSelected
+            color: isManage && isChecked
+                ? c.accentBg
+                : widget.isSelected
                 ? c.accentBg
                 : _isHovered
                 ? c.hoverBg
@@ -67,6 +79,19 @@ class _TaskListItemState extends State<TaskListItem> {
           ),
           child: Row(
             children: [
+              // 管理模式下显示复选框
+              if (isManage) ...[
+                SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: Icon(
+                    isChecked ? LucideIcons.squareCheck : LucideIcons.square,
+                    size: 16,
+                    color: isChecked ? c.accent : c.textMuted,
+                  ),
+                ),
+                const SizedBox(width: 10),
+              ],
               Expanded(child: _buildFileInfo(c)),
               SizedBox(width: 150, child: _buildProgress(c)),
               SizedBox(width: 100, child: _buildSpeed(c)),
@@ -419,6 +444,58 @@ void showDeleteConfirmDialog(
         deleteFiles
             ? '确定要删除任务「${task.fileName}」并删除已下载的文件吗？此操作不可撤销。'
             : '确定要删除任务「${task.fileName}」吗？已下载的文件将保留在磁盘上。',
+        style: TextStyle(fontSize: 13, color: c.textSecondary),
+      ),
+      actions: [
+        ShadButton.outline(
+          onPressed: () => Navigator.of(ctx).pop(),
+          child: Text(
+            '取消',
+            style: TextStyle(fontSize: 13, color: c.textPrimary),
+          ),
+        ),
+        ShadButton.destructive(
+          onPressed: () {
+            Navigator.of(ctx).pop();
+            onConfirm();
+          },
+          child: Text(
+            deleteFiles ? '删除任务和文件' : '删除任务',
+            style: const TextStyle(fontSize: 13, color: Colors.white),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+// =============================================================================
+// 批量删除确认对话框
+// =============================================================================
+
+void showBatchDeleteConfirmDialog(
+  BuildContext context, {
+  required int count,
+  required bool deleteFiles,
+  required VoidCallback onConfirm,
+}) {
+  if (!context.mounted) return;
+  final c = AppColors.of(context);
+  showShadDialog(
+    context: context,
+    builder: (ctx) => ShadDialog(
+      title: Text(
+        deleteFiles ? '批量删除任务和文件' : '批量删除任务',
+        style: TextStyle(
+          fontSize: 16,
+          fontWeight: FontWeight.w600,
+          color: c.textPrimary,
+        ),
+      ),
+      description: Text(
+        deleteFiles
+            ? '确定要删除选中的 $count 个任务并删除已下载的文件吗？此操作不可撤销。'
+            : '确定要删除选中的 $count 个任务吗？已下载的文件将保留在磁盘上。',
         style: TextStyle(fontSize: 13, color: c.textSecondary),
       ),
       actions: [

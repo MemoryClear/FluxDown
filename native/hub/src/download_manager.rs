@@ -5,6 +5,7 @@ use futures_util::FutureExt;
 use reqwest::Client;
 use rinf::RustSignal;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -58,6 +59,10 @@ pub struct DownloadManager {
     db: Db,
     client: Client,
     active_tokens: HashMap<String, (CancellationToken, u64)>,
+    /// JoinHandles for spawned download tasks — used by `delete_task` to await
+    /// task exit, ensuring file handles and network connections are released
+    /// before we attempt to remove files from disk.
+    active_handles: HashMap<String, JoinHandle<()>>,
     /// Monotonically increasing counter to distinguish different spawns of
     /// the same task_id.  Prevents a stale `TaskDone` from an old spawn
     /// from accidentally removing the token of a newer spawn.
@@ -85,6 +90,7 @@ impl DownloadManager {
             db,
             client,
             active_tokens: HashMap::new(),
+            active_handles: HashMap::new(),
             generation: 0,
             progress_tx: tx,
             progress_rx: Some(rx),
@@ -172,6 +178,7 @@ impl DownloadManager {
         if let Some((_, stored_gen)) = self.active_tokens.get(task_id)
             && *stored_gen == generation {
                 self.active_tokens.remove(task_id);
+                self.active_handles.remove(task_id);
             }
         // A slot freed up — try to start queued tasks.
         self.drain_queue().await;
@@ -329,7 +336,7 @@ impl DownloadManager {
         let panic_task_id = task_id.clone();
         let panic_db = self.db.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let result = if use_ftp {
                 std::panic::AssertUnwindSafe(ftp_downloader::run_ftp_download(params))
                     .catch_unwind()
@@ -365,6 +372,7 @@ impl DownloadManager {
 
             let _ = done_tx.send(TaskDone { task_id: panic_task_id, generation: spawn_gen }).await;
         });
+        self.active_handles.insert(task_id, handle);
     }
 
     pub async fn pause_task(&mut self, task_id: &str) {
@@ -492,7 +500,7 @@ impl DownloadManager {
         let panic_task_id = tid.clone();
         let panic_db = self.db.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let result = if use_ftp {
                 std::panic::AssertUnwindSafe(ftp_downloader::run_ftp_download(params))
                     .catch_unwind()
@@ -528,6 +536,7 @@ impl DownloadManager {
 
             let _ = done_tx.send(TaskDone { task_id: panic_task_id, generation: spawn_gen }).await;
         });
+        self.active_handles.insert(tid, handle);
     }
 
     pub async fn cancel_task(&mut self, task_id: &str) {
@@ -565,20 +574,35 @@ impl DownloadManager {
     }
 
     /// Delete task record and optionally its files on disk.
+    ///
+    /// If the task is actively downloading, the cancellation token is triggered
+    /// first and we **await** the spawned task's `JoinHandle` so that all
+    /// network connections and file handles are fully released before we
+    /// attempt to remove files.  A 5-second timeout prevents indefinite hangs.
     pub async fn delete_task(&mut self, task_id: &str, delete_files: bool) {
         // Remove from pending queue if queued.
         if let Some(pos) = self.pending_queue.iter().position(|q| q.task_id == task_id) {
             self.pending_queue.remove(pos);
         }
 
+        // Cancel the active download (if any) and wait for the spawned task
+        // to exit, ensuring all network sockets and file handles are closed.
         if let Some((token, _gen)) = self.active_tokens.remove(task_id) {
             token.cancel();
+        }
+        if let Some(handle) = self.active_handles.remove(task_id) {
+            // Timeout guard: don't block forever if the task misbehaves.
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                handle,
+            )
+            .await;
         }
 
         if let Ok(Some(t)) = self.db.load_task_by_id(task_id).await {
             let path = PathBuf::from(&t.save_dir).join(&t.file_name);
-            // Always clean up the in-progress temp file (.x_down)
-            let temp_path = PathBuf::from(format!("{}.x_down", path.display()));
+            // Always clean up the in-progress temp file (.fdownloading)
+            let temp_path = PathBuf::from(format!("{}{}", path.display(), downloader::TEMP_EXT));
             let _ = tokio::fs::remove_file(&temp_path).await;
 
             if delete_files {

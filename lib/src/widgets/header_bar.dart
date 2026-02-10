@@ -680,8 +680,7 @@ class _WindowButtonState extends State<_WindowButton> {
       onExit: (_) => setState(() => _isHovered = false),
       child: GestureDetector(
         onTap: widget.onPressed,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 120),
+        child: Container(
           width: 40,
           height: 48,
           color: _isHovered
@@ -734,8 +733,7 @@ class _ToolButtonState extends State<_ToolButton> {
       onExit: (_) => setState(() => _isHovered = false),
       child: GestureDetector(
         onTap: widget.onPressed,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 120),
+        child: Container(
           width: 40,
           height: 48,
           decoration: BoxDecoration(
@@ -755,6 +753,8 @@ class _ToolButtonState extends State<_ToolButton> {
     );
     if (widget.tooltip != null) {
       button = ShadTooltip(
+        waitDuration: const Duration(milliseconds: 400),
+        showDuration: Duration.zero,
         builder: (_) => Text(widget.tooltip!),
         child: button,
       );

@@ -92,6 +92,7 @@ class TaskList extends StatelessWidget {
 
   /// 列表 + 列表下方空白区域均支持右键菜单
   Widget _buildListWithBlankArea(BuildContext context, List tasks) {
+    final isManage = controller.isManageMode;
     return CustomScrollView(
       slivers: [
         SliverList(
@@ -108,6 +109,9 @@ class TaskList extends StatelessWidget {
               onResume: () => controller.resumeTask(task.id),
               onDelete: ({required bool deleteFiles}) =>
                   controller.deleteTask(task.id, deleteFiles: deleteFiles),
+              isManageMode: isManage,
+              isChecked: controller.checkedTaskIds.contains(task.id),
+              onToggleChecked: () => controller.toggleTaskChecked(task.id),
             );
           }, childCount: tasks.length),
         ),
@@ -115,8 +119,9 @@ class TaskList extends StatelessWidget {
         SliverFillRemaining(
           hasScrollBody: false,
           child: GestureDetector(
-            onSecondaryTapDown: (details) =>
-                _showBlankAreaMenu(context, details),
+            onSecondaryTapDown: isManage
+                ? null
+                : (details) => _showBlankAreaMenu(context, details),
             behavior: HitTestBehavior.opaque,
             child: const SizedBox.expand(),
           ),
@@ -150,6 +155,9 @@ class TaskList extends StatelessWidget {
 
   Widget _buildHeader(BuildContext context) {
     final c = AppColors.of(context);
+    final isManage = controller.isManageMode;
+    final hasTasks = controller.filteredTasks.isNotEmpty;
+
     return Container(
       height: 36,
       padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -159,6 +167,11 @@ class TaskList extends StatelessWidget {
       ),
       child: Row(
         children: [
+          // 管理模式下列头显示全选复选框
+          if (isManage) ...[
+            _HeaderCheckbox(controller: controller),
+            const SizedBox(width: 10),
+          ],
           Expanded(
             child: Text(
               '文件名',
@@ -206,7 +219,118 @@ class TaskList extends StatelessWidget {
               ),
             ),
           ),
+          // 管理按钮
+          if (hasTasks && !isManage)
+            _ManageToggleButton(onTap: () => controller.toggleManageMode()),
         ],
+      ),
+    );
+  }
+}
+
+// =============================================================================
+// 列头全选复选框
+// =============================================================================
+
+class _HeaderCheckbox extends StatefulWidget {
+  final DownloadController controller;
+
+  const _HeaderCheckbox({required this.controller});
+
+  @override
+  State<_HeaderCheckbox> createState() => _HeaderCheckboxState();
+}
+
+class _HeaderCheckboxState extends State<_HeaderCheckbox> {
+  bool _isHovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppColors.of(context);
+    final allChecked = widget.controller.isAllFilteredChecked;
+
+    return MouseRegion(
+      onEnter: (_) => setState(() => _isHovered = true),
+      onExit: (_) => setState(() => _isHovered = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: () {
+          if (allChecked) {
+            widget.controller.deselectAll();
+          } else {
+            widget.controller.selectAllFiltered();
+          }
+        },
+        child: SizedBox(
+          width: 20,
+          height: 20,
+          child: Icon(
+            allChecked ? LucideIcons.squareCheck : LucideIcons.square,
+            size: 16,
+            color: allChecked
+                ? c.accent
+                : _isHovered
+                ? c.textSecondary
+                : c.textMuted,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// =============================================================================
+// 管理按钮（进入管理模式的入口）
+// =============================================================================
+
+class _ManageToggleButton extends StatefulWidget {
+  final VoidCallback onTap;
+
+  const _ManageToggleButton({required this.onTap});
+
+  @override
+  State<_ManageToggleButton> createState() => _ManageToggleButtonState();
+}
+
+class _ManageToggleButtonState extends State<_ManageToggleButton> {
+  bool _isHovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppColors.of(context);
+
+    return MouseRegion(
+      onEnter: (_) => setState(() => _isHovered = true),
+      onExit: (_) => setState(() => _isHovered = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: Container(
+          height: 24,
+          padding: const EdgeInsets.symmetric(horizontal: 6),
+          decoration: BoxDecoration(
+            color: _isHovered ? c.hoverBg : Colors.transparent,
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                LucideIcons.listChecks,
+                size: 13,
+                color: _isHovered ? c.textPrimary : c.textMuted,
+              ),
+              const SizedBox(width: 3),
+              Text(
+                '管理',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: _isHovered ? c.textPrimary : c.textMuted,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

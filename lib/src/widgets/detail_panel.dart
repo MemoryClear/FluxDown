@@ -531,7 +531,7 @@ class DetailPanel extends StatelessWidget {
               onPressed: () =>
                   controller.deleteTask(task.id, deleteFiles: true),
               child: const Text(
-                '删除',
+                '删除任务和文件',
                 style: TextStyle(fontSize: 13, color: Colors.white),
               ),
             ),
