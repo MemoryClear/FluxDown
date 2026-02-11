@@ -7,7 +7,12 @@ import Footer from "../components/Footer";
 
 <Layout title="Feedback - FluxDown" description="Submit your feedback, feature requests, or bug reports for FluxDown.">
   <FloatingNavbar client:load />
-  <main class="pt-24">
+  <main class="pt-24 relative">
+    <!-- Background ambiance -->
+    <div class="absolute inset-0 -z-10 overflow-hidden pointer-events-none">
+      <div class="absolute top-0 left-1/3 w-[500px] h-[300px] bg-brand-cyan/[0.03] blur-[120px] rounded-full"></div>
+      <div class="absolute bottom-0 right-1/4 w-[400px] h-[300px] bg-brand-blue/[0.03] blur-[100px] rounded-full"></div>
+    </div>
     <FeedbackSection client:load />
   </main>
   <Footer client:load />

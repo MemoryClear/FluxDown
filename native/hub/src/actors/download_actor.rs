@@ -7,9 +7,9 @@ use crate::db::Db;
 use crate::download_manager::{self, DownloadManager, TaskDone};
 use crate::native_messaging::{self};
 use crate::signals::{
-    CheckForUpdate, ConfigEntry, ConfigLoaded, ConfirmExternalDownload, ControlTask, CreateTask,
-    DownloadUpdate, ExternalDownloadRequest, InstallUpdate, RequestAllTasks, RequestConfig,
-    SaveConfig, UpdateCheckResult,
+    BatchCreateTask, CheckForUpdate, ConfigEntry, ConfigLoaded, ConfirmExternalDownload,
+    ControlTask, CreateTask, DownloadUpdate, ExternalDownloadRequest, InstallUpdate,
+    RequestAllTasks, RequestConfig, SaveConfig, UpdateCheckResult,
 };
 use crate::updater;
 
@@ -98,6 +98,7 @@ pub async fn run(db_dir: PathBuf) {
     };
 
     let create_recv = CreateTask::get_dart_signal_receiver();
+    let batch_create_recv = BatchCreateTask::get_dart_signal_receiver();
     let control_recv = ControlTask::get_dart_signal_receiver();
     let all_recv = RequestAllTasks::get_dart_signal_receiver();
     let config_save_recv = SaveConfig::get_dart_signal_receiver();
@@ -118,6 +119,18 @@ pub async fn run(db_dir: PathBuf) {
                 manager
                     .create_task(msg.url, msg.save_dir, msg.file_name, msg.segments, msg.cookies)
                     .await;
+            }
+            Some(signal) = batch_create_recv.recv() => {
+                let msg = signal.message;
+                rinf::debug_print!(
+                    "[actor] batch create: {} URLs, save_dir={}, segments={}",
+                    msg.urls.len(), msg.save_dir, msg.segments,
+                );
+                for url in msg.urls {
+                    manager
+                        .create_task(url, msg.save_dir.clone(), String::new(), msg.segments, String::new())
+                        .await;
+                }
             }
             Some(signal) = control_recv.recv() => {
                 let msg = signal.message;

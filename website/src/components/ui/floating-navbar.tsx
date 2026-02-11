@@ -19,6 +19,7 @@ export function FloatingNavbar({
   const [scrolled, setScrolled] = useState(false);
   const [lastScrollY, setLastScrollY] = useState(0);
   const [isLight, setIsLight] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
   const { locale, setLocale, t } = useLocale();
 
   const navItems = [
@@ -71,7 +72,7 @@ export function FloatingNavbar({
           exit={{ y: -100, opacity: 0 }}
           transition={{ duration: 0.3 }}
           className={cn(
-            "fixed top-4 inset-x-0 z-50 mx-auto max-w-fit",
+            "fixed top-4 inset-x-4 sm:inset-x-0 z-50 sm:mx-auto sm:max-w-fit",
             className,
           )}
         >
@@ -83,6 +84,20 @@ export function FloatingNavbar({
                 : "border-dark-border/50 bg-dark-surface1/60 backdrop-blur-md",
             )}
           >
+            {/* Mobile hamburger — visible only on small screens */}
+            <button
+              onClick={() => setMobileOpen((v) => !v)}
+              className="flex sm:hidden items-center justify-center w-7 h-7 rounded-full hover:bg-dark-surface3/50 transition-colors duration-200 cursor-pointer"
+              aria-label="Toggle menu"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-dark-text-secondary">
+                {mobileOpen
+                  ? <><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></>
+                  : <><line x1="4" y1="7" x2="20" y2="7" /><line x1="4" y1="12" x2="20" y2="12" /><line x1="4" y1="17" x2="20" y2="17" /></>
+                }
+              </svg>
+            </button>
+
             {/* Logo */}
             <a href="/" className="flex items-center gap-2 px-3 py-1">
               <img src="/logo.svg" alt="FluxDown" className="h-6 w-6" />
@@ -93,7 +108,7 @@ export function FloatingNavbar({
             </a>
 
             {/* Separator */}
-            <div className="h-4 w-px bg-dark-border mx-1" />
+            <div className="hidden sm:block h-4 w-px bg-dark-border mx-1" />
 
             {/* Nav links — hidden on very small screens */}
             {navItems.map((item) => (
@@ -105,6 +120,9 @@ export function FloatingNavbar({
                 {item.name}
               </a>
             ))}
+
+            {/* Spacer — pushes lang/theme to right on mobile */}
+            <div className="flex-1 sm:hidden" />
 
             {/* Language toggle */}
             <button
@@ -137,7 +155,7 @@ export function FloatingNavbar({
             {/* CTA */}
             <a
               href="/#download"
-              className="inline-flex items-center gap-1.5 rounded-full bg-brand-blue px-4 py-1.5 text-xs font-semibold text-white hover:bg-brand-blue/90 transition-colors"
+              className="hidden sm:inline-flex items-center gap-1.5 rounded-full bg-brand-blue px-4 py-1.5 text-xs font-semibold text-white hover:bg-brand-blue/90 transition-colors"
             >
               <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -147,6 +165,45 @@ export function FloatingNavbar({
               {t("nav.download")}
             </a>
           </div>
+
+          {/* Mobile dropdown menu */}
+          <AnimatePresence>
+            {mobileOpen && (
+              <motion.div
+                initial={{ opacity: 0, y: -8, height: 0 }}
+                animate={{ opacity: 1, y: 0, height: "auto" }}
+                exit={{ opacity: 0, y: -8, height: 0 }}
+                transition={{ duration: 0.2, ease: "easeOut" }}
+                className="sm:hidden mt-1 overflow-hidden rounded-2xl border border-dark-border bg-dark-bg/90 backdrop-blur-xl shadow-lg shadow-black/20"
+              >
+                <div className="flex flex-col p-2 gap-0.5">
+                  {navItems.map((item) => (
+                    <a
+                      key={item.link}
+                      href={item.link}
+                      onClick={() => setMobileOpen(false)}
+                      className="text-sm font-medium text-dark-text-secondary hover:text-dark-text px-4 py-2.5 rounded-xl hover:bg-dark-surface2 transition-colors"
+                    >
+                      {item.name}
+                    </a>
+                  ))}
+                  <div className="h-px bg-dark-border mx-2 my-1" />
+                  <a
+                    href="/#download"
+                    onClick={() => setMobileOpen(false)}
+                    className="flex items-center justify-center gap-2 rounded-xl bg-brand-blue px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-blue/90 transition-colors"
+                  >
+                    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                      <polyline points="7 10 12 15 17 10" />
+                      <line x1="12" y1="15" x2="12" y2="3" />
+                    </svg>
+                    {t("nav.download")}
+                  </a>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </motion.header>
       )}
     </AnimatePresence>

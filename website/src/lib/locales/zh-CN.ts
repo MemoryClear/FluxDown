@@ -124,6 +124,9 @@ const zhCN: Messages = {
   "dl.windows": "Windows",
   "dl.macos": "macOS",
   "dl.linux": "Linux",
+  "dl.web": "Web 版",
+  "dl.webArch": "浏览器端",
+  "dl.mobile": "移动端",
   "dl.availableNow": "立即可用",
   "dl.comingSoon": "即将推出",
   "dl.downloadBtn": "下载",
@@ -136,6 +139,12 @@ const zhCN: Messages = {
     "拦截浏览器下载并发送到 FluxDown，支持 Chrome 和 Firefox。",
   "dl.downloadExtension": "下载扩展",
   "dl.totalDownloads": "次下载",
+  "dl.notifyMe": "上线通知",
+  "dl.emailPlaceholder": "你的邮箱地址",
+  "dl.subscribing": "订阅中...",
+  "dl.subscribed": "我们会通知你！",
+  "dl.alreadySubscribed": "已经订阅过了",
+  "dl.subscribeError": "失败，请重试",
 
   // Feedback
   "fb.badge": "\u53cd\u9988\u5efa\u8bae",

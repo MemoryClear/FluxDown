@@ -14,6 +14,14 @@ pub struct CreateTask {
     pub cookies: String, // browser cookies for authenticated downloads
 }
 
+/// Batch create multiple download tasks at once
+#[derive(Deserialize, DartSignal)]
+pub struct BatchCreateTask {
+    pub urls: Vec<String>, // list of URLs (http/https/ftp/magnet)
+    pub save_dir: String,
+    pub segments: i32, // 0 = auto, shared across all tasks
+}
+
 /// Control an existing task (pause/resume/cancel/delete)
 #[derive(Deserialize, DartSignal)]
 pub struct ControlTask {

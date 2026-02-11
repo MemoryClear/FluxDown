@@ -1,6 +1,6 @@
-import { useState, useEffect } from "react";
-import { motion } from "framer-motion";
-import { Monitor, Apple, Terminal, Download, Check, Loader2, ChevronDown, Chrome, Puzzle, TrendingUp } from "lucide-react";
+import { useState, useEffect, useCallback } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { Monitor, Apple, Terminal, Globe, Smartphone, Download, Check, Loader2, ChevronDown, Puzzle, TrendingUp, Bell, CheckCircle2, AlertCircle } from "lucide-react";
 import { LampEffect } from "@/components/ui/lamp-effect";
 import { useLocale } from "@/lib/i18n";
 
@@ -51,10 +51,36 @@ export default function DownloadSection() {
       .finally(() => setLoading(false));
   }, []);
 
+  const [subscribeTarget, setSubscribeTarget] = useState<string | null>(null);
+  const [subscribeEmail, setSubscribeEmail] = useState("");
+  const [subscribeStatus, setSubscribeStatus] = useState<"idle" | "loading" | "success" | "duplicate" | "error">("idle");
+
+  const handleSubscribe = useCallback(async (platform: string) => {
+    if (!subscribeEmail.trim()) return;
+    setSubscribeStatus("loading");
+    try {
+      const res = await fetch("/api/subscribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: subscribeEmail.trim(), platform }),
+      });
+      if (res.status === 429) { setSubscribeStatus("error"); return; }
+      if (!res.ok) { setSubscribeStatus("error"); return; }
+      const data = await res.json();
+      setSubscribeStatus(data.message === "already_subscribed" ? "duplicate" : "success");
+      if (data.message !== "already_subscribed") setSubscribeEmail("");
+      setTimeout(() => { setSubscribeStatus("idle"); setSubscribeTarget(null); }, 4000);
+    } catch {
+      setSubscribeStatus("error");
+    }
+  }, [subscribeEmail]);
+
   const platforms = [
-    { name: t("dl.windows"), icon: Monitor, arch: "x64", available: true, primary: true, badge: t("dl.availableNow") },
-    { name: t("dl.macos"), icon: Apple, arch: "Apple Silicon", available: false, primary: false, badge: t("dl.comingSoon") },
-    { name: t("dl.linux"), icon: Terminal, arch: "x64", available: false, primary: false, badge: t("dl.comingSoon") },
+    { key: "windows", name: t("dl.windows"), icon: Monitor, arch: "x64", available: true, primary: true, badge: t("dl.availableNow") },
+    { key: "macos", name: t("dl.macos"), icon: Apple, arch: "Apple Silicon", available: false, primary: false, badge: t("dl.comingSoon") },
+    { key: "linux", name: t("dl.linux"), icon: Terminal, arch: "x64", available: false, primary: false, badge: t("dl.comingSoon") },
+    { key: "web", name: t("dl.web"), icon: Globe, arch: t("dl.webArch"), available: false, primary: false, badge: t("dl.comingSoon") },
+    { key: "mobile", name: t("dl.mobile"), icon: Smartphone, arch: "Android / iOS", available: false, primary: false, badge: t("dl.comingSoon") },
   ];
 
   return (
@@ -82,7 +108,7 @@ export default function DownloadSection() {
 
           {/* Platform cards */}
           <motion.div
-            className="grid grid-cols-1 sm:grid-cols-3 gap-5 max-w-4xl mx-auto mb-16"
+            className="flex flex-wrap justify-center gap-5 max-w-4xl mx-auto mb-16"
             initial={{ opacity: 0, y: 30 }}
             whileInView={{ opacity: 1, y: 0 }}
             viewport={{ once: true }}
@@ -97,20 +123,32 @@ export default function DownloadSection() {
                   whileInView={{ opacity: 1, y: 0 }}
                   viewport={{ once: true }}
                   transition={{ delay: 0.1 * i, duration: 0.5 }}
-                  className={`relative group rounded-xl border p-6 text-center transition-all duration-300 ${
+                  className={`relative group rounded-xl border p-6 text-center w-full sm:w-[calc(33.333%-14px)] ${
                     p.primary
-                      ? "border-brand-blue/30 bg-gradient-to-b from-dark-surface1 to-dark-surface2 hover:border-brand-blue/50"
-                      : "border-dark-border bg-dark-surface1 hover:bg-dark-surface2"
+                      ? "border-brand-blue/30 bg-gradient-to-b from-dark-surface1 to-dark-surface2 hover:border-brand-blue/50 transition-colors duration-300"
+                      : "border-dark-border/60 bg-dark-surface1 hover:-translate-y-1 hover:border-dark-text-muted/20 hover:shadow-lg hover:shadow-black/20 transition-all duration-300 ease-out"
                   }`}
                 >
-                  {p.primary && (
+                  {p.primary ? (
                     <div className="absolute -top-2.5 left-1/2 -translate-x-1/2 px-3 py-0.5 rounded-full bg-brand-blue text-[10px] font-semibold text-white flex items-center gap-1 whitespace-nowrap">
                       <Check className="w-3 h-3" />
                       {p.badge}
                     </div>
+                  ) : (
+                    <div className="absolute -top-2.5 left-1/2 -translate-x-1/2 px-3 py-0.5 rounded-full border border-dashed border-dark-text-muted/30 bg-dark-surface1 text-[10px] font-medium text-dark-text-muted flex items-center gap-1 whitespace-nowrap">
+                      {p.badge}
+                    </div>
                   )}
-                  <div className={`w-14 h-14 rounded-xl flex items-center justify-center mx-auto mb-4 ${p.primary ? "bg-gradient-to-br from-brand-sky to-brand-cyan" : "bg-dark-surface3"}`}>
-                    <Icon className={`w-7 h-7 ${p.primary ? "text-white" : "text-dark-text-muted"}`} />
+                  <div className={`w-14 h-14 rounded-xl flex items-center justify-center mx-auto mb-4 transition-all duration-300 ${
+                    p.primary
+                      ? "bg-gradient-to-br from-brand-sky to-brand-cyan"
+                      : "bg-dark-surface2 border border-dark-border/50 group-hover:border-brand-blue/20 group-hover:bg-gradient-to-br group-hover:from-brand-blue/10 group-hover:to-brand-cyan/5"
+                  }`}>
+                    <Icon className={`w-7 h-7 transition-colors duration-300 ${
+                      p.primary
+                        ? "text-white"
+                        : "text-dark-text-muted group-hover:text-brand-blue/70"
+                    }`} />
                   </div>
                   <h3 className="text-base font-semibold text-dark-text">{p.name}</h3>
                   <p className="text-xs text-dark-text-muted mt-1">{p.arch}</p>
@@ -175,8 +213,83 @@ export default function DownloadSection() {
                       )}
                     </div>
                   ) : (
-                    <div className="mt-4 inline-flex items-center justify-center gap-2 w-full rounded-lg border border-dark-border px-5 py-2.5 text-xs font-medium text-dark-text-muted">
-                      {t("dl.comingSoon")}
+                    <div className="mt-4 flex flex-col gap-2 w-full">
+                      <AnimatePresence mode="wait">
+                        {subscribeTarget === p.key ? (
+                          <motion.div
+                            key="subscribe-form"
+                            initial={{ opacity: 0, height: 0 }}
+                            animate={{ opacity: 1, height: "auto" }}
+                            exit={{ opacity: 0, height: 0 }}
+                            transition={{ duration: 0.2 }}
+                            className="flex flex-col gap-2"
+                          >
+                            {subscribeStatus === "success" ? (
+                              <div className="flex items-center justify-center gap-1.5 rounded-lg border border-success/30 bg-success/10 px-4 py-2.5 text-xs font-medium text-success">
+                                <CheckCircle2 className="w-3.5 h-3.5" />
+                                {t("dl.subscribed")}
+                              </div>
+                            ) : subscribeStatus === "duplicate" ? (
+                              <div className="flex items-center justify-center gap-1.5 rounded-lg border border-brand-blue/30 bg-brand-blue/10 px-4 py-2.5 text-xs font-medium text-brand-blue">
+                                <CheckCircle2 className="w-3.5 h-3.5" />
+                                {t("dl.alreadySubscribed")}
+                              </div>
+                            ) : (
+                              <>
+                                <div className="flex gap-1.5">
+                                  <input
+                                    type="email"
+                                    value={subscribeEmail}
+                                    onChange={(e) => setSubscribeEmail(e.target.value)}
+                                    onKeyDown={(e) => e.key === "Enter" && handleSubscribe(p.key)}
+                                    placeholder={t("dl.emailPlaceholder")}
+                                    disabled={subscribeStatus === "loading"}
+                                    className="flex-1 min-w-0 rounded-lg border border-dark-border bg-dark-surface2 px-3 py-2 text-xs text-dark-text placeholder:text-dark-text-muted/50 focus:outline-none focus:border-brand-blue/50 disabled:opacity-50 transition-colors"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => handleSubscribe(p.key)}
+                                    disabled={subscribeStatus === "loading" || !subscribeEmail.trim()}
+                                    className="flex-shrink-0 rounded-lg bg-brand-blue px-3 py-2 text-xs font-semibold text-white hover:bg-brand-blue/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                  >
+                                    {subscribeStatus === "loading" ? (
+                                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                    ) : (
+                                      <Bell className="w-3.5 h-3.5" />
+                                    )}
+                                  </button>
+                                </div>
+                                {subscribeStatus === "error" && (
+                                  <div className="flex items-center justify-center gap-1 text-[10px] text-red-400">
+                                    <AlertCircle className="w-3 h-3" />
+                                    {t("dl.subscribeError")}
+                                  </div>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => { setSubscribeTarget(null); setSubscribeStatus("idle"); }}
+                                  className="text-[10px] text-dark-text-muted hover:text-dark-text-secondary transition-colors"
+                                >
+                                  {t("dl.comingSoon")}
+                                </button>
+                              </>
+                            )}
+                          </motion.div>
+                        ) : (
+                          <motion.button
+                            key="notify-btn"
+                            type="button"
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            exit={{ opacity: 0 }}
+                            onClick={() => { setSubscribeTarget(p.key); setSubscribeStatus("idle"); setSubscribeEmail(""); }}
+                            className="inline-flex items-center justify-center gap-2 w-full rounded-lg border border-dashed border-dark-text-muted/30 px-5 py-2.5 text-xs font-medium text-dark-text-muted hover:border-brand-blue/40 hover:text-brand-blue/80 transition-colors duration-200"
+                          >
+                            <Bell className="w-3.5 h-3.5" />
+                            {t("dl.notifyMe")}
+                          </motion.button>
+                        )}
+                      </AnimatePresence>
                     </div>
                   )}
                 </motion.div>

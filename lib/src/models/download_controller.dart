@@ -287,6 +287,23 @@ class DownloadController extends ChangeNotifier {
     ).sendSignalToRust();
   }
 
+  /// 批量创建下载任务（多个 URL 共享同一保存目录和线程数）
+  void batchCreateTask({
+    required List<String> urls,
+    required String saveDir,
+    int segments = 0,
+  }) {
+    logInfo(
+      _tag,
+      'batchCreateTask: ${urls.length} urls, dir=$saveDir, seg=$segments',
+    );
+    BatchCreateTask(
+      urls: urls,
+      saveDir: saveDir,
+      segments: segments,
+    ).sendSignalToRust();
+  }
+
   void pauseTask(String taskId) {
     logInfo(_tag, 'pauseTask: $taskId');
     // 乐观更新：立即切换到 paused 状态，防止用户快速重复点击

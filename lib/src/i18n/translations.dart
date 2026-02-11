@@ -222,6 +222,20 @@ class S {
   String get fromBrowserExtension =>
       _t('来自浏览器扩展的下载请求', 'Download request from browser extension');
 
+  // Batch download
+  String get batchDownloadDesc => _t(
+    '每行一个链接，支持 HTTP / FTP / 磁力链接',
+    'One URL per line, supports HTTP / FTP / Magnet',
+  );
+  String get batchUrls => _t('下载链接列表', 'URL List');
+  String get batchUrlPlaceholder => _t(
+    '每行一个链接，例如：\nhttps://example.com/file1.zip\nhttps://example.com/file2.zip\nmagnet:?xt=urn:btih:...',
+    'One URL per line, e.g.:\nhttps://example.com/file1.zip\nhttps://example.com/file2.zip\nmagnet:?xt=urn:btih:...',
+  );
+  String urlCount(int count) => _t('$count 个链接', '$count URLs');
+  String startBatchDownload(int count) =>
+      _t('下载 $count 个文件', 'Download $count files');
+
   // ─────────────────────────────────────────────
   // StatusBar
   // ─────────────────────────────────────────────

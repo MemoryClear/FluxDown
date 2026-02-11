@@ -112,6 +112,9 @@ const en = {
   "dl.windows": "Windows",
   "dl.macos": "macOS",
   "dl.linux": "Linux",
+  "dl.web": "Web",
+  "dl.webArch": "Browser-based",
+  "dl.mobile": "Mobile",
   "dl.availableNow": "Available Now",
   "dl.comingSoon": "Coming Soon",
   "dl.downloadBtn": "Download",
@@ -123,6 +126,12 @@ const en = {
   "dl.extensionDesc": "Intercept browser downloads and send them to FluxDown. Supports Chrome and Firefox.",
   "dl.downloadExtension": "Download Extension",
   "dl.totalDownloads": "total downloads",
+  "dl.notifyMe": "Notify Me",
+  "dl.emailPlaceholder": "Your email address",
+  "dl.subscribing": "Subscribing...",
+  "dl.subscribed": "You'll be notified!",
+  "dl.alreadySubscribed": "Already subscribed",
+  "dl.subscribeError": "Failed, try again",
 
   // Feedback
   "fb.badge": "Feedback",

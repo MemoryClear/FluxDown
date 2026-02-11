@@ -3,6 +3,69 @@ import { BentoGrid, BentoGridItem } from "@/components/ui/bento-grid";
 import { Cpu, Layers, Globe, Gauge, RefreshCw, Chrome } from "lucide-react";
 import { useLocale } from "@/lib/i18n";
 
+/** Mini terminal output — Rust engine card */
+const RustTerminal = () => (
+  <div className="rounded-lg border border-dark-border bg-dark-bg p-2.5 font-mono text-[10px] leading-relaxed overflow-hidden">
+    <div className="text-dark-text-muted">$ cargo build --release</div>
+    <div className="text-success">   Compiling hub v0.1.0</div>
+    <div className="text-success">   Compiling tokio v1.42</div>
+    <div className="text-brand-sky">    Finished release [optimized]</div>
+  </div>
+);
+
+/** Protocol badges — Multi-Protocol card */
+const ProtocolBadges = () => (
+  <div className="flex flex-wrap gap-1.5">
+    {[
+      { name: "HTTP/2", color: "text-brand-sky bg-brand-sky/10 border-brand-sky/20" },
+      { name: "HTTPS", color: "text-success bg-success/10 border-success/20" },
+      { name: "FTP", color: "text-warning bg-warning/10 border-warning/20" },
+      { name: "HTTP/3", color: "text-dark-text-muted bg-dark-surface3 border-dark-border", dashed: true },
+    ].map((p) => (
+      <span key={p.name} className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium border ${p.color} ${"dashed" in p ? "border-dashed" : ""}`}>
+        {p.name}
+      </span>
+    ))}
+  </div>
+);
+
+/** Speed gauge bar — Speed Control card */
+const SpeedGauge = () => (
+  <div className="rounded-lg border border-dark-border bg-dark-bg p-2.5 space-y-1.5">
+    <div className="flex items-center justify-between text-[10px]">
+      <span className="text-dark-text-muted">Bandwidth</span>
+      <span className="text-dark-text font-medium">32.4 MB/s</span>
+    </div>
+    <div className="h-1.5 rounded-full bg-dark-surface3 overflow-hidden">
+      <div className="h-full rounded-full bg-gradient-to-r from-success via-warning to-danger" style={{ width: "65%" }} />
+    </div>
+    <div className="flex items-center justify-between text-[9px] text-dark-text-muted">
+      <span>Limit: 50 MB/s</span>
+      <span>65%</span>
+    </div>
+  </div>
+);
+
+/** Resume progress segments — Resume Anywhere card */
+const ResumeProgress = () => (
+  <div className="rounded-lg border border-dark-border bg-dark-bg p-2.5 space-y-1.5">
+    <div className="flex items-center justify-between text-[10px]">
+      <span className="text-dark-text-muted">video-4k.mkv</span>
+      <span className="text-brand-sky font-medium">72%</span>
+    </div>
+    <div className="flex h-2 rounded-full overflow-hidden gap-px">
+      <div className="bg-success" style={{ width: "45%" }} />
+      <div className="bg-success/40" style={{ width: "27%" }} />
+      <div className="bg-dark-surface3 flex-1" />
+    </div>
+    <div className="flex gap-3 text-[9px] text-dark-text-muted">
+      <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-sm bg-success inline-block" /> Done</span>
+      <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-sm bg-success/40 inline-block" /> Resuming</span>
+      <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-sm bg-dark-surface3 inline-block" /> Pending</span>
+    </div>
+  </div>
+);
+
 const IDMGridVisualization = () => {
   const colors = [
     "#3B82F6", "#22C55E", "#F59E0B", "#A855F7",
@@ -44,36 +107,42 @@ export default function FeaturesSection() {
   const { t } = useLocale();
 
   const features = [
+    // Row 1: 4 single-col cards
     {
       title: t("features.rustTitle"),
       description: t("features.rustDesc"),
       icon: <div className="inline-flex items-center justify-center w-10 h-10 rounded-lg bg-[#38bdf8]/10"><Cpu className="w-5 h-5 text-[#38bdf8]" /></div>,
       className: "",
-    },
-    {
-      title: t("features.segTitle"),
-      description: t("features.segDesc"),
-      icon: <div className="inline-flex items-center justify-center w-10 h-10 rounded-lg bg-[#06b6d4]/10"><Layers className="w-5 h-5 text-[#06b6d4]" /></div>,
-      className: "md:col-span-2 lg:col-span-2",
-      header: <IDMGridVisualization />,
+      header: <RustTerminal />,
     },
     {
       title: t("features.protoTitle"),
       description: t("features.protoDesc"),
       icon: <div className="inline-flex items-center justify-center w-10 h-10 rounded-lg bg-[#22C55E]/10"><Globe className="w-5 h-5 text-[#22C55E]" /></div>,
       className: "",
+      header: <ProtocolBadges />,
     },
     {
       title: t("features.speedTitle"),
       description: t("features.speedDesc"),
       icon: <div className="inline-flex items-center justify-center w-10 h-10 rounded-lg bg-[#F59E0B]/10"><Gauge className="w-5 h-5 text-[#F59E0B]" /></div>,
       className: "",
+      header: <SpeedGauge />,
     },
     {
       title: t("features.resumeTitle"),
       description: t("features.resumeDesc"),
       icon: <div className="inline-flex items-center justify-center w-10 h-10 rounded-lg bg-[#A855F7]/10"><RefreshCw className="w-5 h-5 text-[#A855F7]" /></div>,
       className: "",
+      header: <ResumeProgress />,
+    },
+    // Row 2: 2 double-col cards side by side
+    {
+      title: t("features.segTitle"),
+      description: t("features.segDesc"),
+      icon: <div className="inline-flex items-center justify-center w-10 h-10 rounded-lg bg-[#06b6d4]/10"><Layers className="w-5 h-5 text-[#06b6d4]" /></div>,
+      className: "md:col-span-2 lg:col-span-2",
+      header: <IDMGridVisualization />,
     },
     {
       title: t("features.browserTitle"),
