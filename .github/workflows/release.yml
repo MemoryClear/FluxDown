@@ -9,10 +9,18 @@ permissions:
   contents: write
 
 jobs:
-  # ── 并行 Job 1: 构建 Windows 安装包 ──
+  # ── 并行 Job 1: 构建 Windows 安装包（x64 + ARM64）──
   build-windows:
-    name: Build Windows Installer
-    runs-on: windows-latest
+    name: Build Windows (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-arm64
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - name: Checkout repository
@@ -36,16 +44,16 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: rust-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          key: rust-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            rust-${{ runner.os }}-
+            rust-${{ runner.os }}-${{ matrix.arch }}-
 
       - name: Cache Rinf CLI
         id: cache-rinf
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/rinf.exe
-          key: rinf-cli-${{ runner.os }}-8.9.0
+          key: rinf-cli-${{ runner.os }}-${{ matrix.arch }}-8.9.0
 
       # ── Flutter SDK ──
       - name: Setup Flutter
@@ -73,6 +81,15 @@ jobs:
         run: flutter build windows --release --build-name=${{ steps.version.outputs.VERSION }} --build-number=1 --dart-define=APP_VERSION=${{ steps.version.outputs.VERSION }}
 
       # ── Inno Setup installer ──
+      - name: Ensure Inno Setup is installed
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) {
+            choco install innosetup -y --no-progress
+            echo "C:\Program Files (x86)\Inno Setup 6" | Out-File -FilePath $env:GITHUB_PATH -Append
+          }
+
       - name: Download Inno Setup Chinese Simplified language file
         shell: pwsh
         run: |
@@ -82,25 +99,25 @@ jobs:
 
       - name: Build installer with Inno Setup
         run: |
-          iscc /DMyAppVersion=${{ steps.version.outputs.VERSION }} installer\windows\setup.iss
+          iscc /DMyAppVersion=${{ steps.version.outputs.VERSION }} /DMyAppArch=${{ matrix.arch }} installer\windows\setup.iss
 
       # ── Compress portable version ──
       - name: Create portable zip
         shell: pwsh
         run: |
-          Compress-Archive -Path "build\windows\x64\runner\Release\*" -DestinationPath "build\installer\FluxDown-${{ steps.version.outputs.VERSION }}-windows-portable.zip"
+          Compress-Archive -Path "build\windows\${{ matrix.arch }}\runner\Release\*" -DestinationPath "build\installer\FluxDown-${{ steps.version.outputs.VERSION }}-windows-${{ matrix.arch }}-portable.zip"
 
       # ── Upload artifacts（供 release job 使用）──
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: windows-installer
+          name: windows-installer-${{ matrix.arch }}
           path: build/installer/FluxDown-*.exe
 
       - name: Upload portable artifact
         uses: actions/upload-artifact@v4
         with:
-          name: windows-portable
+          name: windows-portable-${{ matrix.arch }}
           path: build/installer/FluxDown-*-portable.zip
 
   # ── 并行 Job 2: 构建浏览器扩展 ──
@@ -206,17 +223,12 @@ jobs:
           echo "$DELIM" >> "$GITHUB_OUTPUT"
 
       # ── 下载所有构建产物 ──
-      - name: Download Windows installer
+      - name: Download all Windows artifacts
         uses: actions/download-artifact@v4
         with:
-          name: windows-installer
+          pattern: windows-*
           path: release-assets/
-
-      - name: Download Windows portable
-        uses: actions/download-artifact@v4
-        with:
-          name: windows-portable
-          path: release-assets/
+          merge-multiple: true
 
       - name: Download browser extension
         uses: actions/download-artifact@v4

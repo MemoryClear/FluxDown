@@ -11,6 +11,11 @@
   #define MyAppVersion "1.0.0"
 #endif
 
+; Architecture is passed from CI via /DMyAppArch=x64 or /DMyAppArch=arm64
+#ifndef MyAppArch
+  #define MyAppArch "x64"
+#endif
+
 [Setup]
 AppId={{B7E3F2A1-5C4D-4E8F-9A6B-1D2E3F4A5B6C}
 AppName={#MyAppName}
@@ -24,11 +29,16 @@ DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=..\..\build\installer
-OutputBaseFilename=FluxDown-{#MyAppVersion}-windows-setup
+OutputBaseFilename=FluxDown-{#MyAppVersion}-windows-{#MyAppArch}-setup
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
+#if MyAppArch == "arm64"
+ArchitecturesAllowed=arm64
+ArchitecturesInstallIn64BitMode=arm64
+#else
 ArchitecturesInstallIn64BitMode=x64compatible
+#endif
 PrivilegesRequired=lowest
 SetupIconFile=..\..\windows\runner\resources\app_icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
@@ -45,7 +55,7 @@ Name: "torrentassoc"; Description: "Associate .torrent files with FluxDown"; Gro
 
 [Files]
 ; Install all files from the Flutter build output
-Source: "..\..\build\windows\x64\runner\Release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\..\build\windows\{#MyAppArch}\runner\Release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
