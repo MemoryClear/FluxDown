@@ -41,7 +41,7 @@ export function LampEffect({
       </div>
 
       {/* Content */}
-      <div className="relative z-50 pt-16">{children}</div>
+      <div className="relative z-10 pt-16">{children}</div>
     </div>
   );
 }

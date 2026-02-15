@@ -36,6 +36,8 @@ jobs:
       # ── Rust toolchain ──
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.arch == 'arm64' && 'aarch64-pc-windows-msvc' || '' }}
 
       - name: Cache Rust dependencies
         uses: actions/cache@v4
@@ -95,6 +97,8 @@ jobs:
 
       # ── Build ──
       - name: Build Flutter Windows app
+        env:
+          CFLAGS: ${{ matrix.arch == 'arm64' && '/std:c11' || '' }}
         run: flutter build windows --release --build-name=${{ steps.version.outputs.VERSION }} --build-number=1 --dart-define=APP_VERSION=${{ steps.version.outputs.VERSION }}
 
       # ── Inno Setup installer ──
