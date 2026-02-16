@@ -8,13 +8,15 @@ use crate::db::Db;
 use crate::download_manager::{self, DownloadManager, TaskDone};
 use crate::native_messaging::{self};
 use crate::file_association;
+use crate::protocol_registry;
 use crate::proxy_config::ProxyConfig;
 use crate::signals::{
-    BatchCreateTask, CheckFileAssociation, CheckForUpdate, ConfigEntry, ConfigLoaded,
-    ConfirmExternalDownload, ControlTask, CreateTask, DetectSystemProxy, DownloadUpdate,
-    ExternalDownloadRequest, FileAssociationStatus, InstallUpdate, ProxyTestResult,
-    RequestAllTasks, RequestConfig, SaveConfig, SelectHlsQuality, SetFileAssociation,
-    SystemProxyInfo, TestProxyConnection, UpdateCheckResult,
+    BatchCreateTask, CheckFileAssociation, CheckForUpdate, CheckUrlProtocol, ConfigEntry,
+    ConfigLoaded, ConfirmExternalDownload, ControlTask, CreateTask, DetectSystemProxy,
+    DownloadUpdate, ExternalDownloadRequest, FileAssociationStatus, InstallUpdate,
+    ProxyTestResult, RequestAllTasks, RequestConfig, SaveConfig, SelectHlsQuality,
+    SetFileAssociation, SetUrlProtocol, SystemProxyInfo, TestProxyConnection,
+    UpdateCheckResult, UrlProtocolStatus,
 };
 use crate::updater;
 
@@ -160,10 +162,23 @@ pub async fn run(db_dir: PathBuf) {
     let test_proxy_recv = TestProxyConnection::get_dart_signal_receiver();
     let detect_sys_proxy_recv = DetectSystemProxy::get_dart_signal_receiver();
     let select_hls_quality_recv = SelectHlsQuality::get_dart_signal_receiver();
+    let set_url_proto_recv = SetUrlProtocol::get_dart_signal_receiver();
+    let check_url_proto_recv = CheckUrlProtocol::get_dart_signal_receiver();
 
     // Spawn the Native Messaging listener (reads from stdin in a blocking thread).
     // When the browser extension sends a download request, it arrives on this channel.
     let mut native_msg_rx = native_messaging::spawn_native_messaging_listener();
+
+    // Auto-register fluxdown:// URL protocol on startup (idempotent).
+    tokio::task::spawn_blocking(|| {
+        if !protocol_registry::is_registered() {
+            if let Err(e) = protocol_registry::register() {
+                rinf::debug_print!("[actor] auto-register fluxdown:// protocol failed: {}", e);
+            }
+        } else {
+            rinf::debug_print!("[actor] fluxdown:// protocol already registered");
+        }
+    });
 
     loop {
         tokio::select! {
@@ -378,6 +393,33 @@ pub async fn run(db_dir: PathBuf) {
                 tokio::task::spawn_blocking(|| {
                     FileAssociationStatus {
                         is_associated: file_association::is_associated(),
+                    }
+                    .send_signal_to_dart();
+                });
+            }
+            // --- URL protocol signals ---
+            Some(signal) = set_url_proto_recv.recv() => {
+                let enable = signal.message.enable;
+                tokio::task::spawn_blocking(move || {
+                    rinf::debug_print!("[actor] set_url_protocol enable={}", enable);
+                    let result = if enable {
+                        protocol_registry::register()
+                    } else {
+                        protocol_registry::unregister()
+                    };
+                    if let Err(e) = result {
+                        rinf::debug_print!("[actor] url protocol error: {}", e);
+                    }
+                    UrlProtocolStatus {
+                        is_registered: protocol_registry::is_registered(),
+                    }
+                    .send_signal_to_dart();
+                });
+            }
+            Some(_) = check_url_proto_recv.recv() => {
+                tokio::task::spawn_blocking(|| {
+                    UrlProtocolStatus {
+                        is_registered: protocol_registry::is_registered(),
                     }
                     .send_signal_to_dart();
                 });

@@ -310,3 +310,22 @@ pub struct CheckFileAssociation {}
 pub struct FileAssociationStatus {
     pub is_associated: bool,
 }
+
+// ========== URL protocol signals ==========
+
+/// Set or remove `fluxdown://` URL protocol registration (Dart → Rust).
+/// `enable = true` → register, `enable = false` → unregister.
+#[derive(Deserialize, DartSignal)]
+pub struct SetUrlProtocol {
+    pub enable: bool,
+}
+
+/// Check current `fluxdown://` URL protocol registration status (Dart → Rust).
+#[derive(Deserialize, DartSignal)]
+pub struct CheckUrlProtocol {}
+
+/// Report `fluxdown://` URL protocol registration status back to Dart (Rust → Dart).
+#[derive(Serialize, RustSignal)]
+pub struct UrlProtocolStatus {
+    pub is_registered: bool,
+}

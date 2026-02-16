@@ -15,6 +15,7 @@ export default defineConfig({
       "notifications",
       "activeTab",
       "tabs",
+      "scripting",
     ],
     host_permissions: ["<all_urls>"],
     web_accessible_resources: [

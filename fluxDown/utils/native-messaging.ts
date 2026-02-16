@@ -4,9 +4,13 @@
  *
  * FluxDown 桌面应用在 127.0.0.1:19527 启动 HTTP 服务器，
  * 浏览器扩展直接通过 fetch() 发送请求，无需 Native Messaging。
+ *
+ * 当应用未运行时，通过 fluxdown:// 协议唤起应用后重试 HTTP。
  */
 
 const FLUXDOWN_BASE_URL = 'http://127.0.0.1:19527';
+
+const RETRY_DELAYS = [1500, 2000, 3000];
 
 export interface DownloadRequest {
   url: string;
@@ -24,30 +28,6 @@ export interface ApiResponse {
   taskId?: string;
 }
 
-/**
- * 发送下载请求到 FluxDown 桌面应用
- */
-export async function sendDownloadRequest(request: DownloadRequest): Promise<ApiResponse> {
-  try {
-    const response = await fetch(`${FLUXDOWN_BASE_URL}/download`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(request),
-      signal: AbortSignal.timeout(5000),
-    });
-    return (await response.json()) as ApiResponse;
-  } catch (e) {
-    console.error('[FluxDown] HTTP request failed:', e);
-    return {
-      success: false,
-      message: e instanceof Error ? e.message : 'Unknown error',
-    };
-  }
-}
-
-/**
- * 批量下载请求的单个条目
- */
 export interface BatchDownloadItem {
   url: string;
   filename?: string;
@@ -57,50 +37,103 @@ export interface BatchDownloadItem {
   mimeType?: string;
 }
 
-/**
- * 批量发送下载请求到 FluxDown 桌面应用（单次 HTTP POST）
- *
- * 将所有条目的 URL 用换行符连接，作为一个 DownloadRequest 发送，
- * Flutter 端的 quick_download_dialog 会按换行符拆分并支持批量创建任务。
- */
+async function launchViaProtocol(): Promise<void> {
+  try {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    const tab = tabs[0];
+    const tabUrl = tab?.url ?? '';
+    const canInject =
+      tab?.id != null &&
+      tabUrl !== '' &&
+      !tabUrl.startsWith('chrome://') &&
+      !tabUrl.startsWith('chrome-extension://') &&
+      !tabUrl.startsWith('edge://') &&
+      !tabUrl.startsWith('about:') &&
+      !tabUrl.startsWith('moz-extension://');
+
+    if (canInject && tab.id != null) {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => {
+          const iframe = document.createElement('iframe');
+          iframe.style.display = 'none';
+          iframe.src = 'fluxdown://wake';
+          document.body.appendChild(iframe);
+          setTimeout(() => iframe.remove(), 3000);
+        },
+      });
+      return;
+    }
+  } catch {
+    // iframe injection failed — fall through to tabs.create
+  }
+
+  try {
+    const newTab = await chrome.tabs.create({ url: 'fluxdown://wake', active: false });
+    if (newTab.id != null) {
+      setTimeout(() => {
+        chrome.tabs.remove(newTab.id!).catch(() => {});
+      }, 2000);
+    }
+  } catch {
+    // both methods failed
+  }
+}
+
+async function httpPost(body: string): Promise<Response> {
+  return fetch(`${FLUXDOWN_BASE_URL}/download`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+    signal: AbortSignal.timeout(3000),
+  });
+}
+
+async function sendWithAutoLaunch(body: string): Promise<ApiResponse> {
+  try {
+    const response = await httpPost(body);
+    return (await response.json()) as ApiResponse;
+  } catch {
+    // HTTP 失败 — 应用可能未运行
+  }
+
+  await launchViaProtocol();
+
+  for (const delay of RETRY_DELAYS) {
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    try {
+      const response = await httpPost(body);
+      return (await response.json()) as ApiResponse;
+    } catch {
+      // 继续重试
+    }
+  }
+
+  return { success: false, message: 'FluxDown app not running' };
+}
+
+export async function sendDownloadRequest(request: DownloadRequest): Promise<ApiResponse> {
+  return sendWithAutoLaunch(JSON.stringify(request));
+}
+
 export async function sendBatchDownloadRequest(items: BatchDownloadItem[]): Promise<ApiResponse> {
   if (items.length === 0) {
     return { success: false, message: 'No items' };
   }
 
-  // 将所有 URL 用换行符连接成一个字符串
   const joinedUrl = items.map((item) => item.url).join('\n');
-
-  // 合并 cookies（取第一个非空的）
   const cookies = items.find((item) => item.cookies)?.cookies || '';
 
   const request: DownloadRequest = {
     url: joinedUrl,
-    filename: '', // 批量下载不支持单独重命名
+    filename: '',
     referrer: items[0]?.referrer || '',
     cookies,
   };
 
-  try {
-    const response = await fetch(`${FLUXDOWN_BASE_URL}/download`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(request),
-      signal: AbortSignal.timeout(5000),
-    });
-    return (await response.json()) as ApiResponse;
-  } catch (e) {
-    console.error('[FluxDown] Batch HTTP request failed:', e);
-    return {
-      success: false,
-      message: e instanceof Error ? e.message : 'Unknown error',
-    };
-  }
+  return sendWithAutoLaunch(JSON.stringify(request));
 }
 
-/**
- * 检查 FluxDown 桌面应用是否在运行
- */
 export async function checkFluxDownAvailable(): Promise<boolean> {
   try {
     const response = await fetch(`${FLUXDOWN_BASE_URL}/ping`, {
