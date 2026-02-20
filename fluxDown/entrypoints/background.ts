@@ -102,47 +102,59 @@ export default defineBackground(() => {
   }
   const responseDownloadCache = new Map<string, ResponseDownloadInfo>();
 
-  // Chrome MV3: 需要 'extraHeaders' 才能看到 Cookie / Authorization 等敏感头
+  // Chrome MV3 需要 'extraHeaders' 才能看到 Cookie 等敏感头，Firefox 不需要也不识别此选项
+  const sendHeadersOpts: string[] = ['requestHeaders'];
   try {
+    // 先尝试带 extraHeaders（Chrome MV3），失败则降级（Firefox）
     chrome.webRequest.onSendHeaders.addListener(
-      (details) => {
-        if (!details.requestHeaders) return;
-        const headers: Record<string, string> = {};
-        let cookies = '';
-        for (const h of details.requestHeaders) {
-          if (h.name && h.value) {
-            headers[h.name] = h.value;
-            if (h.name.toLowerCase() === 'cookie') {
-              cookies = h.value;
-            }
-          }
-        }
-        requestHeaderCache.set(details.url, { cookies, headers, ts: Date.now() });
-
-        // 清理 60 秒前的缓存条目 + 强制大小上限（防止高流量页面短时间内积累过多条目）
-        const now = Date.now();
-        for (const [cachedUrl, entry] of requestHeaderCache) {
-          if (now - entry.ts > 60_000) {
-            requestHeaderCache.delete(cachedUrl);
-          }
-        }
-        if (requestHeaderCache.size > 1000) {
-          // 超过上限时删除最旧的条目（Map 迭代顺序 = 插入顺序）
-          const excess = requestHeaderCache.size - 800;
-          let deleted = 0;
-          for (const key of requestHeaderCache.keys()) {
-            if (deleted >= excess) break;
-            requestHeaderCache.delete(key);
-            deleted++;
-          }
-        }
-      },
+      onSendHeadersHandler,
       { urls: ['<all_urls>'] },
-      ['requestHeaders', 'extraHeaders'],
+      [...sendHeadersOpts, 'extraHeaders'] as any,
     );
-    console.log('[FluxDown] webRequest.onSendHeaders listener registered');
-  } catch (e) {
-    console.warn('[FluxDown] Failed to register webRequest.onSendHeaders listener:', e);
+    console.log('[FluxDown] webRequest.onSendHeaders listener registered (with extraHeaders)');
+  } catch {
+    try {
+      chrome.webRequest.onSendHeaders.addListener(
+        onSendHeadersHandler,
+        { urls: ['<all_urls>'] },
+        sendHeadersOpts,
+      );
+      console.log('[FluxDown] webRequest.onSendHeaders listener registered (without extraHeaders)');
+    } catch (e) {
+      console.warn('[FluxDown] Failed to register webRequest.onSendHeaders listener:', e);
+    }
+  }
+
+  function onSendHeadersHandler(details: chrome.webRequest.WebRequestHeadersDetails) {
+    if (!details.requestHeaders) return;
+    const headers: Record<string, string> = {};
+    let cookies = '';
+    for (const h of details.requestHeaders) {
+      if (h.name && h.value) {
+        headers[h.name] = h.value;
+        if (h.name.toLowerCase() === 'cookie') {
+          cookies = h.value;
+        }
+      }
+    }
+    requestHeaderCache.set(details.url, { cookies, headers, ts: Date.now() });
+
+    // 清理 60 秒前的缓存条目 + 强制大小上限（防止高流量页面短时间内积累过多条目）
+    const now = Date.now();
+    for (const [cachedUrl, entry] of requestHeaderCache) {
+      if (now - entry.ts > 60_000) {
+        requestHeaderCache.delete(cachedUrl);
+      }
+    }
+    if (requestHeaderCache.size > 1000) {
+      const excess = requestHeaderCache.size - 800;
+      let deleted = 0;
+      for (const key of requestHeaderCache.keys()) {
+        if (deleted >= excess) break;
+        requestHeaderCache.delete(key);
+        deleted++;
+      }
+    }
   }
 
   // === 响应头监听：检测"导航转下载"场景 ===
@@ -357,13 +369,12 @@ export default defineBackground(() => {
   // 第二层 + 第三层：下载事件拦截
   // ==========================================
 
-  // 缓存 onCreated 中的 downloadItem 信息，供 onDeterminingFilename 使用
   const downloadItemCache = new Map<number, chrome.downloads.DownloadItem>();
-
-  // 协调标记：记录各层的处理状态，防止重复发送
-  // 'primary' = 由 onDeterminingFilename 处理
-  // 'fallback' = 由 onCreated 兜底处理
   const handledDownloads = new Map<number, 'primary' | 'fallback'>();
+
+  // Firefox 不支持 onDeterminingFilename，兜底层是唯一拦截路径，
+  // 需要更长等待让浏览器填充 downloadItem 元数据
+  const hasDeterminingFilename = !!chrome.downloads.onDeterminingFilename;
 
   // === 第三层：onCreated 兜底 + onChanged 元数据补全 ===
   chrome.downloads.onCreated.addListener((downloadItem) => {
@@ -410,10 +421,9 @@ export default defineBackground(() => {
     // === 路径 A：检查 HTTP 响应缓存（即时判断，不等待） ===
     const responseCached = responseDownloadCache.get(url);
     if (responseCached) {
-      // 响应头已确认这是下载 — 不必等 onDeterminingFilename
-      // 但仍给它一个极短的窗口（50ms），因为如果 onDeterminingFilename 能处理，
-      // 它的 suggest({ cancel: true }) 比 downloads.cancel() 更干净
-      await sleep(50);
+      // 有 onDeterminingFilename 时给它一个短窗口先处理（suggest cancel 更干净），
+      // 没有时（Firefox）直接拦截，减少用户看到浏览器下载 UI 闪烁的概率
+      await sleep(hasDeterminingFilename ? 50 : 10);
       if (handledDownloads.has(downloadId)) return;
 
       console.log('[FluxDown] Fallback (path A - response cache hit):', {
@@ -443,8 +453,9 @@ export default defineBackground(() => {
     }
 
     // === 路径 B：响应缓存未命中 — 等待后查询最新元数据 ===
-    // 等待 150ms，给 onDeterminingFilename 优先处理的时间
-    await sleep(150);
+    // 有 onDeterminingFilename 时等 150ms 让它优先处理；
+    // Firefox 无此 API，兜底是唯一路径，等 300ms 让浏览器充分填充元数据
+    await sleep(hasDeterminingFilename ? 150 : 300);
     if (handledDownloads.has(downloadId)) return;
 
     // 用 chrome.downloads.search 查询最新状态（此时浏览器可能已解析了响应头）

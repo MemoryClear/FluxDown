@@ -52,16 +52,27 @@ async function launchViaProtocol(): Promise<void> {
       !tabUrl.startsWith('moz-extension://');
 
     if (canInject && tab.id != null) {
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: () => {
-          const iframe = document.createElement('iframe');
-          iframe.style.display = 'none';
-          iframe.src = 'fluxdown://wake';
-          document.body.appendChild(iframe);
-          setTimeout(() => iframe.remove(), 3000);
-        },
-      });
+      const injectFn = () => {
+        const iframe = document.createElement('iframe');
+        iframe.style.display = 'none';
+        iframe.src = 'fluxdown://wake';
+        document.body.appendChild(iframe);
+        setTimeout(() => iframe.remove(), 3000);
+      };
+
+      if (chrome.scripting?.executeScript) {
+        // Chrome MV3 / Firefox MV3
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: injectFn,
+        });
+      } else {
+        // Firefox MV2 fallback
+        const code = `(${injectFn.toString()})()`;
+        await new Promise<void>((resolve) => {
+          (chrome as any).tabs.executeScript(tab.id, { code }, () => resolve());
+        });
+      }
       return;
     }
   } catch {
