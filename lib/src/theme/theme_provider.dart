@@ -3,20 +3,13 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../i18n/locale_provider.dart';
 import 'app_theme.dart';
 
-/// 支持的主题色方案
+/// 支持的主题色方案（4 个预设 + 自定义）
 enum AppColorScheme {
   blue(Color(0xFF3B82F6)),
   green(Color(0xFF22C55E)),
   violet(Color(0xFF8B5CF6)),
   rose(Color(0xFFF43F5E)),
-  orange(Color(0xFFF97316)),
-  red(Color(0xFFEF4444)),
-  yellow(Color(0xFFEAB308)),
-  slate(Color(0xFF64748B)),
-  zinc(Color(0xFF71717A)),
-  gray(Color(0xFF6B7280)),
-  neutral(Color(0xFF737373)),
-  stone(Color(0xFF78716C));
+  custom(Color(0xFF6366F1)); // 占位色，实际颜色由 ThemeProvider.customColor 决定
 
   final Color previewColor;
   const AppColorScheme(this.previewColor);
@@ -31,14 +24,7 @@ extension AppColorSchemeI18n on AppColorScheme {
       AppColorScheme.green => s.colorGreen,
       AppColorScheme.violet => s.colorViolet,
       AppColorScheme.rose => s.colorRose,
-      AppColorScheme.orange => s.colorOrange,
-      AppColorScheme.red => s.colorRed,
-      AppColorScheme.yellow => s.colorYellow,
-      AppColorScheme.slate => s.colorSlate,
-      AppColorScheme.zinc => s.colorZinc,
-      AppColorScheme.gray => s.colorGray,
-      AppColorScheme.neutral => s.colorNeutral,
-      AppColorScheme.stone => s.colorStone,
+      AppColorScheme.custom => s.colorCustom,
     };
   }
 }
@@ -46,14 +32,22 @@ extension AppColorSchemeI18n on AppColorScheme {
 /// SharedPreferences 存储 key
 const _kThemeMode = 'theme_mode';
 const _kColorScheme = 'color_scheme';
+const _kCustomColor = 'custom_color';
 
 /// 全局主题模式 + 颜色方案管理（带 SharedPreferences 持久化）
 class ThemeProvider extends ChangeNotifier {
   ThemeMode _themeMode = ThemeMode.system;
   AppColorScheme _colorScheme = AppColorScheme.blue;
+  Color _customColor = const Color(0xFF6366F1); // 默认 indigo
 
   ThemeMode get themeMode => _themeMode;
   AppColorScheme get colorScheme => _colorScheme;
+  Color get customColor => _customColor;
+
+  /// 当前生效的预览色（预设返回枚举色，自定义返回用户选色）
+  Color get activePreviewColor => _colorScheme == AppColorScheme.custom
+      ? _customColor
+      : _colorScheme.previewColor;
 
   /// 启动时调用，从 SharedPreferences 恢复上次保存的主题设置。
   /// 若无保存值则使用默认值（system + blue），不会 notifyListeners。
@@ -76,6 +70,14 @@ class ThemeProvider extends ChangeNotifier {
       );
     }
 
+    final customHex = prefs.getString(_kCustomColor);
+    if (customHex != null) {
+      final parsed = int.tryParse(customHex, radix: 16);
+      if (parsed != null) {
+        _customColor = Color(parsed);
+      }
+    }
+
     // 静默加载，不触发 rebuild（main.dart 会在 init 完成后才 runApp）
   }
 
@@ -93,6 +95,18 @@ class ThemeProvider extends ChangeNotifier {
     invalidateThemeCache();
     notifyListeners();
     _persist(_kColorScheme, scheme.name);
+  }
+
+  /// 设置自定义颜色并自动切换到 custom 方案
+  void setCustomColor(Color color) {
+    _customColor = color;
+    if (_colorScheme != AppColorScheme.custom) {
+      _colorScheme = AppColorScheme.custom;
+      _persist(_kColorScheme, AppColorScheme.custom.name);
+    }
+    invalidateThemeCache();
+    notifyListeners();
+    _persist(_kCustomColor, color.toARGB32().toRadixString(16).padLeft(8, '0'));
   }
 
   void toggleTheme(BuildContext context) {

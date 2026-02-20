@@ -22,6 +22,18 @@ const _buttonSizes = ShadButtonSizesTheme(
   icon: ShadButtonSizeTheme(height: 32, width: 32, padding: EdgeInsets.zero),
 );
 
+/// 自定义颜色缓存 — 用于 custom 方案时的动态颜色
+Color? _customColorOverride;
+
+/// 设置自定义颜色（由 ThemeProvider 在切换时调用）
+void setCustomColorForTheme(Color color) {
+  _customColorOverride = color;
+}
+
+/// 根据颜色亮度自动选择前景色（白/黑）
+Color _foregroundFor(Color c) =>
+    c.computeLuminance() > 0.5 ? const Color(0xFF09090B) : Colors.white;
+
 /// 根据 AppColorScheme 获取 shadcn 颜色方案（亮色）
 ShadColorScheme _lightColorScheme(AppColorScheme scheme) {
   return switch (scheme) {
@@ -29,14 +41,7 @@ ShadColorScheme _lightColorScheme(AppColorScheme scheme) {
     AppColorScheme.green => const ShadGreenColorScheme.light(),
     AppColorScheme.violet => const ShadVioletColorScheme.light(),
     AppColorScheme.rose => const ShadRoseColorScheme.light(),
-    AppColorScheme.orange => const ShadOrangeColorScheme.light(),
-    AppColorScheme.red => const ShadRedColorScheme.light(),
-    AppColorScheme.yellow => const ShadYellowColorScheme.light(),
-    AppColorScheme.slate => const ShadSlateColorScheme.light(),
-    AppColorScheme.zinc => const ShadZincColorScheme.light(),
-    AppColorScheme.gray => const ShadGrayColorScheme.light(),
-    AppColorScheme.neutral => const ShadNeutralColorScheme.light(),
-    AppColorScheme.stone => const ShadStoneColorScheme.light(),
+    AppColorScheme.custom => _customLightScheme(),
   };
 }
 
@@ -47,15 +52,27 @@ ShadColorScheme _darkColorScheme(AppColorScheme scheme) {
     AppColorScheme.green => const ShadGreenColorScheme.dark(),
     AppColorScheme.violet => const ShadVioletColorScheme.dark(),
     AppColorScheme.rose => const ShadRoseColorScheme.dark(),
-    AppColorScheme.orange => const ShadOrangeColorScheme.dark(),
-    AppColorScheme.red => const ShadRedColorScheme.dark(),
-    AppColorScheme.yellow => const ShadYellowColorScheme.dark(),
-    AppColorScheme.slate => const ShadSlateColorScheme.dark(),
-    AppColorScheme.zinc => const ShadZincColorScheme.dark(),
-    AppColorScheme.gray => const ShadGrayColorScheme.dark(),
-    AppColorScheme.neutral => const ShadNeutralColorScheme.dark(),
-    AppColorScheme.stone => const ShadStoneColorScheme.dark(),
+    AppColorScheme.custom => _customDarkScheme(),
   };
+}
+
+/// 以 Zinc 为基底，用自定义色覆盖 primary / ring
+ShadColorScheme _customLightScheme() {
+  final color = _customColorOverride ?? const Color(0xFF6366F1);
+  return ShadZincColorScheme.light().copyWith(
+    primary: color,
+    primaryForeground: _foregroundFor(color),
+    ring: color,
+  );
+}
+
+ShadColorScheme _customDarkScheme() {
+  final color = _customColorOverride ?? const Color(0xFF6366F1);
+  return ShadZincColorScheme.dark().copyWith(
+    primary: color,
+    primaryForeground: _foregroundFor(color),
+    ring: color,
+  );
 }
 
 /// 缓存当前颜色方案对应的主题数据

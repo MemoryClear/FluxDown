@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -1146,33 +1147,38 @@ class _ProxySettingsCardState extends State<_ProxySettingsCard> {
             style: TextStyle(fontSize: 11.5, color: c.textMuted),
           ),
           const SizedBox(height: 12),
-          Wrap(
+          Row(
             spacing: 8,
-            runSpacing: 8,
             children: [
-              _ProxyModeOption(
-                icon: LucideIcons.unplug,
-                label: s.proxyModeNone,
-                selected: sp.proxyMode == 'none',
-                colors: c,
-                onTap: () => sp.setProxyMode('none'),
+              Expanded(
+                child: _ProxyModeOption(
+                  icon: LucideIcons.unplug,
+                  label: s.proxyModeNone,
+                  selected: sp.proxyMode == 'none',
+                  colors: c,
+                  onTap: () => sp.setProxyMode('none'),
+                ),
               ),
-              _ProxyModeOption(
-                icon: LucideIcons.monitor,
-                label: s.proxyModeSystem,
-                selected: sp.proxyMode == 'system',
-                colors: c,
-                onTap: () {
-                  sp.setProxyMode('system');
-                  _requestDetectSystemProxy();
-                },
+              Expanded(
+                child: _ProxyModeOption(
+                  icon: LucideIcons.monitor,
+                  label: s.proxyModeSystem,
+                  selected: sp.proxyMode == 'system',
+                  colors: c,
+                  onTap: () {
+                    sp.setProxyMode('system');
+                    _requestDetectSystemProxy();
+                  },
+                ),
               ),
-              _ProxyModeOption(
-                icon: LucideIcons.settings2,
-                label: s.proxyModeManual,
-                selected: sp.proxyMode == 'manual',
-                colors: c,
-                onTap: () => sp.setProxyMode('manual'),
+              Expanded(
+                child: _ProxyModeOption(
+                  icon: LucideIcons.settings2,
+                  label: s.proxyModeManual,
+                  selected: sp.proxyMode == 'manual',
+                  colors: c,
+                  onTap: () => sp.setProxyMode('manual'),
+                ),
               ),
             ],
           ),
@@ -1514,7 +1520,7 @@ class _ProxyModeOptionState extends State<_ProxyModeOption> {
             border: Border.all(color: borderColor, width: selected ? 1.5 : 1),
           ),
           child: Row(
-            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
             children: [
               Icon(
                 widget.icon,
@@ -1619,47 +1625,6 @@ class _ReadOnlyValueBox extends StatelessWidget {
 // ─────────────────────────────────────────────
 // BT 设置子组件
 // ─────────────────────────────────────────────
-
-/// BT 设置分区标题（带分割线）
-class _SubSectionHeader extends StatelessWidget {
-  final String label;
-  final String description;
-  final IconData icon;
-
-  const _SubSectionHeader({
-    required this.label,
-    required this.description,
-    this.icon = LucideIcons.magnet,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final c = AppColors.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Divider(height: 1, color: c.border.withValues(alpha: 0.5)),
-        const SizedBox(height: 14),
-        Row(
-          children: [
-            Icon(icon, size: 14, color: c.accent),
-            const SizedBox(width: 8),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
-                color: c.textPrimary,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 4),
-        Text(description, style: TextStyle(fontSize: 11.5, color: c.textMuted)),
-      ],
-    );
-  }
-}
 
 /// BT Tracker 列表编辑器
 ///
@@ -2062,8 +2027,16 @@ class _ThemeModeCardState extends State<_ThemeModeCard> {
 }
 
 // ─────────────────────────────────────────────
-// 主题色选择器
+// 主题色选择器（4 预设 + 自定义色盘）
 // ─────────────────────────────────────────────
+
+/// 预设色列表（排除 custom）
+const _presetSchemes = [
+  AppColorScheme.blue,
+  AppColorScheme.green,
+  AppColorScheme.violet,
+  AppColorScheme.rose,
+];
 
 class _ColorSchemeSelector extends StatelessWidget {
   const _ColorSchemeSelector();
@@ -2073,33 +2046,68 @@ class _ColorSchemeSelector extends StatelessWidget {
     final provider = FluxDownApp.of(context);
     final current = provider.colorScheme;
     final c = AppColors.of(context);
+    final isCustom = current == AppColorScheme.custom;
 
-    return Wrap(
-      spacing: 8,
-      runSpacing: 8,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        for (final scheme in AppColorScheme.values)
-          _ColorDot(
-            scheme: scheme,
-            selected: current == scheme,
-            colors: c,
-            onTap: () => provider.setColorScheme(scheme),
-          ),
+        // ── 色点行：4 预设 + 1 自定义 ──
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final scheme in _presetSchemes)
+              _ColorDot(
+                color: scheme.previewColor,
+                label: scheme.label,
+                selected: current == scheme,
+                colors: c,
+                onTap: () => provider.setColorScheme(scheme),
+              ),
+            _ColorDot(
+              color: provider.customColor,
+              label: AppColorScheme.custom.label,
+              selected: isCustom,
+              colors: c,
+              icon: isCustom ? LucideIcons.check : LucideIcons.palette,
+              onTap: () => provider.setColorScheme(AppColorScheme.custom),
+            ),
+          ],
+        ),
+        // ── 自定义色盘（仅在选中 custom 时展开） ──
+        AnimatedSize(
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeInOut,
+          alignment: Alignment.topCenter,
+          child: isCustom
+              ? Padding(
+                  padding: const EdgeInsets.only(top: 14),
+                  child: _CustomColorPicker(
+                    color: provider.customColor,
+                    onChanged: provider.setCustomColor,
+                  ),
+                )
+              : const SizedBox.shrink(),
+        ),
       ],
     );
   }
 }
 
 class _ColorDot extends StatefulWidget {
-  final AppColorScheme scheme;
+  final Color color;
+  final String label;
   final bool selected;
   final AppColors colors;
+  final IconData? icon;
   final VoidCallback onTap;
 
   const _ColorDot({
-    required this.scheme,
+    required this.color,
+    required this.label,
     required this.selected,
     required this.colors,
+    this.icon,
     required this.onTap,
   });
 
@@ -2113,8 +2121,9 @@ class _ColorDotState extends State<_ColorDot> {
   @override
   Widget build(BuildContext context) {
     final selected = widget.selected;
+    final showIcon = selected || widget.icon != null;
     return ShadTooltip(
-      builder: (_) => Text(widget.scheme.label),
+      builder: (_) => Text(widget.label),
       child: MouseRegion(
         onEnter: (_) => setState(() => _isHovered = true),
         onExit: (_) => setState(() => _isHovered = false),
@@ -2126,14 +2135,14 @@ class _ColorDotState extends State<_ColorDot> {
             width: 28,
             height: 28,
             decoration: BoxDecoration(
-              color: widget.scheme.previewColor,
+              color: widget.color,
               shape: BoxShape.circle,
               border: Border.all(
                 color: selected
                     ? widget.colors.textPrimary
                     : _isHovered
                     ? widget.colors.textSecondary.withValues(alpha: 0.6)
-                    : widget.scheme.previewColor,
+                    : widget.color,
                 width: selected
                     ? 2.5
                     : _isHovered
@@ -2143,21 +2152,350 @@ class _ColorDotState extends State<_ColorDot> {
               boxShadow: _isHovered || selected
                   ? [
                       BoxShadow(
-                        color: widget.scheme.previewColor.withValues(
-                          alpha: 0.25,
-                        ),
+                        color: widget.color.withValues(alpha: 0.25),
                         blurRadius: 6,
                         spreadRadius: 0,
                       ),
                     ]
                   : null,
             ),
-            child: selected
-                ? const Icon(LucideIcons.check, size: 13, color: Colors.white)
+            child: showIcon
+                ? Icon(
+                    selected
+                        ? LucideIcons.check
+                        : (widget.icon ?? LucideIcons.check),
+                    size: selected ? 13 : 12,
+                    color: Colors.white,
+                  )
                 : null,
           ),
         ),
       ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
+// 自定义色盘（色相滑块 + Hex 输入）
+// ─────────────────────────────────────────────
+
+class _CustomColorPicker extends StatefulWidget {
+  final Color color;
+  final ValueChanged<Color> onChanged;
+
+  const _CustomColorPicker({required this.color, required this.onChanged});
+
+  @override
+  State<_CustomColorPicker> createState() => _CustomColorPickerState();
+}
+
+class _CustomColorPickerState extends State<_CustomColorPicker> {
+  late TextEditingController _hexController;
+  late double _hue;
+  late double _saturation;
+  late double _lightness;
+
+  @override
+  void initState() {
+    super.initState();
+    final hsl = HSLColor.fromColor(widget.color);
+    _hue = hsl.hue;
+    _saturation = hsl.saturation;
+    _lightness = hsl.lightness;
+    _hexController = TextEditingController(text: _colorToHex(widget.color));
+  }
+
+  @override
+  void didUpdateWidget(_CustomColorPicker oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.color != widget.color) {
+      final hsl = HSLColor.fromColor(widget.color);
+      _hue = hsl.hue;
+      _saturation = hsl.saturation;
+      _lightness = hsl.lightness;
+      final hex = _colorToHex(widget.color);
+      if (_hexController.text != hex) {
+        _hexController.text = hex;
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _hexController.dispose();
+    super.dispose();
+  }
+
+  static String _colorToHex(Color c) {
+    final r = (c.r * 255).round();
+    final g = (c.g * 255).round();
+    final b = (c.b * 255).round();
+    return '${r.toRadixString(16).padLeft(2, '0')}'
+            '${g.toRadixString(16).padLeft(2, '0')}'
+            '${b.toRadixString(16).padLeft(2, '0')}'
+        .toUpperCase();
+  }
+
+  void _onHueChanged(double hue) {
+    setState(() => _hue = hue);
+    final color = HSLColor.fromAHSL(1, hue, _saturation, _lightness).toColor();
+    _hexController.text = _colorToHex(color);
+    widget.onChanged(color);
+  }
+
+  void _onSaturationChanged(double sat) {
+    setState(() => _saturation = sat);
+    final color = HSLColor.fromAHSL(1, _hue, sat, _lightness).toColor();
+    _hexController.text = _colorToHex(color);
+    widget.onChanged(color);
+  }
+
+  void _onLightnessChanged(double lit) {
+    setState(() => _lightness = lit);
+    final color = HSLColor.fromAHSL(1, _hue, _saturation, lit).toColor();
+    _hexController.text = _colorToHex(color);
+    widget.onChanged(color);
+  }
+
+  void _onHexSubmitted(String value) {
+    final hex = value.replaceAll('#', '').trim();
+    if (hex.length != 6) return;
+    final parsed = int.tryParse(hex, radix: 16);
+    if (parsed == null) return;
+    final color = Color(0xFF000000 | parsed);
+    final hsl = HSLColor.fromColor(color);
+    setState(() {
+      _hue = hsl.hue;
+      _saturation = hsl.saturation;
+      _lightness = hsl.lightness;
+    });
+    widget.onChanged(color);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppColors.of(context);
+    final currentColor = HSLColor.fromAHSL(
+      1,
+      _hue,
+      _saturation,
+      _lightness,
+    ).toColor();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // 色相滑块
+        _HueSlider(hue: _hue, onChanged: _onHueChanged),
+        const SizedBox(height: 10),
+        // 饱和度滑块
+        _GradientSlider(
+          value: _saturation,
+          onChanged: _onSaturationChanged,
+          leftColor: HSLColor.fromAHSL(1, _hue, 0, _lightness).toColor(),
+          rightColor: HSLColor.fromAHSL(1, _hue, 1, _lightness).toColor(),
+        ),
+        const SizedBox(height: 10),
+        // 明度滑块
+        _GradientSlider(
+          value: _lightness,
+          onChanged: _onLightnessChanged,
+          leftColor: HSLColor.fromAHSL(1, _hue, _saturation, 0.05).toColor(),
+          rightColor: HSLColor.fromAHSL(1, _hue, _saturation, 0.95).toColor(),
+        ),
+        const SizedBox(height: 12),
+        // Hex 输入 + 预览
+        Row(
+          children: [
+            // 颜色预览圆点
+            Container(
+              width: 20,
+              height: 20,
+              decoration: BoxDecoration(
+                color: currentColor,
+                shape: BoxShape.circle,
+                border: Border.all(color: c.border, width: 1),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              '#',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+                color: c.textSecondary,
+              ),
+            ),
+            const SizedBox(width: 4),
+            SizedBox(
+              width: 90,
+              child: ShadInput(
+                controller: _hexController,
+                placeholder: const Text('3B82F6'),
+                onSubmitted: _onHexSubmitted,
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
+// 色相滑块（彩虹渐变条）
+// ─────────────────────────────────────────────
+
+class _HueSlider extends StatelessWidget {
+  final double hue; // 0..360
+  final ValueChanged<double> onChanged;
+
+  const _HueSlider({required this.hue, required this.onChanged});
+
+  void _handleInteraction(Offset localPosition, double width) {
+    final fraction = (localPosition.dx / width).clamp(0.0, 1.0);
+    onChanged(fraction * 360);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppColors.of(context);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth;
+        final thumbX = (hue / 360) * width;
+        return GestureDetector(
+          onTapDown: (d) => _handleInteraction(d.localPosition, width),
+          onPanUpdate: (d) => _handleInteraction(d.localPosition, width),
+          child: SizedBox(
+            height: 22,
+            child: Stack(
+              alignment: Alignment.centerLeft,
+              children: [
+                // 彩虹渐变条
+                Container(
+                  height: 14,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(7),
+                    gradient: const LinearGradient(
+                      colors: [
+                        Color(0xFFFF0000), // 0°   Red
+                        Color(0xFFFFFF00), // 60°  Yellow
+                        Color(0xFF00FF00), // 120° Green
+                        Color(0xFF00FFFF), // 180° Cyan
+                        Color(0xFF0000FF), // 240° Blue
+                        Color(0xFFFF00FF), // 300° Magenta
+                        Color(0xFFFF0000), // 360° Red
+                      ],
+                    ),
+                    border: Border.all(
+                      color: c.border.withValues(alpha: 0.3),
+                      width: 0.5,
+                    ),
+                  ),
+                ),
+                // 拖动指示器
+                Positioned(
+                  left: (thumbX - 8).clamp(0, width - 16),
+                  child: Container(
+                    width: 16,
+                    height: 16,
+                    decoration: BoxDecoration(
+                      color: HSLColor.fromAHSL(1, hue, 0.8, 0.5).toColor(),
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white, width: 2),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Color(0x40000000),
+                          blurRadius: 3,
+                          spreadRadius: 0,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
+// 通用双色渐变滑块（饱和度 / 明度）
+// ─────────────────────────────────────────────
+
+class _GradientSlider extends StatelessWidget {
+  final double value; // 0..1
+  final ValueChanged<double> onChanged;
+  final Color leftColor;
+  final Color rightColor;
+
+  const _GradientSlider({
+    required this.value,
+    required this.onChanged,
+    required this.leftColor,
+    required this.rightColor,
+  });
+
+  void _handleInteraction(Offset localPosition, double width) {
+    final fraction = (localPosition.dx / width).clamp(0.0, 1.0);
+    onChanged(fraction);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppColors.of(context);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth;
+        final thumbX = value * width;
+        final thumbColor = Color.lerp(leftColor, rightColor, value)!;
+        return GestureDetector(
+          onTapDown: (d) => _handleInteraction(d.localPosition, width),
+          onPanUpdate: (d) => _handleInteraction(d.localPosition, width),
+          child: SizedBox(
+            height: 22,
+            child: Stack(
+              alignment: Alignment.centerLeft,
+              children: [
+                Container(
+                  height: 14,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(7),
+                    gradient: LinearGradient(colors: [leftColor, rightColor]),
+                    border: Border.all(
+                      color: c.border.withValues(alpha: 0.3),
+                      width: 0.5,
+                    ),
+                  ),
+                ),
+                Positioned(
+                  left: (thumbX - 8).clamp(0, width - 16),
+                  child: Container(
+                    width: 16,
+                    height: 16,
+                    decoration: BoxDecoration(
+                      color: thumbColor,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white, width: 2),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Color(0x40000000),
+                          blurRadius: 3,
+                          spreadRadius: 0,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -2438,6 +2776,34 @@ class _AboutContent extends StatelessWidget {
                 ),
               ),
             ],
+            const Spacer(),
+            MouseRegion(
+              cursor: SystemMouseCursors.click,
+              child: GestureDetector(
+                onTap: () => Process.run('cmd', [
+                  '/c',
+                  'start',
+                  '',
+                  'https://fluxdown.zerx.dev',
+                ]),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(LucideIcons.globe, size: 12, color: c.accent),
+                    const SizedBox(width: 5),
+                    Text(
+                      s.officialWebsite,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: c.accent,
+                        decoration: TextDecoration.underline,
+                        decorationColor: c.accent,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           ],
         ),
       ],

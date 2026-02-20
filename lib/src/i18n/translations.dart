@@ -343,14 +343,7 @@ class S {
   String get colorGreen => _t('绿色', 'Green');
   String get colorViolet => _t('紫色', 'Violet');
   String get colorRose => _t('玫红', 'Rose');
-  String get colorOrange => _t('橙色', 'Orange');
-  String get colorRed => _t('红色', 'Red');
-  String get colorYellow => _t('黄色', 'Yellow');
-  String get colorSlate => _t('石板灰', 'Slate');
-  String get colorZinc => _t('锌灰', 'Zinc');
-  String get colorGray => _t('灰色', 'Gray');
-  String get colorNeutral => _t('中性', 'Neutral');
-  String get colorStone => _t('石色', 'Stone');
+  String get colorCustom => _t('自定义', 'Custom');
 
   // ─────────────────────────────────────────────
   // Settings — 下载
@@ -522,6 +515,9 @@ class S {
   String get checkUpdate => _t('检查更新', 'Check for Updates');
   String downloadUpdate(String size) => _t('下载更新 ($size)', 'Download ($size)');
   String get recheck => _t('重新检查', 'Recheck');
+  String get officialWebsite => _t('官方网站', 'Official Website');
+  String get visitWebsiteForMore =>
+      _t('访问官网获取更多信息', 'Visit website for more information');
 
   // ─────────────────────────────────────────────
   // 更新日志弹窗
