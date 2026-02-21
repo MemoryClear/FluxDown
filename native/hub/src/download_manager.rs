@@ -180,6 +180,8 @@ pub struct DownloadManager {
     hls_quality_senders: HashMap<String, oneshot::Sender<i32>>,
     /// Globally configured user-agent string. Empty = use built-in Chrome UA.
     global_user_agent: String,
+    /// Global default segment count from settings. 0 = defer to segment_advisor.
+    global_default_segments: i32,
     /// In-memory cache of named queue settings (queue_id → QueueInfo).
     /// Kept in sync with the DB on every queue CRUD operation.
     queues: HashMap<String, QueueInfo>,
@@ -231,6 +233,7 @@ impl DownloadManager {
             app_data_dir,
             bt_config,
             global_user_agent: user_agent,
+            global_default_segments: 0,
             queues: HashMap::new(),
             queue_limiters: HashMap::new(),
             active_task_queue: HashMap::new(),
@@ -267,6 +270,11 @@ impl DownloadManager {
     /// future session re-creation (e.g. after app restart).
     pub fn set_default_save_dir(&mut self, dir: String) {
         self.default_save_dir = dir;
+    }
+
+    /// Update global default segment count. 0 = defer to segment_advisor.
+    pub fn set_default_segments(&mut self, v: i32) {
+        self.global_default_segments = v;
     }
 
     /// Update global speed limit (bytes/sec).  Takes effect immediately on
@@ -742,18 +750,24 @@ impl DownloadManager {
             checksum,
         } = queued;
 
-        // Three-tier segment count priority:
+        // Four-tier segment count priority:
         //   1. Task-level explicit choice (segments > 0) — highest priority
         //   2. Queue default_segments (> 0) — inherits from queue when task is auto
-        //   3. Global segment advisor (segments == 0) — dynamic calculation at runtime
+        //   3. Global default_segments (> 0) — global setting from config
+        //   4. Segment advisor (segments == 0) — dynamic calculation at runtime
+        let queue_default = self.queues
+            .get(&queue_id)
+            .map(|q| q.default_segments)
+            .filter(|&s| s > 0)
+            .unwrap_or(0);
         let segments = if segments > 0 {
             segments
+        } else if queue_default > 0 {
+            queue_default
+        } else if self.global_default_segments > 0 {
+            self.global_default_segments
         } else {
-            self.queues
-                .get(&queue_id)
-                .map(|q| q.default_segments)
-                .filter(|&s| s > 0)
-                .unwrap_or(0) // 0 → segment_advisor will calculate
+            0 // 0 → segment_advisor will calculate
         };
 
         self.generation += 1;

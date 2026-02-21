@@ -38,7 +38,7 @@ fn default_save_dir() -> String {
 }
 
 /// Read initial config values from DB to pass to DownloadManager.
-async fn load_initial_config(db: &Db) -> (usize, u64, String, BtConfig, ProxyConfig, String) {
+async fn load_initial_config(db: &Db) -> (usize, u64, String, BtConfig, ProxyConfig, String, i32) {
     let config = db.get_all_config().await.unwrap_or_default();
 
     let max_concurrent = config
@@ -81,8 +81,12 @@ async fn load_initial_config(db: &Db) -> (usize, u64, String, BtConfig, ProxyCon
 
     let proxy_config = ProxyConfig::from_config_map(&config);
     let user_agent = config.get("global_user_agent").cloned().unwrap_or_default();
+    let default_segments = config
+        .get("default_segments")
+        .and_then(|v| v.parse::<i32>().ok())
+        .unwrap_or(0);
 
-    (max_concurrent, speed_limit_bytes, save_dir, bt_config, proxy_config, user_agent)
+    (max_concurrent, speed_limit_bytes, save_dir, bt_config, proxy_config, user_agent, default_segments)
 }
 
 pub async fn run(db_dir: PathBuf) {
@@ -100,7 +104,7 @@ pub async fn run(db_dir: PathBuf) {
     }
 
     // Load persisted config to initialize the manager with correct limits.
-    let (max_concurrent, speed_limit_bps, save_dir, mut bt_config, proxy_config, user_agent) = load_initial_config(&db).await;
+    let (max_concurrent, speed_limit_bps, save_dir, mut bt_config, proxy_config, user_agent, default_segments) = load_initial_config(&db).await;
     rinf::debug_print!(
         "[actor] proxy config: mode={}, type={}, host={}, port={}",
         proxy_config.mode.as_str(),
@@ -133,6 +137,8 @@ pub async fn run(db_dir: PathBuf) {
             return;
         }
     };
+
+    manager.set_default_segments(default_segments);
 
     if let Some(rx) = manager.take_progress_rx() {
         tokio::spawn(download_manager::progress_reporter(rx, db.clone()));
@@ -304,6 +310,12 @@ pub async fn run(db_dir: PathBuf) {
                         rinf::debug_print!("[actor] user_agent changed: {}", msg.value);
                         if let Err(e) = manager.set_user_agent(msg.value) {
                             rinf::debug_print!("[actor] failed to apply user_agent: {}", e);
+                        }
+                    }
+                    "default_segments" => {
+                        if let Ok(v) = msg.value.parse::<i32>() {
+                            rinf::debug_print!("[actor] updating default_segments to {}", v);
+                            manager.set_default_segments(v);
                         }
                     }
                     _ => {} // other config keys — no runtime action needed
