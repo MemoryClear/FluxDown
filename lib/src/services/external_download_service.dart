@@ -98,6 +98,11 @@ class ExternalDownloadService {
       }
 
       logInfo(_tag, 'showing quick download dialog...');
+      // 优先使用 globalInstance（HomePage 的主 SettingsProvider，始终反映用户最新设置）。
+      // ExternalDownloadService 持有的 settingsProvider 是启动时创建的独立实例，
+      // 不会收到用户在 UI 中修改设置后的变更通知，仅作为 fallback。
+      final effectiveSettings =
+          SettingsProvider.globalInstance ?? settingsProvider;
       showQuickDownloadDialog(
         context,
         url: req.url,
@@ -105,8 +110,8 @@ class ExternalDownloadService {
         fileSize: req.fileSize.toInt(),
         mimeType: req.mimeType,
         cookies: req.cookies,
-        defaultSaveDir: settingsProvider.defaultSaveDir,
-        defaultQueueId: settingsProvider.defaultQueueId,
+        defaultSaveDir: effectiveSettings.defaultSaveDir,
+        defaultQueueId: effectiveSettings.defaultQueueId,
       );
       logInfo(_tag, 'dialog shown');
     } catch (e, stack) {
