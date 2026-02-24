@@ -28,8 +28,7 @@ class LogService {
     if (_initialized) return;
     _initialized = true;
 
-    final exeDir = File(Platform.resolvedExecutable).parent.path;
-    _logDir = Directory('$exeDir${Platform.pathSeparator}logs');
+    _logDir = _resolveLogDir();
     if (!_logDir.existsSync()) {
       _logDir.createSync(recursive: true);
     }
@@ -123,6 +122,20 @@ class LogService {
         '\n';
     _raf!.writeStringSync(header);
     _dirty = true;
+  }
+
+  /// 解析日志目录：
+  /// - Linux: ~/.local/share/fluxdown/logs（XDG_DATA_HOME 优先）
+  /// - 其他: exe 同级 logs/
+  static Directory _resolveLogDir() {
+    if (Platform.isLinux) {
+      final xdgData =
+          Platform.environment['XDG_DATA_HOME'] ??
+          '${Platform.environment['HOME']}/.local/share';
+      return Directory('$xdgData/fluxdown/logs');
+    }
+    final exeDir = File(Platform.resolvedExecutable).parent.path;
+    return Directory('$exeDir${Platform.pathSeparator}logs');
   }
 
   static String _pad2(int n) => n.toString().padLeft(2, '0');
