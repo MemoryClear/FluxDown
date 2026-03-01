@@ -323,7 +323,11 @@ class DownloadTask {
     // 已完成的任务强制返回 100%，避免未知大小文件完成后仍显示 0%
     if (status == TaskStatus.completed) return 1.0;
     if (totalBytes <= 0) return 0;
-    return (downloadedBytes / totalBytes).clamp(0.0, 1.0);
+    // 上限 0.999 而非 1.0：Rust 层 BT 下载在 finished=false 时已将 downloaded_bytes
+    // 限制为 total_bytes-1，但 (total_bytes-1)/total_bytes 经浮点运算后对大文件
+    // 仍会被 toStringAsFixed(1) 四舍五入为 "100.0%"，造成进度已到 100% 但状态仍
+    // 显示"下载中"的视觉误导。限制为 0.999 确保未完成任务最多显示 "99.9%"。
+    return (downloadedBytes / totalBytes).clamp(0.0, 0.999);
   }
 
   /// 是否为不确定进度（文件大小未知且处于活跃下载阶段）
