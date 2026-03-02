@@ -41,6 +41,25 @@ class DownloadController extends ChangeNotifier {
   /// 在 _onAllTasks 刷新时清空（Rust 端不再包含该任务即可安全移除）。
   final Set<String> _deletedTaskIds = {};
 
+  /// 批量删除进度追踪 — 存储正在等待 Rust 删除确认的任务 ID。
+  /// Rust 每删除一个任务会发 TaskProgress{status:4, error:"deleted"} 确认。
+  final Set<String> _pendingDeleteIds = {};
+  int _batchDeleteDone = 0;
+  int _batchDeleteTotal = 0;
+
+  /// 是否正在批量删除（供 UI 显示进度条）
+  bool get isBatchDeleting => _pendingDeleteIds.isNotEmpty;
+
+  /// 批量删除进度 [0.0, 1.0]
+  double get batchDeleteProgress =>
+      _batchDeleteTotal > 0 ? _batchDeleteDone / _batchDeleteTotal : 0.0;
+
+  /// 批量删除已完成数量
+  int get batchDeleteDone => _batchDeleteDone;
+
+  /// 批量删除总数量
+  int get batchDeleteTotal => _batchDeleteTotal;
+
   /// 用户主动暂停的任务 ID 集合（乐观暂停）。
   /// 守卫：阻止 _onAllTasks 从 DB 覆盖 UI 暂停状态，以及阻止积压的 downloading
   /// 信号将 UI 改回下载中。只在 resumeTask / deleteTask 时移除。
@@ -382,6 +401,13 @@ class DownloadController extends ChangeNotifier {
       _tag,
       'deleteCheckedTasks: ${ids.length} tasks, deleteFiles=$deleteFiles',
     );
+    // 超过阈值时启用进度追踪，等待 Rust 逐个发回删除确认信号
+    const _progressThreshold = 20;
+    if (ids.length >= _progressThreshold) {
+      _pendingDeleteIds.addAll(ids);
+      _batchDeleteDone = 0;
+      _batchDeleteTotal = ids.length;
+    }
     for (final id in ids) {
       _optimisticPausedIds.remove(id);
       _boostAutoPausedIds.remove(id);
@@ -827,7 +853,27 @@ class DownloadController extends ChangeNotifier {
     if (_disposed) return;
     final p = pack.message;
     // 忽略已删除任务的残余信号，防止「僵尸复活」
-    if (_deletedTaskIds.contains(p.taskId)) return;
+    // 但在此之前先拦截批量删除确认信号以更新进度
+    if (_deletedTaskIds.contains(p.taskId)) {
+      if (_pendingDeleteIds.contains(p.taskId) &&
+          p.status == 4 &&
+          p.errorMessage == 'deleted') {
+        _pendingDeleteIds.remove(p.taskId);
+        _batchDeleteDone++;
+        if (_pendingDeleteIds.isEmpty) {
+          // 全部删除完成，重置计数（保留 total 供 UI 短暂显示最终值）
+          Future.delayed(const Duration(milliseconds: 800), () {
+            if (!_disposed) {
+              _batchDeleteTotal = 0;
+              _batchDeleteDone = 0;
+              _safeNotifyListeners();
+            }
+          });
+        }
+        _safeNotifyListeners();
+      }
+      return;
+    }
     final newStatus = taskStatusFromInt(p.status);
     final idx = _tasks.indexWhere((t) => t.id == p.taskId);
     if (idx >= 0) {

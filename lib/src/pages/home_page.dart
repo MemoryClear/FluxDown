@@ -468,6 +468,31 @@ class _HomePageState extends State<HomePage> {
                 }),
               ),
             ),
+            // 批量删除进度覆盖层
+            ListenableBuilder(
+              listenable: _controller,
+              builder: (context, _) {
+                if (!_controller.isBatchDeleting) return const SizedBox.shrink();
+                final s = LocaleScope.of(context);
+                final c = AppColors.of(context);
+                return Positioned.fill(
+                  child: AbsorbPointer(
+                    child: ColoredBox(
+                      color: Colors.black.withValues(alpha: 0.45),
+                      child: Center(
+                        child: _BatchDeleteProgressCard(
+                          done: _controller.batchDeleteDone,
+                          total: _controller.batchDeleteTotal,
+                          progress: _controller.batchDeleteProgress,
+                          s: s,
+                          c: c,
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
           ],
         );
       },
@@ -563,6 +588,71 @@ class _BoostBanner extends StatelessWidget {
                 decoration: TextDecoration.underline,
               ),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 批量删除进度卡片（覆盖层内容）
+class _BatchDeleteProgressCard extends StatelessWidget {
+  final int done;
+  final int total;
+  final double progress;
+  final S s;
+  final AppColors c;
+
+  const _BatchDeleteProgressCard({
+    required this.done,
+    required this.total,
+    required this.progress,
+    required this.s,
+    required this.c,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 320,
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+      decoration: BoxDecoration(
+        color: c.surface1,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.25),
+            blurRadius: 20,
+            offset: const Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            s.batchDeletingTitle,
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              color: c.textPrimary,
+            ),
+          ),
+          const SizedBox(height: 12),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: LinearProgressIndicator(
+              value: progress,
+              backgroundColor: c.surface3,
+              valueColor: AlwaysStoppedAnimation<Color>(c.accent),
+              minHeight: 6,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            s.batchDeletingProgress(done, total),
+            style: TextStyle(fontSize: 12, color: c.textMuted),
           ),
         ],
       ),

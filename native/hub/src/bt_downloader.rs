@@ -20,7 +20,7 @@
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -283,6 +283,22 @@ pub struct SharedBtSession {
     /// Protected by an async Mutex because it's accessed from both the
     /// main actor (pause/delete) and spawned download tasks (add/finish).
     handles: Mutex<HashMap<String, BtHandle>>,
+    /// Pending delete requests for tasks whose `add_torrent` call is still
+    /// in progress (handle not yet in `handles`).  Keyed by task_id, value
+    /// is the `delete_files` flag.  The detached add_torrent closure checks
+    /// this map on completion and calls `session.delete` accordingly,
+    /// preventing orphaned files when a magnet task is deleted during DHT
+    /// metadata resolution.
+    pending_deletes: Mutex<HashMap<String, bool>>,
+    /// Count of detached `add_torrent` tasks currently running in the
+    /// background.  Incremented just before spawning the detached task;
+    /// decremented when the task completes (success, error, or pending-delete).
+    ///
+    /// `maybe_release_bt_session` must not tear down the session while this
+    /// is non-zero: the detached task still holds an `Arc<Session>` that
+    /// keeps the listening port bound.  Creating a new session while the old
+    /// port is still in use causes the next BT task to fail immediately.
+    inflight_adds: AtomicUsize,
 }
 
 impl SharedBtSession {
@@ -446,6 +462,8 @@ impl SharedBtSession {
             runtime: rt,
             session,
             handles: Mutex::new(HashMap::new()),
+            pending_deletes: Mutex::new(HashMap::new()),
+            inflight_adds: AtomicUsize::new(0),
         })
     }
 
@@ -540,7 +558,12 @@ impl SharedBtSession {
 
     /// Permanently delete a torrent from the session, removing persistence
     /// data.  `delete_files` controls whether downloaded data is also removed.
-    pub async fn delete_task(&self, task_id: &str, delete_files: bool) {
+    /// Returns `true` if a handle was found and `session.delete` was called,
+    /// `false` if the task was not yet in the handles map (still in the
+    /// `add_torrent` phase).  The caller should call `register_pending_delete`
+    /// when this returns `false` so the detached add_torrent closure can clean
+    /// up once metadata resolution completes.
+    pub async fn delete_task(&self, task_id: &str, delete_files: bool) -> bool {
         // Remove from map first (under lock), then perform async deletion
         // outside the lock to minimise contention.
         let handle = self.handles.lock().await.remove(task_id);
@@ -551,7 +574,47 @@ impl SharedBtSession {
             } else {
                 rinf::debug_print!("[BT] task={} deleted from session (delete_files={})", short_id(task_id), delete_files);
             }
+            true
+        } else {
+            false
         }
+    }
+
+    /// Register a deferred delete for a task whose `add_torrent` is still in
+    /// progress.  The detached add_torrent closure will consume this entry and
+    /// call `session.delete(id, delete_files)` as soon as metadata resolves.
+    pub async fn register_pending_delete(&self, task_id: &str, delete_files: bool) {
+        self.pending_deletes
+            .lock()
+            .await
+            .insert(task_id.to_string(), delete_files);
+        rinf::debug_print!(
+            "[BT] task={} pending delete registered (delete_files={})",
+            short_id(task_id),
+            delete_files
+        );
+    }
+
+    /// Consume and return the pending delete flag for `task_id`, if any.
+    pub async fn take_pending_delete(&self, task_id: &str) -> Option<bool> {
+        self.pending_deletes.lock().await.remove(task_id)
+    }
+
+    /// Increment the in-flight detached `add_torrent` task counter.
+    /// Must be called **before** spawning the detached task.
+    pub fn increment_inflight_add(&self) {
+        self.inflight_adds.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Decrement the in-flight detached `add_torrent` task counter.
+    /// Must be called at the end of the detached task (success or failure).
+    pub fn decrement_inflight_add(&self) {
+        self.inflight_adds.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Returns `true` if any detached `add_torrent` task is still running.
+    pub fn has_inflight_adds(&self) -> bool {
+        self.inflight_adds.load(Ordering::Relaxed) > 0
     }
 }
 
@@ -988,6 +1051,12 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
 
         let session_for_add = session.clone();
         let source_for_add = torrent_source.clone();
+        let shared_bt_for_add = shared_bt.clone();
+        let task_id_for_add = task_id.clone();
+        // Increment before spawning so `maybe_release_bt_session` sees the
+        // in-flight task even if the parent (`bt_download_inner`) is cancelled
+        // immediately after.  The detached task decrements when it finishes.
+        shared_bt.increment_inflight_add();
         let add_handle = tokio::spawn(async move {
             let add_input = match source_for_add {
                 TorrentSource::Magnet(ref url) => AddTorrent::from_url(url),
@@ -995,16 +1064,48 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     AddTorrent::from_bytes(Bytes::from(bytes.clone()))
                 }
             };
-            session_for_add
+            let result = session_for_add
                 .add_torrent(add_input, Some(add_opts))
-                .await
+                .await;
+            // If delete_task was called while we were waiting for metadata
+            // (handle not yet in `handles`, run_bt_download already returned
+            // Err(Cancelled)), apply the pending delete now that we have the
+            // torrent ID.  This prevents orphaned files from magnets whose
+            // DHT metadata resolved after the user deleted the task.
+            if let Ok(ref resp) = result {
+                let torrent_id = match resp {
+                    AddTorrentResponse::Added(id, _)
+                    | AddTorrentResponse::AlreadyManaged(id, _) => Some(*id),
+                    _ => None,
+                };
+                if let Some(id) = torrent_id {
+                    if let Some(del_files) =
+                        shared_bt_for_add.take_pending_delete(&task_id_for_add).await
+                    {
+                        let _ = session_for_add.delete(id.into(), del_files).await;
+                        rinf::debug_print!(
+                            "[BT] task={} pending delete applied after add_torrent (delete_files={})",
+                            short_id(&task_id_for_add),
+                            del_files
+                        );
+                    }
+                }
+            }
+            // Signal that this in-flight task is done regardless of outcome.
+            shared_bt_for_add.decrement_inflight_add();
+            result
         });
 
         // Send "preparing" heartbeats while waiting for metadata.
         let mut add_handle = add_handle;
         let h = loop {
             if cancelled.load(Ordering::SeqCst) {
-                add_handle.abort();
+                // Drop (detach) instead of abort: the spawned add_torrent task
+                // continues running so it can consume the pending_delete entry
+                // registered by delete_task and properly remove the torrent
+                // from the librqbit session.  Aborting would leave the torrent
+                // in the session with no way to clean it up later.
+                drop(add_handle);
                 return Err(DownloadError::Cancelled);
             }
 

@@ -82,6 +82,23 @@ fn is_bt_url(url: &str) -> bool {
     is_magnet(url) || is_torrent_file_url(url)
 }
 
+/// Returns true only when `name` is safe to join onto a base directory for
+/// deletion purposes.  Rejects three classes of dangerous values:
+///   1. empty string  → `save_dir.join("")` == `save_dir` itself
+///   2. absolute path → `PathBuf::join` silently replaces `save_dir` entirely
+///   3. `..` component → path traversal that escapes `save_dir`
+fn is_safe_file_name(name: &str) -> bool {
+    use std::path::Component;
+    if name.is_empty() {
+        return false;
+    }
+    let p = std::path::Path::new(name);
+    !p.is_absolute()
+        && !p
+            .components()
+            .any(|c| matches!(c, Component::ParentDir | Component::RootDir))
+}
+
 /// Notification sent from a spawned download task when it finishes.
 pub struct TaskDone {
     pub task_id: String,
@@ -610,6 +627,18 @@ impl DownloadManager {
         // defensive in case the invariant changes in the future.
         if self.pending_queue.iter().any(|q| is_bt_url(&q.url)) {
             return;
+        }
+        // Keep the session alive while any detached `add_torrent` task is
+        // still running.  Those tasks hold an `Arc<Session>` that keeps the
+        // BT listening port bound; creating a new session while the old port
+        // is in use causes the next BT download to fail immediately.
+        if let Some(ref bt) = self.bt_session {
+            if bt.has_inflight_adds() {
+                rinf::debug_print!(
+                    "[manager] deferring BT session release — detached add_torrent still in flight"
+                );
+                return;
+            }
         }
         rinf::debug_print!("[manager] all BT tasks finished/paused — releasing BT session");
         // Shut down on a background thread (same pattern as Drop) to avoid
@@ -1170,6 +1199,21 @@ impl DownloadManager {
                 queue_id
             );
             if let Some(t) = task_row {
+                // Notify Dart: task is now queued (pending), not actively resuming.
+                // Without this signal, the UI keeps all tasks stuck in "resuming" status
+                // even though only max_concurrent are actually downloading.
+                TaskProgress {
+                    task_id: task_id.to_string(),
+                    status: 0, // pending/queued
+                    downloaded_bytes: t.downloaded_bytes,
+                    total_bytes: t.total_bytes,
+                    speed: 0,
+                    file_name: t.file_name.clone(),
+                    save_dir: t.save_dir.clone(),
+                    url: t.url.clone(),
+                    error_message: String::new(),
+                }
+                .send_signal_to_dart();
                 self.pending_queue.push_back(QueuedTask {
                     task_id: task_id.to_string(),
                     url: t.url,
@@ -1517,19 +1561,25 @@ impl DownloadManager {
                 // persistence data and optionally deletes files via
                 // librqbit's own cleanup).
                 if let Some(ref bt) = self.bt_session {
-                    bt.delete_task(task_id, delete_files).await;
+                    let handle_found = bt.delete_task(task_id, delete_files).await;
+                    if !handle_found {
+                        // Handle not in map: the task is still in the
+                        // add_torrent phase (e.g. magnet DHT resolution).
+                        // Register a pending delete so the detached
+                        // add_torrent closure cleans up the librqbit session
+                        // entry (and files) once metadata resolves.
+                        bt.register_pending_delete(task_id, delete_files).await;
+                    }
                 }
                 // Fallback filesystem cleanup: covers the cross-session case
                 // where the app restarted after completion (handle not in
                 // SharedBtSession.handles) and session.delete could not be
                 // called above.  We skip the outer path.exists() guard and
                 // let each operation fail silently if the path is absent.
-                if delete_files {
+                if delete_files && is_safe_file_name(&t.file_name) {
                     if path.is_dir() {
                         let _ = tokio::fs::remove_dir_all(&path).await;
                     } else {
-                        // Attempt remove_file regardless of path.exists();
-                        // a NotFound error is silently ignored via `let _`.
                         let _ = tokio::fs::remove_file(&path).await;
                     }
                 }
@@ -1553,7 +1603,7 @@ impl DownloadManager {
                     }
                 }
 
-                if delete_files {
+                if delete_files && is_safe_file_name(&t.file_name) {
                     let _ = tokio::fs::remove_file(&path).await;
                 }
             }

@@ -221,6 +221,10 @@ class S {
           'Delete $count selected tasks? Downloaded files will be kept on disk.',
         );
 
+  String get batchDeletingTitle => _t('批量删除中', 'Deleting Tasks');
+  String batchDeletingProgress(int done, int total) =>
+      _t('正在删除 $done / $total 个任务...', 'Deleting $done of $total tasks...');
+
   // ─────────────────────────────────────────────
   // DetailPanel
   // ─────────────────────────────────────────────
