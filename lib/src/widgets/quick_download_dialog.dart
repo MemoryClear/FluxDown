@@ -353,7 +353,10 @@ class _QuickDownloadDialogContentState
             _InfoTag(text: _formatFileSize(widget.fileSize), c: c),
           if (widget.fileSize > 0 && widget.mimeType.isNotEmpty)
             const SizedBox(width: 6),
-          if (widget.mimeType.isNotEmpty) _InfoTag(text: widget.mimeType, c: c),
+          if (widget.mimeType.isNotEmpty)
+            Flexible(
+              child: _InfoTag(text: widget.mimeType, c: c),
+            ),
         ],
       ),
       description: Text(s.fromBrowserExtension),
@@ -737,7 +740,12 @@ class _InfoTag extends StatelessWidget {
         color: c.surface2,
         borderRadius: BorderRadius.circular(4),
       ),
-      child: Text(text, style: TextStyle(fontSize: 10, color: c.textMuted)),
+      child: Text(
+        text,
+        style: TextStyle(fontSize: 10, color: c.textMuted),
+        overflow: TextOverflow.ellipsis,
+        maxLines: 1,
+      ),
     );
   }
 }
