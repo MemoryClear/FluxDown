@@ -14,6 +14,7 @@ migrate_working_dir/
 /test*.txt
 # IntelliJ related
 *.iml
+/tmp
 *.ipr
 *.iws
 .idea/

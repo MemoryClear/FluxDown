@@ -83,11 +83,15 @@ fn is_retriable_error(msg: &str) -> bool {
         || lower.contains("timed out")
         || lower.contains("timeout")
         || lower.contains("broken pipe")
-        || lower.contains("network")
+        || lower.contains("network unreachable")
+        || lower.contains("network is down")
+        || lower.contains("no route to host")
         || lower.contains("eof")
         || lower.contains("connection closed")
         || lower.contains("connection abort")
         || lower.contains("incomplete download")
+        // reqwest Kind::Decode：TCP 连接在 body 传输中途被服务端/中间节点切断，大文件尤其常见
+        || lower.contains("error decoding response body")
 }
 
 /// Determine if a URL uses the FTP protocol (case-insensitive).

@@ -36,7 +36,7 @@ dependencies:
   rinf: ^8.10.0
   meta: ^1.17.0
   tuple: ^2.0.2
-  shadcn_ui: ^0.45.2
+  shadcn_ui: ^0.52.1
   window_manager: ^0.5.1
   file_picker: ^10.3.0
   shared_preferences: ^2.5.0

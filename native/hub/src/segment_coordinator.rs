@@ -302,19 +302,84 @@ pub async fn run_coordinated_download(
     }
 
     // Verify the invariant: segment ranges must cover [0, total_bytes-1] exactly.
-    if let Err(msg) = validate_coverage(&segments, total_bytes) {
+    //
+    // When resuming, the freshly probed total_bytes may differ from the value
+    // encoded in DB segment boundaries (e.g. CDN re-signing shifts Content-Length
+    // by a few bytes, or the server file has genuinely changed size).
+    //
+    // Two distinct cases:
+    //
+    //  db_total <= total_bytes  (server reports same or larger file)
+    //    → Trust the DB segment layout.  The extra bytes the server now claims
+    //      are beyond what we already segmented; downloading the DB-defined
+    //      range is correct and safe.  Correct tasks.total_bytes so the UI
+    //      reaches 100% when the segments complete.
+    //
+    //  db_total > total_bytes  (server reports a *smaller* file)
+    //    → Do NOT trust DB segments.  Requesting Range bytes beyond the server's
+    //      actual EOF would return 416 Range Not Satisfiable.  Instead fall
+    //      through with total_bytes so validate_coverage detects the mismatch
+    //      and rebuilds segments to fit the new file size.
+    let effective_total_bytes = if !existing.is_empty() {
+        // segments is non-empty here; max() will always return Some.
+        let db_total = segments
+            .values()
+            .map(|s| s.end_byte + 1)
+            .max()
+            .unwrap_or(total_bytes); // unreachable, defensive only
+
+        if db_total != total_bytes {
+            log_info!(
+                "[coordinator] task {} total_bytes probe={} vs db_segments={}",
+                task_id,
+                total_bytes,
+                db_total
+            );
+        }
+
+        if db_total <= total_bytes {
+            // Safe to trust DB segments.  Correct tasks.total_bytes so the
+            // progress bar reaches exactly 100 % on completion.
+            if db_total != total_bytes {
+                let _ = db.update_task_total_bytes(task_id, db_total).await;
+            }
+            db_total
+        } else {
+            // db_total > total_bytes: server file is smaller than DB segments cover.
+            // Using db_total would issue Range requests past EOF → 416 errors.
+            // Use total_bytes so validate_coverage below detects the mismatch
+            // and resets segments to the current file size.
+            log_info!(
+                "[coordinator] task {} DB segments cover {} bytes but server reports only {}; \
+                 resetting segments to avoid out-of-range requests",
+                task_id,
+                db_total,
+                total_bytes
+            );
+            total_bytes
+        }
+    } else {
+        total_bytes
+    };
+
+    if let Err(msg) = validate_coverage(&segments, effective_total_bytes) {
         log_info!(
             "[coordinator] task {} segment coverage invalid: {}. Resetting all segments.",
             task_id,
             msg
         );
-        // Coverage is broken (e.g. partial split persisted before crash).
+        // Coverage is broken (e.g. partial split persisted before crash, or file
+        // size changed so db_total > total_bytes above).
         // Safest recovery: wipe segments and start fresh.
         db.delete_segments(task_id).await?;
         let (fresh, db_segs) = build_fresh_segments(initial_segment_count, total_bytes);
         segments = fresh;
         db.insert_segments(task_id, &db_segs).await?;
         next_index = initial_segment_count;
+        // update_task_total_bytes may have set tasks.total_bytes to db_total earlier
+        // (db_total <= total_bytes path).  After a fresh reset the canonical size is
+        // total_bytes (from probe), so re-sync.
+        let _ = db.update_task_total_bytes(task_id, total_bytes).await;
     }
 
     // Integrity check for resumed files: verify the file on disk is intact.
@@ -347,8 +412,8 @@ pub async fn run_coordinated_download(
             .truncate(false)
             .open(dest)
             .await?;
-        if file.metadata().await?.len() < total_bytes as u64 {
-            file.set_len(total_bytes as u64).await?;
+        if file.metadata().await?.len() < effective_total_bytes as u64 {
+            file.set_len(effective_total_bytes as u64).await?;
         }
     }
 
@@ -416,7 +481,7 @@ pub async fn run_coordinated_download(
             task_id.to_string(),
             url.to_string(),
             dest.to_path_buf(),
-            total_bytes,
+            effective_total_bytes,
             client.clone(),
             cancel_token.clone(),
             total_downloaded.clone(),
@@ -505,7 +570,7 @@ pub async fn run_coordinated_download(
                             find_next_work(
                                 &mut segments,
                                 &mut next_index,
-                                total_bytes,
+                                effective_total_bytes,
                             )
                         };
 
@@ -643,15 +708,15 @@ pub async fn run_coordinated_download(
     sync_downloaded_from_shared(&mut segments, &seg_states);
 
     let seg_total: i64 = segments.values().map(|s| s.downloaded_bytes).sum();
-    if seg_total < total_bytes {
+    if seg_total < effective_total_bytes {
         return Err(DownloadError::Other(format!(
             "coordinator: incomplete download, segments total={} expected={}",
-            seg_total, total_bytes
+            seg_total, effective_total_bytes
         )));
     }
 
     // Verify byte-range coverage as a final safety net.
-    if let Err(msg) = validate_coverage(&segments, total_bytes) {
+    if let Err(msg) = validate_coverage(&segments, effective_total_bytes) {
         return Err(DownloadError::Other(format!(
             "coordinator: post-download coverage error: {}",
             msg

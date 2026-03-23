@@ -679,6 +679,19 @@ fn extract_from_content_disposition(headers: &reqwest::header::HeaderMap) -> Opt
         if let Some(name) = trimmed.strip_prefix("filename=") {
             let name = name.trim_matches(|c| c == '"' || c == '\'' || c == ' ');
             if !name.is_empty() {
+                // Heuristic: some servers (e.g. Chinese cloud storage OBS/S3)
+                // percent-encode the filename= value instead of using the
+                // RFC 5987 filename*= syntax.  When the raw value contains
+                // percent-encoded sequences, try URL-decoding it so that
+                // `%E6%B0%B8%E7%94%9F.mp4` becomes `永生.mp4`.
+                if name.contains('%') {
+                    if let Ok(decoded) = urlencoding_decode(name) {
+                        let decoded = decoded.trim();
+                        if !decoded.is_empty() && decoded != name {
+                            return Some(sanitize_filename(decoded));
+                        }
+                    }
+                }
                 return Some(sanitize_filename(name));
             }
         }
@@ -1840,6 +1853,42 @@ mod tests {
         let headers = make_headers_with_cd("inline");
         let name = extract_from_content_disposition(&headers);
         assert!(name.is_none());
+    }
+
+    #[test]
+    fn content_disposition_percent_encoded_filename_unquoted() {
+        // Chinese cloud storage (OBS/S3) often sends percent-encoded filename=
+        // instead of using the RFC 5987 filename*= syntax.
+        let headers = make_headers_with_cd(
+            "attachment;filename=%E6%B0%B8%E7%94%9F%E6%88%98%E5%A3%AB.Sisu.2022265.mp4",
+        );
+        let name = extract_from_content_disposition(&headers);
+        assert_eq!(name.as_deref(), Some("永生战士.Sisu.2022265.mp4"));
+    }
+
+    #[test]
+    fn content_disposition_percent_encoded_filename_quoted() {
+        let headers = make_headers_with_cd(
+            "attachment; filename=\"%E6%B0%B8%E7%94%9F%E6%88%98%E5%A3%AB.Sisu.2022265.mp4\"",
+        );
+        let name = extract_from_content_disposition(&headers);
+        assert_eq!(name.as_deref(), Some("永生战士.Sisu.2022265.mp4"));
+    }
+
+    #[test]
+    fn content_disposition_plain_ascii_with_percent_literal() {
+        // A filename like "50%.txt" should NOT be mangled by the heuristic
+        // because urlencoding_decode("50%.txt") will fail or leave it unchanged.
+        let headers = make_headers_with_cd("attachment; filename=\"50%.txt\"");
+        let name = extract_from_content_disposition(&headers);
+        assert_eq!(name.as_deref(), Some("50%.txt"));
+    }
+
+    #[test]
+    fn content_disposition_percent_encoded_spaces() {
+        let headers = make_headers_with_cd("attachment; filename=My%20Great%20File.pdf");
+        let name = extract_from_content_disposition(&headers);
+        assert_eq!(name.as_deref(), Some("My Great File.pdf"));
     }
 
     // -----------------------------------------------------------------------
