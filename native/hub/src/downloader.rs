@@ -202,6 +202,10 @@ pub fn build_client(
         // set this.  Safe for bulk transfers because BufWriter already
         // coalesces writes into 256 KB chunks before hitting the socket.
         .tcp_nodelay(true)
+        // TCP Keep-Alive — 60s 间隔比系统默认（通常 >2min）更激进，
+        // 确保 NAT/防火墙不会因空闲超时而断开长时间下载的连接。
+        // reqwest 底层设置 TCP_KEEPIDLE=60s（首次探测前等待时间）。
+        .tcp_keepalive(Duration::from_secs(60))
         // Redirects — follow up to 30 hops like Chrome
         .redirect(reqwest::redirect::Policy::limited(30))
         // Timeouts — 15 s is sufficient for initial TCP+TLS handshake;

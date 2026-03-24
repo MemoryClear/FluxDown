@@ -112,17 +112,51 @@ pub(crate) fn is_single_conn_domain(url: &str) -> bool {
 // Tuning constants
 // ---------------------------------------------------------------------------
 
-/// Minimum remaining bytes in a segment before it can be split.
-/// Below this threshold the overhead of a new HTTP request outweighs the gain.
-/// 2 MB: TLS 1.3 握手仅需 1 RTT (~30-100ms)，2MB 段的建连开销占比 <1%，
-/// 降低阈值让动态拆分更积极，空闲 worker 能更快参与慢段的下载。
+/// 最小拆分阈值的默认/上限值（高速连接 >10 MB/s 时使用）。
+/// 低速连接通过 [`dynamic_min_split_bytes`] 自适应降低此阈值。
 const MIN_SPLIT_BYTES: i64 = 2 * 1024 * 1024; // 2 MB
+
+/// 根据当前实时吞吐量动态计算最小拆分阈值。
+///
+/// - 低速（< 1 MB/s）：512 KB — 更积极拆分，空闲 worker 可快速参与慢段
+/// - 中速（1–10 MB/s）：1 MB — 平衡 HTTP 请求开销与并行收益
+/// - 高速（> 10 MB/s）：2 MB — TLS 1.3 握手占比 <1%，保持默认
+fn dynamic_min_split_bytes(throughput_bps: f64) -> i64 {
+    const BW_LOW: f64 = 1.0 * 1024.0 * 1024.0; //  1 MB/s
+    const BW_HIGH: f64 = 10.0 * 1024.0 * 1024.0; // 10 MB/s
+    if throughput_bps < BW_LOW {
+        512 * 1024 // 512 KB
+    } else if throughput_bps < BW_HIGH {
+        1024 * 1024 // 1 MB
+    } else {
+        MIN_SPLIT_BYTES // 2 MB
+    }
+}
 
 /// Maximum total number of segments (including dynamically created ones).
 const MAX_SEGMENTS: i32 = 64;
 
-/// Buffer size for the file writer (same as downloader.rs).
-const BUF_WRITER_CAPACITY: usize = 256 * 1024; // 256 KB
+/// 默认 BufWriter 容量（低速/小段场景）。
+const BUF_WRITER_CAPACITY_SMALL: usize = 256 * 1024; // 256 KB
+/// 中等段（4-32 MB）使用 512 KB 缓冲区，减少系统调用频率。
+const BUF_WRITER_CAPACITY_MEDIUM: usize = 512 * 1024; // 512 KB
+/// 大段（>32 MB）使用 1 MB 缓冲区，充分利用高速连接。
+const BUF_WRITER_CAPACITY_LARGE: usize = 1024 * 1024; // 1 MB
+
+/// 根据段剩余字节数动态选择 BufWriter 容量。
+/// 大段使用更大的缓冲区以减少 write 系统调用频率；
+/// 小段使用较小缓冲区避免内存浪费。
+fn buf_writer_capacity_for_segment(remaining_bytes: i64) -> usize {
+    const THRESHOLD_LARGE: i64 = 32 * 1024 * 1024; // 32 MB
+    const THRESHOLD_MEDIUM: i64 = 4 * 1024 * 1024; //  4 MB
+    if remaining_bytes >= THRESHOLD_LARGE {
+        BUF_WRITER_CAPACITY_LARGE
+    } else if remaining_bytes >= THRESHOLD_MEDIUM {
+        BUF_WRITER_CAPACITY_MEDIUM
+    } else {
+        BUF_WRITER_CAPACITY_SMALL
+    }
+}
 
 /// Return type for `build_fresh_segments`: (in-memory map, DB tuples).
 type FreshSegments = (BTreeMap<i32, LiveSegment>, Vec<(i32, i64, i64)>);
@@ -405,6 +439,12 @@ pub async fn run_coordinated_download(
     }
 
     // ----- 2. Pre-allocate file to full size --------------------------------
+    //
+    // Linux: fallocate(2) 分配真实磁盘块（不写零，近乎瞬时），避免
+    //        set_len()/ftruncate 创建稀疏文件导致的：
+    //        - 多段随机写时文件系统需动态分配块 → 碎片化
+    //        - 磁盘空间不足时下载到中途才报 ENOSPC（而非启动时立即检测）
+    // 其他平台: 回退到 set_len()（Windows 上等效于 SetEndOfFile）。
     {
         let file = OpenOptions::new()
             .create(true)
@@ -412,8 +452,45 @@ pub async fn run_coordinated_download(
             .truncate(false)
             .open(dest)
             .await?;
-        if file.metadata().await?.len() < effective_total_bytes as u64 {
-            file.set_len(effective_total_bytes as u64).await?;
+        let current_len = file.metadata().await?.len();
+        let target_len = effective_total_bytes as u64;
+        if current_len < target_len {
+            #[cfg(target_os = "linux")]
+            {
+                let std_file = file.into_std().await;
+                tokio::task::spawn_blocking(move || -> Result<(), DownloadError> {
+                    use std::os::unix::io::AsRawFd;
+                    let fd = std_file.as_raw_fd();
+                    // fallocate(fd, 0, 0, len): 预分配 [0, len) 范围的磁盘块，
+                    // 不写零，ext4/XFS/Btrfs 均支持，耗时 O(1)。
+                    // mode=0 同时将文件大小设为 max(当前大小, offset+len)。
+                    let ret = unsafe { libc::fallocate(fd, 0, 0, target_len as libc::off_t) };
+                    if ret == 0 {
+                        return Ok(());
+                    }
+                    // fallocate 失败 — 检查是否为文件系统不支持
+                    let err = std::io::Error::last_os_error();
+                    let raw = err.raw_os_error().unwrap_or(0);
+                    if raw == libc::EOPNOTSUPP || raw == libc::ENOSYS {
+                        // tmpfs/NFS 等不支持 fallocate 的文件系统，回退到 ftruncate
+                        log_info!(
+                            "[coordinator] fallocate 不支持 (errno={}), 回退到 ftruncate",
+                            raw
+                        );
+                        std_file.set_len(target_len)?;
+                        Ok(())
+                    } else {
+                        // ENOSPC 等真实错误，直接上报（提前检测磁盘空间不足）
+                        Err(err.into())
+                    }
+                })
+                .await
+                .map_err(|e| DownloadError::Other(format!("fallocate task panicked: {e}")))??;
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                file.set_len(target_len).await?;
+            }
         }
     }
 
@@ -522,6 +599,11 @@ pub async fn run_coordinated_download(
     // 避免并发连接触发服务器的反多线程机制。
     let mut serial_mode = false;
     let mut final_error: Option<DownloadError> = None;
+
+    // 吞吐量跟踪：用于动态调整 MIN_SPLIT_BYTES
+    let mut last_throughput_bytes = total_downloaded.load(Ordering::Relaxed);
+    let mut last_throughput_time = Instant::now();
+    let mut current_min_split = MIN_SPLIT_BYTES;
     loop {
         tokio::select! {
             biased;
@@ -556,6 +638,21 @@ pub async fn run_coordinated_download(
                         // Try to assign new work to this worker.
                         // 串行模式下：同一时刻只允许一个 worker 工作，
                         // 且不进行分段拆分（避免产生新的并发连接）。
+                        // 动态计算最小拆分阈值：根据最近的实时吞吐量调整，
+                        // 低速时更积极拆分，高速时保守避免 HTTP 请求开销。
+                        {
+                            let now = Instant::now();
+                            let elapsed = now.duration_since(last_throughput_time);
+                            if elapsed.as_millis() >= 500 {
+                                let current_bytes = total_downloaded.load(Ordering::Relaxed);
+                                let delta = (current_bytes - last_throughput_bytes).max(0) as f64;
+                                let throughput = delta / elapsed.as_secs_f64();
+                                current_min_split = dynamic_min_split_bytes(throughput);
+                                last_throughput_bytes = current_bytes;
+                                last_throughput_time = now;
+                            }
+                        }
+
                         let next_work = if serial_mode {
                             let other_active = segments.values()
                                 .any(|s| s.state == SegState::Active);
@@ -571,6 +668,7 @@ pub async fn run_coordinated_download(
                                 &mut segments,
                                 &mut next_index,
                                 effective_total_bytes,
+                                current_min_split,
                             )
                         };
 
@@ -849,6 +947,7 @@ fn find_next_work(
     segments: &mut BTreeMap<i32, LiveSegment>,
     next_index: &mut i32,
     _total_bytes: i64,
+    min_split: i64,
 ) -> Option<NextWork> {
     // Strategy 1: existing Pending segment.
     if let Some(seg) = segments.values().find(|s| s.state == SegState::Pending) {
@@ -869,7 +968,7 @@ fn find_next_work(
     }
 
     // Strategy 2: split the largest active segment.
-    try_split_largest(segments, next_index)
+    try_split_largest(segments, next_index, min_split)
 }
 
 /// 串行模式专用：只从 Pending 分段中分配工作，不进行拆分。
@@ -903,6 +1002,7 @@ fn find_next_pending_only(segments: &mut BTreeMap<i32, LiveSegment>) -> Option<N
 fn try_split_largest(
     segments: &mut BTreeMap<i32, LiveSegment>,
     next_index: &mut i32,
+    min_split: i64,
 ) -> Option<NextWork> {
     if segments.len() >= MAX_SEGMENTS as usize {
         return None;
@@ -911,7 +1011,7 @@ fn try_split_largest(
     // Find the active segment with the most remaining bytes.
     let best_idx = segments
         .values()
-        .filter(|s| s.state == SegState::Active && s.remaining() >= MIN_SPLIT_BYTES)
+        .filter(|s| s.state == SegState::Active && s.remaining() >= min_split)
         .max_by_key(|s| s.remaining())
         .map(|s| s.index)?;
 
@@ -921,7 +1021,7 @@ fn try_split_largest(
     let current_pos = best.start_byte + best.downloaded_bytes;
     let remaining = best.end_byte - current_pos + 1;
 
-    if remaining < MIN_SPLIT_BYTES {
+    if remaining < min_split {
         return None;
     }
 
@@ -995,6 +1095,7 @@ fn try_split_largest(
 fn try_proactive_split(
     segments: &mut BTreeMap<i32, LiveSegment>,
     next_index: &mut i32,
+    min_split: i64,
 ) -> Option<NextWork> {
     // Do nothing if there's already a pending segment waiting for a worker.
     if segments.values().any(|s| s.state == SegState::Pending) {
@@ -1008,7 +1109,7 @@ fn try_proactive_split(
     // Find the active segment with the most remaining bytes.
     let best_idx = segments
         .values()
-        .filter(|s| s.state == SegState::Active && s.remaining() >= MIN_SPLIT_BYTES)
+        .filter(|s| s.state == SegState::Active && s.remaining() >= min_split)
         .max_by_key(|s| s.remaining())
         .map(|s| s.index)?;
 
@@ -1016,7 +1117,7 @@ fn try_proactive_split(
     let current_pos = best.start_byte + best.downloaded_bytes;
     let remaining = best.end_byte - current_pos + 1;
 
-    if remaining < MIN_SPLIT_BYTES {
+    if remaining < min_split {
         return None;
     }
 
@@ -1502,7 +1603,9 @@ async fn do_segment(
     let mut stream = resp.bytes_stream();
 
     let file = OpenOptions::new().write(true).open(dest).await?;
-    let mut file = tokio::io::BufWriter::with_capacity(BUF_WRITER_CAPACITY, file);
+    let seg_remaining = seg_end - actual_start + 1;
+    let buf_cap = buf_writer_capacity_for_segment(seg_remaining);
+    let mut file = tokio::io::BufWriter::with_capacity(buf_cap, file);
     file.seek(std::io::SeekFrom::Start(actual_start as u64))
         .await?;
 
@@ -1631,6 +1734,25 @@ async fn do_segment(
     }
 
     file.flush().await?;
+
+    // Linux: posix_fadvise(FADV_DONTNEED) 通知内核释放已完成段的页缓存，
+    // 防止大文件下载过程中页缓存无限增长占满内存。
+    // 参考 aria2 的 readDataDropCache() 策略。
+    // posix_fadvise 仅为内核提供提示，不阻塞，无需 spawn_blocking。
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = file.get_ref().as_raw_fd();
+        unsafe {
+            libc::posix_fadvise(
+                fd,
+                seg_start as libc::off_t,
+                seg_downloaded as libc::off_t,
+                libc::POSIX_FADV_DONTNEED,
+            );
+        }
+    }
+
     update_seg_state(seg_states, seg_idx, seg_downloaded, effective_end);
     let _ = db
         .update_segment_progress(task_id, seg_idx, seg_downloaded)
@@ -1661,9 +1783,9 @@ fn update_seg_state(
 #[cfg(test)]
 mod tests {
     use super::{
-        LiveSegment, MAX_SEGMENTS, SegState, all_done, extract_host, find_next_pending_only,
-        find_next_work, is_single_conn_domain, record_single_conn_domain, single_conn_cache,
-        try_proactive_split, try_split_largest, validate_coverage,
+        LiveSegment, MAX_SEGMENTS, MIN_SPLIT_BYTES, SegState, all_done, extract_host,
+        find_next_pending_only, find_next_work, is_single_conn_domain, record_single_conn_domain,
+        single_conn_cache, try_proactive_split, try_split_largest, validate_coverage,
     };
     use crate::downloader::{DownloadError, is_server_rejection};
     use std::collections::BTreeMap;
@@ -1760,7 +1882,7 @@ mod tests {
         );
 
         let mut next_idx = 2;
-        let result = try_split_largest(&mut segs, &mut next_idx);
+        let result = try_split_largest(&mut segs, &mut next_idx, MIN_SPLIT_BYTES);
         assert!(result.is_some(), "should split the largest segment");
 
         let next = result.expect("already checked");
@@ -1797,7 +1919,7 @@ mod tests {
         segs.insert(0, make_seg(0, 0, 3_000_000, 1_000_001, SegState::Active));
 
         let mut next_idx = 1;
-        let result = try_split_largest(&mut segs, &mut next_idx);
+        let result = try_split_largest(&mut segs, &mut next_idx, MIN_SPLIT_BYTES);
         assert!(result.is_none(), "should not split small segments");
     }
 
@@ -1817,7 +1939,7 @@ mod tests {
             );
         }
         let mut next_idx = MAX_SEGMENTS;
-        let result = try_split_largest(&mut segs, &mut next_idx);
+        let result = try_split_largest(&mut segs, &mut next_idx, MIN_SPLIT_BYTES);
         assert!(result.is_none(), "should not exceed MAX_SEGMENTS");
     }
 
@@ -1831,7 +1953,7 @@ mod tests {
 
         // Perform multiple consecutive splits.
         for _ in 0..5 {
-            let result = try_split_largest(&mut segs, &mut next_idx);
+            let result = try_split_largest(&mut segs, &mut next_idx, MIN_SPLIT_BYTES);
             assert!(result.is_some(), "should be able to split");
             assert!(
                 validate_coverage(&segs, total_bytes).is_ok(),
@@ -1855,7 +1977,7 @@ mod tests {
         );
 
         let mut next_idx = 1;
-        let result = try_split_largest(&mut segs, &mut next_idx);
+        let result = try_split_largest(&mut segs, &mut next_idx, MIN_SPLIT_BYTES);
         assert!(result.is_some());
 
         let next = result.expect("checked");
@@ -1875,15 +1997,12 @@ mod tests {
         let mut segs = BTreeMap::new();
         segs.insert(
             0,
-            make_seg(0, 0, 99_999_999, 100_000_000, SegState::Completed),
+            make_seg(0, 0, 9_999_999, 10_000_000, SegState::Completed),
         );
-        segs.insert(
-            1,
-            make_seg(1, 100_000_000, 199_999_999, 0, SegState::Active),
-        );
+        segs.insert(1, make_seg(1, 10_000_000, 19_999_999, 0, SegState::Active));
+        let mut next = 2;
 
-        let mut next_idx = 2;
-        let result = try_split_largest(&mut segs, &mut next_idx);
+        let result = try_split_largest(&mut segs, &mut next, MIN_SPLIT_BYTES);
         assert!(result.is_some());
 
         let next = result.expect("checked");
@@ -1905,7 +2024,7 @@ mod tests {
         );
 
         let mut next_idx = 2;
-        let result = find_next_work(&mut segs, &mut next_idx, 100_000_001);
+        let result = find_next_work(&mut segs, &mut next_idx, 100_000_001, MIN_SPLIT_BYTES);
         assert!(result.is_some());
         let next = result.expect("checked");
         assert_eq!(
@@ -1921,10 +2040,10 @@ mod tests {
     #[test]
     fn find_work_splits_when_no_pending() {
         let mut segs = BTreeMap::new();
-        segs.insert(0, make_seg(0, 0, 99_999_999, 0, SegState::Active));
-
+        segs.insert(0, make_seg(0, 0, 9_999_999, 0, SegState::Active));
         let mut next_idx = 1;
-        let result = find_next_work(&mut segs, &mut next_idx, 100_000_000);
+
+        let result = find_next_work(&mut segs, &mut next_idx, 10_000_000, MIN_SPLIT_BYTES);
         assert!(result.is_some());
         let next = result.expect("checked");
         assert!(next.split_parent.is_some(), "should come from a split");
@@ -1937,7 +2056,7 @@ mod tests {
         segs.insert(0, make_seg(0, 0, 99, 100, SegState::Completed));
 
         let mut next_idx = 1;
-        let result = find_next_work(&mut segs, &mut next_idx, 100);
+        let result = find_next_work(&mut segs, &mut next_idx, 100, MIN_SPLIT_BYTES);
         assert!(result.is_none(), "no work when all completed");
     }
 
@@ -1953,7 +2072,7 @@ mod tests {
 
         let mut next_idx = 2;
         assert!(
-            try_proactive_split(&mut segs, &mut next_idx).is_none(),
+            try_proactive_split(&mut segs, &mut next_idx, MIN_SPLIT_BYTES).is_none(),
             "should not proactively split when Pending segments exist"
         );
     }
@@ -1961,16 +2080,16 @@ mod tests {
     #[test]
     fn proactive_split_creates_pending() {
         let mut segs = BTreeMap::new();
-        segs.insert(0, make_seg(0, 0, 99_999_999, 0, SegState::Active));
+        segs.insert(0, make_seg(0, 0, 19_999_999, 0, SegState::Active));
+        let mut next = 1;
 
-        let mut next_idx = 1;
-        let result = try_proactive_split(&mut segs, &mut next_idx);
+        let result = try_proactive_split(&mut segs, &mut next, MIN_SPLIT_BYTES);
         assert!(result.is_some(), "proactive split should succeed");
 
         // New segment should be Pending.
         let new_seg = segs.get(&1).expect("new segment exists");
         assert_eq!(new_seg.state, SegState::Pending);
-        assert!(validate_coverage(&segs, 100_000_000).is_ok());
+        assert!(validate_coverage(&segs, 20_000_000).is_ok());
     }
 
     // -----------------------------------------------------------------------

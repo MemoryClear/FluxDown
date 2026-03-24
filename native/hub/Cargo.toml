@@ -54,6 +54,8 @@ librqbit = { version = "8", default-features = false, features = ["default-tls"]
 # Linux/macOS 用 rustls（纯 Rust，无系统 TLS 依赖）
 reqwest = { version = "0.12", features = ["stream", "rustls-tls-native-roots", "cookies", "json", "socks"] }
 librqbit = { version = "8", default-features = false, features = ["rust-tls"] }
+# 系统调用：fallocate（文件预分配）、posix_fadvise（页缓存释放）
+libc = "0.2"
 
 [dev-dependencies]
 http = "1.4.0"
