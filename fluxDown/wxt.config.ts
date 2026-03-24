@@ -8,11 +8,16 @@ export default defineConfig({
     name: "__MSG_extensionName__",
     description: "__MSG_extensionDescription__",
     default_locale: "en",
-    // Stable key to pin extension ID during local development (Chrome/Edge only).
-    // Firefox pins its ID via browser_specific_settings.gecko.id instead.
-    // 商店上传不允许包含 key 字段，因此仅在开发模式下注入。
+    // Stable key to pin Chrome extension ID across all builds (Chrome only).
+    // Firefox 通过 browser_specific_settings.gecko.id 固定 ID。
+    // Edge 不支持 key 字段（加载时会报错），且 Edge 侧载扩展 ID
+    // 由 crx 签名或加载路径决定，无法通过 key 固定。
+    // Chrome Web Store 会忽略 manifest 中的 key 字段，不影响上传。
+    // 侧载（从 GitHub Release 下载 zip 手动加载）时，若缺少 key，Chrome 会
+    // 根据加载路径生成随机 ID，导致与 NMH manifest 中硬编码的 allowed_origins
+    // 不匹配，connectNative() 被拒绝 → 插件无法连接桌面应用。
     // Corresponding Chrome extension ID: meleenglfggcmcajknpeeeiobnpfmahc
-    ...(browser !== "firefox" && mode === "development"
+    ...(browser === "chrome"
       ? {
           key: "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuf6dyYDofdb37oWv25Rks/FLPA03UonRHvfgCw0KVtMJFUKSTyYbHJ3KWx8j/j8CZBKsPG+U75KEEeV7DTgxb0OUQDY93RzqdcIZlaLQaOxoFgmLI4I0dwjY7pIZs2lxkibqxHOZFZMwH3IMfIp0+u6CmumUPAtd40KaK9oTt0yIruWX6JaoSHJeNAGJ2SAPUl9WSAvB/VuGyL2JDeoT1Li4EZsYlCeaf1d3DHCt3Ye10kKt8a7Pv9iSOkgJlKSDQ24qRcHnch5Xe1IZfJYtAaeH8jYq5HdARFUcYnPgJ9gJEWUglQ2ADXywGyQF9gkOcDKmQJFukjqVDsQGpHbZcwIDAQAB",
         }
