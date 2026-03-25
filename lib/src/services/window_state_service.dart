@@ -20,6 +20,18 @@ const _kWindowMaximized = 'window_state_maximized';
 const _kMinWidth = 900.0;
 const _kMinHeight = 500.0;
 
+/// 坐标合理性阈值：允许多显示器配置下的负坐标，但拒绝明显异常值。
+///
+/// 典型异常值来源：
+///   - Windows 最小化 → (-32000, -32000)
+///   - Linux 隐藏后 WM 返回的各种巨大负值
+///
+/// 合理范围：多显示器可能出现 -3840 左右的负坐标（4K 屏在左侧），
+/// 但不会出现 -10000 以下的值。这里取 -500 作为保守下限，覆盖
+/// 窗口部分拖出屏幕的正常场景。
+const _kMinPosition = -500.0;
+const _kMaxPosition = 20000.0;
+
 /// 窗口状态持久化服务。
 ///
 /// ## 启动阶段（解决闪烁问题的关键）
@@ -38,6 +50,19 @@ const _kMinHeight = 500.0;
 ///
 /// 通过 WindowListener 回调持久化窗口位置、大小、最大化状态，
 /// 使用 500ms 防抖避免拖拽/调整大小时频繁写入。
+///
+/// ## 隐藏到托盘的坐标保护
+///
+/// `window_manager` Linux 原生层的 `hide()` 实现中，在 `gtk_widget_hide()`
+/// 之后会调用 `gtk_window_move()` 恢复位置，这会触发 `configure-event` →
+/// Dart 层 `onWindowMoved()` → 防抖保存。但此时窗口已隐藏，
+/// `getPosition()` 返回异常坐标（如 -32000），会覆盖 `saveNow()` 之前
+/// 保存的正确值。
+///
+/// 防护措施：
+///   1. `_save()` 检查窗口可见性，不可见时跳过
+///   2. `_save()` 校验坐标合理性，异常值时跳过
+///   3. `applyState()` 恢复位置前校验，异常时 fallback 到居中
 class WindowStateService {
   WindowStateService._();
 
@@ -143,10 +168,22 @@ class WindowStateService {
         logInfo(_tag, 'applied default size: 1280x720');
       }
 
-      // 2) 设置窗口位置
+      // 2) 设置窗口位置（带合理性校验）
       if (hasSavedPosition) {
-        await windowManager.setPosition(Offset(_savedX!, _savedY!));
-        logInfo(_tag, 'applied position: ($_savedX, $_savedY)');
+        final x = _savedX!;
+        final y = _savedY!;
+        if (_isPositionValid(x, y)) {
+          await windowManager.setPosition(Offset(x, y));
+          logInfo(_tag, 'applied position: ($x, $y)');
+        } else {
+          // 坐标异常（如上次隐藏到托盘时被错误保存），fallback 到居中
+          logInfo(
+            _tag,
+            'saved position ($x, $y) out of valid range '
+            '[$_kMinPosition, $_kMaxPosition], centering instead',
+          );
+          await windowManager.setAlignment(Alignment.center);
+        }
       } else {
         // 没有保存的位置 → 居中
         await windowManager.setAlignment(Alignment.center);
@@ -189,11 +226,15 @@ class WindowStateService {
     _debounceSave();
   }
 
-  /// 立即保存当前窗口状态（用于退出/隐藏前确保状态持久化）
+  /// 立即保存当前窗口状态（用于退出/隐藏前确保状态持久化）。
+  ///
+  /// 调用方保证此时窗口仍然可见，因此跳过可见性检查直接保存。
+  /// 同时取消待执行的防抖定时器，防止后续 `hide()` 触发的
+  /// `configure-event` 产生新的延迟保存覆盖本次结果。
   Future<void> saveNow() async {
     _debounceTimer?.cancel();
     _debounceTimer = null;
-    await _save();
+    await _save(force: true);
   }
 
   /// 释放资源
@@ -211,8 +252,26 @@ class WindowStateService {
     _debounceTimer = Timer(_debounceDuration, _save);
   }
 
-  Future<void> _save() async {
+  /// 持久化当前窗口状态。
+  ///
+  /// [force] 为 true 时跳过可见性检查（仅 [saveNow] 在隐藏前调用时使用）。
+  /// 默认的防抖调用 force=false，会检查窗口可见性和坐标合理性，
+  /// 防止 `hide()` 后异常坐标被写入。
+  Future<void> _save({bool force = false}) async {
     try {
+      // ── 防护层 1：可见性检查 ──
+      // window_manager 的 hide() 在 gtk_widget_hide() 之后会调用
+      // gtk_window_move() 恢复位置，触发 configure-event → onMoved →
+      // 防抖 _save()。此时窗口已不可见，getPosition() 返回异常坐标。
+      // 跳过保存以保护 saveNow() 之前写入的正确值。
+      if (!force) {
+        final isVisible = await windowManager.isVisible();
+        if (!isVisible) {
+          logInfo(_tag, 'save skipped: window not visible');
+          return;
+        }
+      }
+
       final prefs = await SharedPreferences.getInstance();
 
       await prefs.setBool(_kWindowMaximized, _isMaximized);
@@ -241,6 +300,18 @@ class WindowStateService {
       final position = await windowManager.getPosition();
       final size = await windowManager.getSize();
 
+      // ── 防护层 2：坐标合理性校验 ──
+      // 即使通过了可见性检查，仍验证坐标是否在合理范围内。
+      // 某些 WM/合成器在特定时序下可能返回异常值。
+      if (!_isPositionValid(position.dx, position.dy)) {
+        logInfo(
+          _tag,
+          'save skipped: position (${position.dx}, ${position.dy}) '
+          'out of valid range [$_kMinPosition, $_kMaxPosition]',
+        );
+        return;
+      }
+
       _normalBounds = Rect.fromLTWH(
         position.dx,
         position.dy,
@@ -261,5 +332,17 @@ class WindowStateService {
     } catch (e, stack) {
       logError(_tag, 'failed to save window state', e, stack);
     }
+  }
+
+  /// 检查坐标是否在合理范围内。
+  ///
+  /// 多显示器配置下坐标可以为负值（如左侧屏幕），但不应该
+  /// 出现 -32000 这样的极端值（Windows 最小化）或 Linux 隐藏
+  /// 后 WM 返回的异常坐标。
+  static bool _isPositionValid(double x, double y) {
+    return x >= _kMinPosition &&
+        x <= _kMaxPosition &&
+        y >= _kMinPosition &&
+        y <= _kMaxPosition;
   }
 }
