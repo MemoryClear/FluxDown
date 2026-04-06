@@ -685,6 +685,18 @@ impl Db {
         .await?
     }
 
+    /// Delete a config entry by key.
+    pub async fn delete_config(&self, key: &str) -> Result<(), DbError> {
+        let conn = self.conn.clone();
+        let key = key.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(|_| DbError::LockPoisoned)?;
+            conn.execute("DELETE FROM config WHERE key = ?1", params![key])?;
+            Ok(())
+        })
+        .await?
+    }
+
     /// Load all config entries as a HashMap.
     pub async fn get_all_config(&self) -> Result<HashMap<String, String>, DbError> {
         let conn = self.conn.clone();

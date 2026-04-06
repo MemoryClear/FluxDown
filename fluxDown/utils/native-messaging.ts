@@ -214,19 +214,51 @@ export async function sendBatchDownloadRequest(
     return { success: false, message: "No items" };
   }
 
-  const joinedUrl = items.map((item) => item.url).join("\n");
-  const cookies = items[0]?.cookies || "";
+  // Send each item as an individual download request to preserve per-item
+  // cookies, headers, referrer, fileSize, and mimeType.  The Rust NMH
+  // protocol only supports single-item DownloadRequest — batching by
+  // newline-joining URLs discards all per-item auth metadata.
+  const results = await Promise.allSettled(
+    items.map((item) =>
+      sendDownloadRequest({
+        url: item.url,
+        filename: item.filename || "",
+        referrer: item.referrer || "",
+        cookies: item.cookies,
+        headers: item.headers,
+        fileSize: item.fileSize,
+        mimeType: item.mimeType,
+      }),
+    ),
+  );
 
-  const request: DownloadRequest = {
-    url: joinedUrl,
-    filename: "",
-    referrer: items[0]?.referrer || "",
-    cookies,
-    // 传递第一条 item 的额外请求头（如 Authorization 等）
-    headers: items[0]?.headers,
+  const succeeded = results.filter(
+    (r) => r.status === "fulfilled" && r.value.success,
+  ).length;
+  const failed = results.length - succeeded;
+
+  if (succeeded === 0) {
+    const firstError = results.find(
+      (r) =>
+        (r.status === "fulfilled" && !r.value.success) ||
+        r.status === "rejected",
+    );
+    const message =
+      firstError?.status === "fulfilled"
+        ? firstError.value.message
+        : firstError?.status === "rejected"
+          ? String(firstError.reason)
+          : "All items failed";
+    return { success: false, message: `Batch failed: ${message}` };
+  }
+
+  return {
+    success: true,
+    message:
+      failed > 0
+        ? `${succeeded}/${results.length} items sent (${failed} failed)`
+        : `${succeeded} items sent`,
   };
-
-  return sendWithRetry("download", request as Record<string, any>);
 }
 
 export async function checkFluxDownAvailable(): Promise<boolean> {

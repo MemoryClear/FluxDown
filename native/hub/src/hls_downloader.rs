@@ -14,8 +14,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use futures_util::StreamExt;
 use reqwest::Client;
-use tokio::fs::File;
+use tokio::fs::{File, OpenOptions};
 use tokio::io::AsyncWriteExt;
 
 use rinf::RustSignal;
@@ -685,16 +686,53 @@ async fn run_hls_download_inner(
         tokio::fs::create_dir_all(parent).await?;
     }
 
-    // Create/truncate temp file (HLS doesn't support resume — segments are
-    // sequential and we always start from the beginning)
-    let mut file = File::create(&temp_path).await?;
+    // --- HLS resume support ---
+    // On resume, check if we have a saved segment index from a previous run.
+    // If so, skip already-downloaded segments and open the temp file in append mode.
+    let resume_seg_key = format!("hls_resume_{}", p.task_id);
+    let (mut file, skip_segments, mut downloaded_bytes) = if p.is_resume {
+        let saved_idx: usize =
+            p.db.get_config(&resume_seg_key)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+        let file_size = tokio::fs::metadata(&temp_path)
+            .await
+            .map(|m| m.len() as i64)
+            .unwrap_or(0);
+        if saved_idx > 0 && file_size > 0 {
+            log_info!(
+                "[hls] task {} resuming from segment {} (file size: {} bytes)",
+                p.task_id,
+                saved_idx,
+                file_size
+            );
+            let f = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&temp_path)
+                .await?;
+            (f, saved_idx, file_size)
+        } else {
+            (File::create(&temp_path).await?, 0, 0i64)
+        }
+    } else {
+        // Clean up any stale resume marker from a previous run
+        let _ = p.db.delete_config(&resume_seg_key).await;
+        (File::create(&temp_path).await?, 0, 0i64)
+    };
 
-    let mut downloaded_bytes: i64 = 0;
     let mut key_cache: HashMap<String, Vec<u8>> = HashMap::new();
     let mut last_report = std::time::Instant::now();
     let mut last_db_save = std::time::Instant::now();
 
     for (seg_idx, segment) in segments.iter().enumerate() {
+        // Skip already-downloaded segments on resume
+        if seg_idx < skip_segments {
+            continue;
+        }
         // Check cancellation between segments
         if p.cancel_token.is_cancelled() {
             file.flush().await?;
@@ -761,6 +799,11 @@ async fn run_hls_download_inner(
 
         downloaded_bytes += chunk_len as i64;
 
+        // Save resume checkpoint (segment index) for HLS resume support
+        let _ =
+            p.db.set_config(&resume_seg_key, &(seg_idx + 1).to_string())
+                .await;
+
         // Progress reporting (every 200ms)
         if last_report.elapsed().as_millis() >= 200 {
             let _ = p
@@ -802,6 +845,9 @@ async fn run_hls_download_inner(
     let _ =
         p.db.update_task_progress(&p.task_id, downloaded_bytes)
             .await;
+
+    // Clean up HLS resume marker on successful completion
+    let _ = p.db.delete_config(&resume_seg_key).await;
 
     tokio::fs::rename(&temp_path, &dest_path)
         .await
@@ -969,7 +1015,16 @@ async fn download_segment_with_retry(
     let mut attempts = 0u32;
 
     loop {
-        match download_segment_once(client, url, cookies, playlist_url, extra_headers).await {
+        match download_segment_once(
+            client,
+            url,
+            cookies,
+            playlist_url,
+            extra_headers,
+            cancel_token,
+        )
+        .await
+        {
             Ok(data) => return Ok(data),
             Err(DownloadError::Cancelled) => return Err(DownloadError::Cancelled),
             Err(e) => {
@@ -1004,6 +1059,7 @@ async fn download_segment_once(
     cookies: &str,
     playlist_url: &str,
     extra_headers: &std::collections::HashMap<String, String>,
+    cancel_token: &tokio_util::sync::CancellationToken,
 ) -> Result<Vec<u8>, DownloadError> {
     let safe_cookies = cookies_for_url(playlist_url, url, cookies);
     let mut req = client.get(url);
@@ -1013,24 +1069,29 @@ async fn download_segment_once(
     // 应用浏览器扩展捕获的额外请求头
     req = crate::downloader::apply_extra_headers(req, extra_headers);
 
-    let resp = req.send().await?.error_for_status()?;
+    let resp = tokio::select! {
+        _ = cancel_token.cancelled() => return Err(DownloadError::Cancelled),
+        r = req.send() => r?.error_for_status()?,
+    };
 
     // Transparently decompress if the server returned compressed content.
     let encoding = crate::downloader::detect_content_encoding(resp.headers());
-    let data = if encoding.is_some() {
-        use futures_util::StreamExt;
-        let raw_stream = resp.bytes_stream();
-        let mut stream = crate::downloader::maybe_decompress_stream(raw_stream, encoding);
-        let mut buf = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(DownloadError::Io)?;
-            buf.extend_from_slice(&chunk);
-        }
-        buf
-    } else {
-        resp.bytes().await?.to_vec()
-    };
-    Ok(data)
+    let raw_stream = resp.bytes_stream();
+    let mut stream = crate::downloader::maybe_decompress_stream(raw_stream, encoding);
+
+    let mut buf = Vec::new();
+    loop {
+        let chunk = tokio::select! {
+            _ = cancel_token.cancelled() => return Err(DownloadError::Cancelled),
+            c = stream.next() => c,
+        };
+        let Some(chunk_result) = chunk else {
+            break;
+        };
+        let chunk_data = chunk_result.map_err(DownloadError::Io)?;
+        buf.extend_from_slice(&chunk_data);
+    }
+    Ok(buf)
 }
 
 // ---------------------------------------------------------------------------

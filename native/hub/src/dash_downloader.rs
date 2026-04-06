@@ -134,6 +134,79 @@ pub async fn run_dash_download(mut params: DownloadParams) {
     }
 }
 
+/// Attempt to mux separate audio and video files into a single MP4 using ffmpeg.
+///
+/// DASH streams split audio and video into separate files.  This function
+/// invokes the system's `ffmpeg` (if available) to combine them into a single
+/// playable file.  If ffmpeg is not installed, returns an error — the caller
+/// should fall back to keeping both files.
+///
+/// The muxing is done with `-c copy` (stream copy, no re-encoding) which is
+/// near-instant regardless of file size.
+async fn mux_audio_video(
+    video_path: &Path,
+    audio_path: &Path,
+    cancel_token: &tokio_util::sync::CancellationToken,
+) -> Result<(), DownloadError> {
+    use tokio::process::Command;
+
+    // Build a temporary output path to avoid overwriting the video while muxing
+    let muxed_tmp = video_path.with_extension("muxed.mp4");
+
+    let video_str = video_path.to_string_lossy().to_string();
+    let audio_str = audio_path.to_string_lossy().to_string();
+    let muxed_str = muxed_tmp.to_string_lossy().to_string();
+
+    // Spawn ffmpeg with -c copy (stream copy, no re-encoding).
+    // `.kill_on_drop(true)` ensures if we're cancelled (select! drops the
+    // future), the child process is killed automatically.
+    let output_fut = Command::new("ffmpeg")
+        .args([
+            "-y", // overwrite output without asking
+            "-i",
+            &video_str,
+            "-i",
+            &audio_str,
+            "-c",
+            "copy", // stream copy, no re-encoding
+            "-movflags",
+            "+faststart", // web-optimized MP4
+            &muxed_str,
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .output();
+
+    let output: std::process::Output = tokio::select! {
+        _ = cancel_token.cancelled() => {
+            // The future is dropped here; kill_on_drop ensures the child is killed
+            return Err(DownloadError::Cancelled);
+        }
+        o = output_fut => o.map_err(|e| DownloadError::Other(format!("failed to run ffmpeg: {}", e)))?,
+    };
+
+    if !output.status.success() {
+        // Clean up the partial muxed file
+        let _ = tokio::fs::remove_file(&muxed_tmp).await;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(DownloadError::Other(format!(
+            "ffmpeg exited with {}: {}",
+            output.status,
+            stderr.chars().take(500).collect::<String>()
+        )));
+    }
+
+    // Replace the original video-only file with the muxed version
+    tokio::fs::rename(&muxed_tmp, video_path)
+        .await
+        .map_err(|e| {
+            DownloadError::Other(format!("failed to replace video with muxed file: {}", e))
+        })?;
+
+    Ok(())
+}
+
 async fn run_dash_download_inner(
     p: &DownloadParams,
     quality_rx: Option<tokio::sync::oneshot::Receiver<i32>>,
@@ -289,6 +362,37 @@ async fn run_dash_download_inner(
     } else {
         0
     };
+
+    // --- Audio+Video muxing ---
+    // DASH streams typically have separate audio and video tracks.
+    // Try to mux them into a single file using ffmpeg if available.
+    // If ffmpeg is not installed, keep both files — the user can mux manually.
+    if audio_bytes > 0 {
+        let audio_path = build_audio_path(&dest_path);
+        match mux_audio_video(&dest_path, &audio_path, &p.cancel_token).await {
+            Ok(()) => {
+                log_info!(
+                    "[dash] task {} audio+video muxed successfully, cleaning up audio track",
+                    p.task_id
+                );
+                // Remove the separate audio file after successful mux
+                let _ = tokio::fs::remove_file(&audio_path).await;
+            }
+            Err(DownloadError::Cancelled) => {
+                return Err(DownloadError::Cancelled);
+            }
+            Err(e) => {
+                log_info!(
+                    "[dash] task {} muxing failed (ffmpeg may not be installed): {} — \
+                     keeping separate audio file: {}",
+                    p.task_id,
+                    e,
+                    audio_path.display()
+                );
+                // Don't fail the download — both files are valid, just not merged
+            }
+        }
+    }
 
     let total = video_bytes + audio_bytes;
     let _ = p.db.update_task_progress(&p.task_id, total).await;

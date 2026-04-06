@@ -1196,7 +1196,8 @@ export default defineBackground(() => {
                 downloadUrl !== url ? url : undefined,
               );
               if (!sendOk) {
-                // 发送失败，回退到浏览器下载
+                // 发送失败 — 清除 primary 标记防止阻塞后续拦截，然后回退到浏览器下载
+                handledDownloads.delete(downloadItem.id);
                 await fallbackToBrowserDownload(
                   downloadUrl,
                   cleanFilename,
