@@ -54,6 +54,9 @@ npm run preview                      # 预览构建结果
 python scripts/release_tag.py v0.x.x --push --github-release --update-changelog
 python scripts/release_tag.py v0.x.x --model opus --lang both --push --github-release  # 高质量双语
 python scripts/release_tag.py v0.x.x --dry-run  # 仅预览
+
+# 图标生成（修改 assets/logo/fluxdown_logo.svg 后执行）
+bun scripts/gen_icons.ts               # 全平台图标一键生成（51 个文件，覆盖所有平台）
 ```
 
 ## 项目结构
@@ -129,7 +132,7 @@ x_down/
 ├── scripts/
 │   ├── release_tag.py             # 自动发布脚本（Claude CLI 生成 Release Notes）
 │   ├── send_notify.py             # 通知推送（邮件/钉钉等）
-│   └── gen_ico.py                 # Windows 图标生成
+│   └── gen_icons.ts               # 全平台图标生成（bun scripts/gen_icons.ts）
 ├── Cargo.toml                         # Rust workspace（resolver = "3"）
 └── pubspec.yaml                       # Flutter 依赖
 ```
