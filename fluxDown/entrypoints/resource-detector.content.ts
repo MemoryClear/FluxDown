@@ -121,9 +121,9 @@ export default defineContentScript({
     // 监听 mousedown（早于 click），确保令牌在浏览器发起请求前写入。
     const handleAltMousedown = (e: MouseEvent) => {
       if (!e.altKey) return;
-      const link = (e.target as Element).closest(
-        "a[href]",
-      ) as HTMLAnchorElement | null;
+      const target = e.target;
+      if (!(target instanceof Element)) return;
+      const link = target.closest("a[href]") as HTMLAnchorElement | null;
       if (!link) return;
       const href = link.href;
       if (
@@ -178,9 +178,9 @@ export default defineContentScript({
     // 用户直接点击 <a href="magnet:..."> 时，阻止浏览器弹出 OS 应用选择框，
     // 改由 FluxDown 接管。使用捕获阶段，早于页面自身的 click 处理器执行。
     const handleMagnetClick = (e: MouseEvent) => {
-      const link = (e.target as Element).closest(
-        "a[href]",
-      ) as HTMLAnchorElement | null;
+      const target = e.target;
+      if (!(target instanceof Element)) return;
+      const link = target.closest("a[href]") as HTMLAnchorElement | null;
       if (!link) return;
       const href = link.href;
       if (!href || !href.toLowerCase().startsWith("magnet:")) return;
