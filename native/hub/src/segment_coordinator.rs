@@ -1961,13 +1961,18 @@ async fn do_segment(
     let mut last_db_save = Instant::now();
 
     // The effective end byte, which may shrink if the coordinator splits us.
+    //
+    // This is a *read-only mirror* of `seg_states[seg_idx].end_byte`.  The
+    // coordinator owns the canonical value (see ownership contract on
+    // `update_seg_state`); we re-read it before each write to honour any
+    // split that happened since our last chunk.
     let mut effective_end = seg_end;
 
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
                 file.flush().await?;
-                update_seg_state(seg_states, seg_idx, seg_downloaded, effective_end);
+                update_seg_state(seg_states, seg_idx, seg_downloaded);
                 let _ = db.update_segment_progress(task_id, seg_idx, seg_downloaded).await;
                 return Err(DownloadError::Cancelled);
             }
@@ -1980,7 +1985,7 @@ async fn do_segment(
                     Ok(c) => c,
                     Err(_) => {
                         file.flush().await?;
-                        update_seg_state(seg_states, seg_idx, seg_downloaded, effective_end);
+                        update_seg_state(seg_states, seg_idx, seg_downloaded);
                         let _ = db.update_segment_progress(
                             task_id, seg_idx, seg_downloaded,
                         ).await;
@@ -2026,7 +2031,9 @@ async fn do_segment(
                         total_downloaded.fetch_add(len, Ordering::Relaxed);
 
                         // Update shared segment state (workers → coordinator channel).
-                        update_seg_state(seg_states, seg_idx, seg_downloaded, effective_end);
+                        // Only `downloaded_bytes` is written — `end_byte` is
+                        // exclusively owned by the coordinator.
+                        update_seg_state(seg_states, seg_idx, seg_downloaded);
 
                         // If we truncated the chunk, we hit the boundary.
                         if write_len < bytes.len() {
@@ -2068,7 +2075,7 @@ async fn do_segment(
                     }
                     Some(Err(e)) => {
                         file.flush().await?;
-                        update_seg_state(seg_states, seg_idx, seg_downloaded, effective_end);
+                        update_seg_state(seg_states, seg_idx, seg_downloaded);
                         let _ = db
                             .update_segment_progress(task_id, seg_idx, seg_downloaded)
                             .await;
@@ -2100,7 +2107,7 @@ async fn do_segment(
         }
     }
 
-    update_seg_state(seg_states, seg_idx, seg_downloaded, effective_end);
+    update_seg_state(seg_states, seg_idx, seg_downloaded);
     let _ = db
         .update_segment_progress(task_id, seg_idx, seg_downloaded)
         .await;
@@ -2108,18 +2115,34 @@ async fn do_segment(
     Ok(seg_downloaded)
 }
 
-/// Update a single segment's progress in the shared visualization state.
+/// Update a single segment's `downloaded_bytes` in the shared visualization state.
+///
+/// **Ownership contract for `seg_states[i]`** (Single-Writer Principle):
+///
+/// | Field             | Writer                         | Reader                    |
+/// |-------------------|--------------------------------|---------------------------|
+/// | `downloaded_bytes`| **worker** (this function)     | coordinator (`sync_downloaded_from_shared`) |
+/// | `end_byte`        | **coordinator** (`rebuild_seg_states` after split) | worker (boundary check) |
+/// | `start_byte`      | coordinator (immutable post-split) | worker / UI               |
+/// | `index`           | coordinator (immutable post-split) | worker / UI               |
+///
+/// Historically this function also wrote `end_byte` using the worker's locally
+/// cached `effective_end`, which races with `rebuild_seg_states`: if the
+/// coordinator shrinks `end_byte` to trigger a split between the worker
+/// reading `effective_end` and writing it back, the worker would clobber the
+/// new boundary, miss the split, and continue downloading into the child
+/// segment's range — defeating the entire dynamic-split mechanism.
 fn update_seg_state(
     seg_states: &Arc<StdMutex<Vec<SegmentProgressInfo>>>,
     seg_idx: i32,
     downloaded_bytes: i64,
-    end_byte: i64,
 ) {
     if let Ok(mut states) = seg_states.lock()
         && let Some(s) = states.iter_mut().find(|s| s.index == seg_idx)
     {
         s.downloaded_bytes = downloaded_bytes;
-        s.end_byte = end_byte;
+        // Intentionally do NOT touch `end_byte` — it is owned by the
+        // coordinator (see `rebuild_seg_states`).
     }
 }
 

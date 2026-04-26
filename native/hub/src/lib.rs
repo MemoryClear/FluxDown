@@ -21,6 +21,9 @@ mod signals;
 mod speed_limiter;
 mod updater;
 
+#[cfg(test)]
+mod corruption_test;
+
 use actors::create_actors;
 use rinf::{dart_shutdown, write_interface};
 use tokio::spawn;
