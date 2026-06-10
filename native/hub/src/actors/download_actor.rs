@@ -19,9 +19,10 @@ use crate::signals::{
     InstallUpdate, MoveTaskToQueue, ProbeTorrentMeta, ProxyTestResult, RequestAllQueues,
     RequestAllTasks, RequestConfig, RequestUpdateFailureMarker, RevealFile, SaveConfig,
     SelectBtFiles, SelectHlsQuality, SetFileAssociation, SetPriorityTask, SetUrlProtocol,
-    SystemProxyInfo, TestProxyConnection, UpdateCheckResult, UpdateFailureMarker, UpdateQueue,
-    UrlProtocolStatus,
+    SystemProxyInfo, TestProxyConnection, TrackerSubscriptionResult, UpdateCheckResult,
+    UpdateFailureMarker, UpdateQueue, UpdateTrackerSubscription, UrlProtocolStatus,
 };
+use crate::tracker_subscription;
 use crate::updater;
 
 /// Compute default save directory (platform-dependent).
@@ -39,6 +40,71 @@ fn default_save_dir() -> String {
         return p.to_string_lossy().into_owned();
     }
     ".".to_string()
+}
+
+/// Build a [`BtConfig`] from the raw config key-value map.
+///
+/// When the tracker subscription feature is disabled, the cached
+/// subscription trackers are excluded so only the user's own list is used.
+fn bt_config_from_map(cfg: &HashMap<String, String>) -> BtConfig {
+    let sub_enabled = cfg
+        .get("bt_tracker_sub_enabled")
+        .map(|v| v == "true")
+        .unwrap_or(true);
+    BtConfig {
+        enable_dht: cfg
+            .get("bt_enable_dht")
+            .map(|v| v == "true")
+            .unwrap_or(true),
+        enable_upnp: cfg
+            .get("bt_enable_upnp")
+            .map(|v| v == "true")
+            .unwrap_or(true),
+        port_start: cfg
+            .get("bt_port_start")
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or(6881),
+        port_end: cfg
+            .get("bt_port_end")
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or(6891),
+        custom_trackers: cfg.get("bt_custom_trackers").cloned().unwrap_or_default(),
+        subscription_trackers: if sub_enabled {
+            cfg.get("bt_tracker_sub_cache").cloned().unwrap_or_default()
+        } else {
+            String::new()
+        },
+    }
+}
+
+/// Spawn a background task that fetches all tracker subscription sources,
+/// persists the deduped result to the config table, then reports the outcome
+/// back to the actor loop (which updates the BtConfig and notifies Dart).
+fn spawn_tracker_sub_refresh(db: Db, tx: mpsc::Sender<tracker_subscription::FetchOutcome>) {
+    tokio::spawn(async move {
+        let cfg = db.get_all_config().await.unwrap_or_default();
+        let urls = cfg
+            .get("bt_tracker_sub_urls")
+            .cloned()
+            .unwrap_or_else(tracker_subscription::default_subscription_urls);
+        let outcome = tracker_subscription::fetch_subscriptions(&urls).await;
+        if outcome.is_success() {
+            let now = chrono::Utc::now().timestamp();
+            if let Err(e) = db
+                .set_config("bt_tracker_sub_cache", &outcome.trackers.join("\n"))
+                .await
+            {
+                log_info!("[actor] failed to save tracker sub cache: {}", e);
+            }
+            if let Err(e) = db
+                .set_config("bt_tracker_sub_updated_at", &now.to_string())
+                .await
+            {
+                log_info!("[actor] failed to save tracker sub timestamp: {}", e);
+            }
+        }
+        let _ = tx.send(outcome).await;
+    });
 }
 
 /// Read initial config values from DB to pass to DownloadManager.
@@ -60,28 +126,7 @@ async fn load_initial_config(db: &Db) -> (usize, u64, String, BtConfig, ProxyCon
         .cloned()
         .unwrap_or_else(default_save_dir);
 
-    let bt_config = BtConfig {
-        enable_dht: config
-            .get("bt_enable_dht")
-            .map(|v| v == "true")
-            .unwrap_or(true),
-        enable_upnp: config
-            .get("bt_enable_upnp")
-            .map(|v| v == "true")
-            .unwrap_or(true),
-        port_start: config
-            .get("bt_port_start")
-            .and_then(|v| v.parse::<u16>().ok())
-            .unwrap_or(6881),
-        port_end: config
-            .get("bt_port_end")
-            .and_then(|v| v.parse::<u16>().ok())
-            .unwrap_or(6891),
-        custom_trackers: config
-            .get("bt_custom_trackers")
-            .cloned()
-            .unwrap_or_default(),
-    };
+    let bt_config = bt_config_from_map(&config);
 
     let proxy_config = ProxyConfig::from_config_map(&config);
     let user_agent = config.get("global_user_agent").cloned().unwrap_or_default();
@@ -171,14 +216,27 @@ pub async fn run(db_dir: PathBuf) {
 
     manager.set_default_segments(default_segments);
 
+    // Apply persisted log size cap (MB) to the global logger.
+    if let Ok(Some(v)) = db.get_config("log_max_size_mb").await
+        && let Ok(mb) = v.parse::<u64>()
+    {
+        crate::logger::set_max_total_bytes(mb * 1024 * 1024);
+    }
+
     // Apply persisted auto-retry config (key-value `config` table). Absent or
     // unparsable values fall back to the manager's built-in defaults.
     {
         let cfg = db.get_all_config().await.unwrap_or_default();
-        if let Some(v) = cfg.get("max_auto_retries").and_then(|s| s.parse::<i32>().ok()) {
+        if let Some(v) = cfg
+            .get("max_auto_retries")
+            .and_then(|s| s.parse::<i32>().ok())
+        {
             manager.set_max_auto_retries(v);
         }
-        if let Some(v) = cfg.get("auto_retry_delay_secs").and_then(|s| s.parse::<u64>().ok()) {
+        if let Some(v) = cfg
+            .get("auto_retry_delay_secs")
+            .and_then(|s| s.parse::<u64>().ok())
+        {
             manager.set_auto_retry_delay_secs(v);
         }
     }
@@ -238,6 +296,35 @@ pub async fn run(db_dir: PathBuf) {
     let select_bt_files_recv = SelectBtFiles::get_dart_signal_receiver();
     let probe_torrent_meta_recv = ProbeTorrentMeta::get_dart_signal_receiver();
     let reveal_file_recv = RevealFile::get_dart_signal_receiver();
+    let update_tracker_sub_recv = UpdateTrackerSubscription::get_dart_signal_receiver();
+
+    // Tracker 订阅刷新通道：后台 fetch 任务完成后把结果送回 actor 循环，
+    // 由循环更新 BtConfig、失效 BT 会话并通知 Dart。
+    let (tracker_sub_tx, mut tracker_sub_rx) =
+        mpsc::channel::<tracker_subscription::FetchOutcome>(4);
+
+    // 启动时自动刷新：订阅启用且缓存超过 24 小时未更新。
+    {
+        let cfg = db.get_all_config().await.unwrap_or_default();
+        let sub_enabled = cfg
+            .get("bt_tracker_sub_enabled")
+            .map(|v| v == "true")
+            .unwrap_or(true);
+        let updated_at = cfg
+            .get("bt_tracker_sub_updated_at")
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0);
+        let now = chrono::Utc::now().timestamp();
+        if sub_enabled
+            && now.saturating_sub(updated_at) > tracker_subscription::REFRESH_INTERVAL_SECS
+        {
+            log_info!(
+                "[actor] tracker subscription stale (updated_at={}), auto-refreshing",
+                updated_at
+            );
+            spawn_tracker_sub_refresh(db.clone(), tracker_sub_tx.clone());
+        }
+    }
 
     // Shared channel for external download requests. Both the Native Messaging
     // listener (browser extension via the NMH relay) and the local HTTP takeover
@@ -367,6 +454,12 @@ pub async fn run(db_dir: PathBuf) {
                             manager.set_speed_limit(v);
                         }
                     }
+                    "log_max_size_mb" => {
+                        if let Ok(mb) = msg.value.parse::<u64>() {
+                            log_info!("[actor] updating log_max_size_mb to {}", mb);
+                            crate::logger::set_max_total_bytes(mb * 1024 * 1024);
+                        }
+                    }
                     "default_save_dir" => {
                         log_info!("[actor] updating default_save_dir to {}", msg.value);
                         manager.set_default_save_dir(msg.value);
@@ -374,36 +467,21 @@ pub async fn run(db_dir: PathBuf) {
                     // BT config keys — update in-memory BtConfig and invalidate
                     // the current session so the next BT download picks up changes.
                     "bt_enable_dht" | "bt_enable_upnp" | "bt_port_start"
-                    | "bt_port_end" | "bt_custom_trackers" => {
+                    | "bt_port_end" | "bt_custom_trackers"
+                    | "bt_tracker_sub_enabled" | "bt_tracker_sub_urls" => {
                         log_info!("[actor] BT config changed: {}={}", msg.key, msg.value);
                         // Reload the full BT config from DB to stay consistent.
                         let all_cfg = db.get_all_config().await.unwrap_or_default();
-                        let new_bt = BtConfig {
-                            enable_dht: all_cfg
-                                .get("bt_enable_dht")
-                                .map(|v| v == "true")
-                                .unwrap_or(true),
-                            enable_upnp: all_cfg
-                                .get("bt_enable_upnp")
-                                .map(|v| v == "true")
-                                .unwrap_or(true),
-                            port_start: all_cfg
-                                .get("bt_port_start")
-                                .and_then(|v| v.parse::<u16>().ok())
-                                .unwrap_or(6881),
-                            port_end: all_cfg
-                                .get("bt_port_end")
-                                .and_then(|v| v.parse::<u16>().ok())
-                                .unwrap_or(6891),
-                            custom_trackers: all_cfg
-                                .get("bt_custom_trackers")
-                                .cloned()
-                                .unwrap_or_default(),
-                        };
-                        manager.set_bt_config(new_bt);
+                        manager.set_bt_config(bt_config_from_map(&all_cfg));
                         // Invalidate (destroy) the current BT session so it is
                         // re-created with the new config on next BT download.
                         manager.invalidate_bt_session().await;
+                        // 订阅地址变化 / 重新启用订阅 → 后台立即刷新一次。
+                        if msg.key == "bt_tracker_sub_urls"
+                            || (msg.key == "bt_tracker_sub_enabled" && msg.value == "true")
+                        {
+                            spawn_tracker_sub_refresh(db.clone(), tracker_sub_tx.clone());
+                        }
                     }
                     // Proxy config keys — reload full proxy config from DB
                     // and rebuild the HTTP client.
@@ -817,6 +895,34 @@ pub async fn run(db_dir: PathBuf) {
                 tokio::task::spawn_blocking(move || {
                     bt_downloader::probe_torrent_meta(probe_id, bytes);
                 });
+            }
+            // --- Manual tracker subscription refresh (Settings page button) ---
+            Some(_) = update_tracker_sub_recv.recv() => {
+                log_info!("[actor] manual tracker subscription refresh requested");
+                spawn_tracker_sub_refresh(db.clone(), tracker_sub_tx.clone());
+            }
+            // --- Tracker subscription refresh finished ---
+            Some(outcome) = tracker_sub_rx.recv() => {
+                let all_cfg = db.get_all_config().await.unwrap_or_default();
+                if outcome.is_success() {
+                    // 缓存已由后台任务写入 DB；重载 BtConfig 并失效会话，
+                    // 使下一个 BT 任务用上最新的合并 tracker 列表。
+                    manager.set_bt_config(bt_config_from_map(&all_cfg));
+                    manager.invalidate_bt_session().await;
+                }
+                let updated_at = all_cfg
+                    .get("bt_tracker_sub_updated_at")
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .unwrap_or(0);
+                TrackerSubscriptionResult {
+                    success: outcome.is_success(),
+                    tracker_count: outcome.trackers.len() as i32,
+                    ok_sources: outcome.ok_sources as i32,
+                    total_sources: outcome.total_sources as i32,
+                    updated_at,
+                    error: outcome.error,
+                }
+                .send_signal_to_dart();
             }
         }
     }

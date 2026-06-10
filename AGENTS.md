@@ -85,7 +85,7 @@ x_down/
 │       │   ├── update_service.dart             # 自动更新（GitHub Releases）
 │       │   ├── analytics_service.dart          # 匿名数据分析（GA4）
 │       │   ├── feedback_service.dart           # 反馈提交（GitHub Issues）
-│       │   ├── log_service.dart                # 日志管理（10MB 轮转，保留3个）
+│       │   ├── log_service.dart                # 日志管理（2MB 分卷，总量默认 10MB 超量清理，保留 7 天）
 │       │   ├── open_folder.dart                # 打开文件夹（跨平台）
 │       │   └── windows_toast_helper.dart       # Windows Toast 通知辅助
 │       ├── theme/                     # 主题
@@ -477,8 +477,8 @@ Dart 和 Rust 两端写入同一目录、同一日志文件，统一格式。
 | 项目 | 说明 |
 |------|------|
 | 目录 | Linux `~/.local/share/fluxdown/logs/`，Windows exe 同级 `logs/` |
-| 文件名 | `fluxdown_YYYY-MM-DD.log`（按日期自动分割） |
-| 清理 | 两端启动时各自清理 7 天前的 `fluxdown_*.log` |
+| 文件名 | `fluxdown_YYYY-MM-DD.log`（按日期自动分割），单文件超 2MB 分卷为 `fluxdown_YYYY-MM-DD.N.log` |
+| 清理 | 两端启动时各自清理 7 天前的 `fluxdown_*.log`；总大小超上限（设置项 `log_max_size_mb`，默认 10MB）时按（日期, 分卷）从最旧删除 |
 | 格式 | `HH:MM:SS.mmm [Tag] message` |
 
 ### Dart 端用法
@@ -513,19 +513,37 @@ final count = await LogService.instance.exportLogs('/path/to/fluxdown_logs.zip')
 final sizeBytes = LogService.instance.logDirSizeBytes;
 final fileCount = LogService.instance.logFileCount;
 ```
+## 强制规则
+- 禁止新增 dependency，需要时先在 PR/对话里说明理由并等确认
+- 禁止 `unsafe`，除非显式批准
+- 禁止 `unwrap()` / `expect()` 在非测试代码中出现；用 `?` + `thiserror`
+- 公开 API 必须有 doc comment + 至少一个 doctest 或 example
+- 改动前先跑 `cargo check -p <crate>`（不是整个 workspace）
+- 提交前必须通过：`cargo fmt --check && cargo clippy -- -D warnings`
+- 验证编译时优先 `cargo check -p <crate> --lib`
+- 跑测试时优先 `cargo nextest run -p <crate> <filter>`，不要 `cargo test --workspace`
+- 使用cargo管理依赖，禁止直接编辑`Cargo.toml`进行版本管理
+- 禁止估算任务工作时间，不能因为时长而去过度分割工作
+- 测试 provider 兼容性时调用 `provider-contract-test` skill
 
-## 禁止事项（Anti-Patterns）
+## 代码风格
+- 优先复用项目已有的 trait / error 类型，不要平行造轮子
+- 单文件超过 600 行考虑拆分；单函数超过 80 行需要说明
 
-| 禁止 | 原因 |
-|------|------|
-| `flutter run -d windows` | 用户明确禁止执行此命令 |
-| 编辑 `lib/src/bindings/**` | 自动生成，`rinf gen` 会覆盖 |
-| Rust `.unwrap()` / `.expect()` | Clippy deny，编译失败 |
-| Rust `use foo::*` | Clippy deny，编译失败 |
-| 改 crate name `hub` | Rinf 框架硬编码此名称 |
-| async 中阻塞 I/O | tokio current_thread runtime 会死锁 |
-| `MaterialApp` / `showDialog()` / `Theme.of()` | 全程 shadcn_ui 体系 |
-| Material/Cupertino 原生组件 | 统一使用 shadcn_ui 组件 |
+## 查文档优先级
+1. `cargo path <crate>` 看本地源码（最权威）
+2. `cargo doc --open` 或 docs.rs
+3. 最后才是 web 搜索
+
+## Rust 编码触发规则
+写或改 `.rs` 文件前，先判断本次改动是否涉及以下任一项：
+- 新增/修改 public API、trait、error 类型
+- 写 unsafe / FFI / 性能关键路径
+- 新增 crate 或调整 workspace 结构
+- 写文档注释（doc comment）
+
+若**命中任一项**,必须先读 `rust-router` skill
+若仅是改变量名、调格式、加日志等局部改动，可跳过。
 
 ## 关键开发流程
 

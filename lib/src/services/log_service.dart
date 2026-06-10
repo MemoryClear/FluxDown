@@ -17,6 +17,13 @@ import 'platform_utils.dart';
 /// - macOS: ~/Library/Application Support/fluxdown/logs/
 ///
 /// 使用缓冲写入 + 定时刷盘，兼顾性能和崩溃前日志完整度。
+///
+/// 自动分割与清理（与 Rust 端 logger.rs 协议一致）：
+/// - 单文件超过 2MB 自动分割为 `fluxdown_YYYY-MM-DD.N.log` 分卷；
+/// - 日志总大小超过上限（默认 10MB，可在设置中调整）时按
+///   （日期, 分卷序号）从最旧开始删除；
+/// - 清理只做目录遍历 + stat，不读文件内容，内存占用极小。
+///
 /// 单例，应在 app 启动最早期调用 [init]。
 class LogService {
   LogService._();
@@ -32,6 +39,42 @@ class LogService {
 
   /// 日志保留天数
   static const int _retentionDays = 7;
+
+  /// 单个日志文件大小上限，超过则自动分割到新分卷
+  static const int _maxFileBytes = 2 * 1024 * 1024;
+
+  /// 日志目录总大小默认上限（可由设置覆盖，见 [maxTotalBytes]）
+  static const int _defaultMaxTotalBytes = 10 * 1024 * 1024;
+
+  /// 距上次 stat 实际文件大小的写入字节阈值。
+  /// Dart/Rust 两端写同一文件，自身计数会低估，需周期性校准。
+  static const int _sizeCheckIntervalBytes = 64 * 1024;
+
+  /// 日志文件名格式：fluxdown_YYYY-MM-DD.log 或 fluxdown_YYYY-MM-DD.N.log
+  static final RegExp _logNamePattern = RegExp(
+    r'^fluxdown_(\d{4}-\d{2}-\d{2})(?:\.(\d+))?\.log$',
+  );
+
+  int _maxTotalBytes = _defaultMaxTotalBytes;
+
+  /// 当前日期内的分卷序号（0 = 无序号的首个文件）
+  int _currentPart = 0;
+
+  /// 当前文件大小估算（打开时 stat 初始化 + 自身写入累加，周期性校准）
+  int _approxSize = 0;
+
+  /// 距上次 stat 校准以来自身写入的字节数
+  int _bytesSinceStat = 0;
+
+  /// 日志目录总大小上限（字节）。设置后立即执行一次超量清理。
+  set maxTotalBytes(int bytes) {
+    if (bytes < 1024 * 1024) return;
+    if (_maxTotalBytes == bytes) return;
+    _maxTotalBytes = bytes;
+    if (_initialized) _enforceTotalSize();
+  }
+
+  int get maxTotalBytes => _maxTotalBytes;
 
   /// 日志目录
   late final Directory _logDir;
@@ -91,6 +134,9 @@ class LogService {
       final line = '$ts [$tag] $message\n';
       _raf?.writeStringSync(line);
       _dirty = true;
+      _approxSize += line.length;
+      _bytesSinceStat += line.length;
+      _maybeRollBySize();
       // 仅在 debug 模式下输出到控制台，避免 release 模式的字符串缓存开销
       if (kDebugMode) {
         // ignore: avoid_print
@@ -139,8 +185,8 @@ class LogService {
     }
     if (logFiles.isEmpty) return 0;
 
-    // 按文件名排序（即按日期排序）
-    logFiles.sort((a, b) => p.basename(a.path).compareTo(p.basename(b.path)));
+    // 按（日期, 分卷序号）排序
+    logFiles.sort(_compareLogFiles);
 
     final zipBytes = _buildZip(logFiles, sanitize: sanitize);
     await File(zipPath).writeAsBytes(zipBytes);
@@ -195,17 +241,10 @@ class LogService {
     final dateTag = '${now.year}-${_pad2(now.month)}-${_pad2(now.day)}';
     if (dateTag == _currentDateTag && _raf != null) return;
 
-    // 关闭旧文件
-    try {
-      _raf?.flushSync();
-      _raf?.closeSync();
-    } catch (_) {}
-
+    _closeRaf();
     _currentDateTag = dateTag;
-    final file = File(
-      '${_logDir.path}${Platform.pathSeparator}fluxdown_$dateTag.log',
-    );
-    _raf = file.openSync(mode: FileMode.append);
+    _currentPart = _scanActivePart(dateTag);
+    _openCurrentFile();
 
     final header =
         '\n'
@@ -215,7 +254,129 @@ class LogService {
         '  isolate: ${Isolate.current.debugName}\n'
         '\n';
     _raf!.writeStringSync(header);
+    _approxSize += header.length;
     _dirty = true;
+    _enforceTotalSize();
+  }
+
+  void _closeRaf() {
+    try {
+      _raf?.flushSync();
+      _raf?.closeSync();
+    } catch (_) {}
+    _raf = null;
+  }
+
+  /// 打开当前 (_currentDateTag, _currentPart) 对应的日志文件（append 模式）。
+  void _openCurrentFile() {
+    final file = File(_filePath(_currentDateTag!, _currentPart));
+    _raf = file.openSync(mode: FileMode.append);
+    _approxSize = _raf!.lengthSync();
+    _bytesSinceStat = 0;
+  }
+
+  String _filePath(String dateTag, int part) {
+    final suffix = part == 0 ? '' : '.$part';
+    return '${_logDir.path}${Platform.pathSeparator}fluxdown_$dateTag$suffix.log';
+  }
+
+  /// 找到 [dateTag] 当天已有的最大分卷序号；若该分卷已写满则返回下一个序号。
+  /// Rust 端可能已创建更高序号的分卷，两端通过该扫描收敛到同一文件。
+  int _scanActivePart(String dateTag) {
+    int? maxPart;
+    try {
+      for (final entity in _logDir.listSync()) {
+        if (entity is! File) continue;
+        final m = _logNamePattern.firstMatch(p.basename(entity.path));
+        if (m == null || m.group(1) != dateTag) continue;
+        final part = int.parse(m.group(2) ?? '0');
+        maxPart = maxPart == null || part > maxPart ? part : maxPart;
+      }
+    } catch (_) {}
+    if (maxPart == null) return 0;
+    try {
+      final size = File(_filePath(dateTag, maxPart)).lengthSync();
+      if (size >= _maxFileBytes) return maxPart + 1;
+    } catch (_) {}
+    return maxPart;
+  }
+
+  /// 大小检查与自动分割：自身写入量达到阈值时 stat 一次实际大小校准，
+  /// 超过单文件上限则切换到新分卷并触发总量清理。
+  void _maybeRollBySize() {
+    if (_bytesSinceStat >= _sizeCheckIntervalBytes) {
+      _bytesSinceStat = 0;
+      try {
+        _approxSize = _raf?.lengthSync() ?? _approxSize;
+      } catch (_) {}
+    }
+    if (_approxSize < _maxFileBytes || _currentDateTag == null) return;
+
+    _closeRaf();
+    final next = _scanActivePart(_currentDateTag!);
+    // 防御：保证分卷序号单调递增，避免重新打开已写满的文件
+    _currentPart = next > _currentPart ? next : _currentPart + 1;
+    _openCurrentFile();
+    _dirty = true;
+    _enforceTotalSize();
+  }
+
+  /// 总大小超量清理：按（日期, 分卷序号）从最旧开始删除，
+  /// 直到总大小回到 [_maxTotalBytes] 内。当前活跃文件不删除。
+  void _enforceTotalSize() {
+    try {
+      final files = <({String date, int part, File file, int size})>[];
+      int total = 0;
+      for (final entity in _logDir.listSync()) {
+        if (entity is! File) continue;
+        final m = _logNamePattern.firstMatch(p.basename(entity.path));
+        if (m == null) continue;
+        int size = 0;
+        try {
+          size = entity.lengthSync();
+        } catch (_) {}
+        files.add((
+          date: m.group(1)!,
+          part: int.parse(m.group(2) ?? '0'),
+          file: entity,
+          size: size,
+        ));
+        total += size;
+      }
+      if (total <= _maxTotalBytes) return;
+
+      files.sort((a, b) {
+        final c = a.date.compareTo(b.date);
+        return c != 0 ? c : a.part.compareTo(b.part);
+      });
+      final activePath = _currentDateTag == null
+          ? null
+          : _filePath(_currentDateTag!, _currentPart);
+      for (final f in files) {
+        if (total <= _maxTotalBytes) break;
+        if (f.file.path == activePath) continue;
+        try {
+          f.file.deleteSync();
+          total -= f.size;
+        } catch (_) {
+          // 单个文件删除失败（如被另一端持有句柄）不影响其他文件
+        }
+      }
+    } catch (_) {
+      // 清理失败不影响日志服务正常运行
+    }
+  }
+
+  /// 按（日期, 分卷序号）比较两个日志文件，用于导出排序。
+  static int _compareLogFiles(File a, File b) {
+    final ma = _logNamePattern.firstMatch(p.basename(a.path));
+    final mb = _logNamePattern.firstMatch(p.basename(b.path));
+    if (ma == null || mb == null) {
+      return p.basename(a.path).compareTo(p.basename(b.path));
+    }
+    final c = ma.group(1)!.compareTo(mb.group(1)!);
+    if (c != 0) return c;
+    return int.parse(ma.group(2) ?? '0').compareTo(int.parse(mb.group(2) ?? '0'));
   }
 
   /// 解析日志目录：委托 platform_utils.resolveDataDir()，加 /logs 后缀。

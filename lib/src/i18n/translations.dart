@@ -786,6 +786,27 @@ class S {
   String get btResetTrackers => _t('重置为默认', 'Reset to Default');
   String get btResetTrackersConfirm =>
       _t('确定要恢复默认的 Tracker 列表吗？', 'Reset tracker list to defaults?');
+  String get btTrackerSub => _t('Tracker 订阅', 'Tracker Subscription');
+  String get btTrackerSubDesc => _t(
+    '定期从社区维护的订阅源获取最新 Tracker，自动与上方列表合并去重',
+    'Periodically fetch up-to-date trackers from community-maintained lists, merged and deduplicated with the list above',
+  );
+  String btTrackerSubStatus(int n) =>
+      _t('已订阅 $n 个 Tracker', '$n trackers subscribed');
+  String get btTrackerSubNeverUpdated => _t('尚未更新', 'Not updated yet');
+  String btTrackerSubUpdatedAt(String time) =>
+      _t('更新于 $time', 'Updated at $time');
+  String get btTrackerSubUpdateNow => _t('立即更新', 'Update Now');
+  String get btTrackerSubUpdating => _t('更新中…', 'Updating…');
+  String get btTrackerSubUpdateFailed => _t('更新失败', 'Update failed');
+  String get btTrackerSubPlaceholder => _t(
+    '每行一个订阅地址，例如：\nhttps://trackerslist.com/best.txt\nhttps://ngosang.github.io/trackerslist/trackers_best.txt',
+    'One subscription URL per line, e.g.:\nhttps://trackerslist.com/best.txt\nhttps://ngosang.github.io/trackerslist/trackers_best.txt',
+  );
+  String get btTrackerSubResetConfirm => _t(
+    '确定要恢复默认的订阅地址吗？',
+    'Reset subscription URLs to defaults?',
+  );
   String get btPortInvalid => _t(
     '端口范围无效（1024-65535，起始 ≤ 结束）',
     'Invalid port range (1024-65535, start ≤ end)',
@@ -862,6 +883,11 @@ class S {
   String get logExportEmpty => _t('没有可导出的日志文件', 'No log files to export');
   String get logExportFailed => _t('日志导出失败', 'Failed to export logs');
   String get logSelectExportDir => _t('选择日志导出目录', 'Select Export Directory');
+  String get logMaxSize => _t('日志占用上限', 'Max Log Size');
+  String get logMaxSizeDesc => _t(
+    '日志总大小超出上限时自动从最旧开始清理',
+    'Oldest logs are cleaned automatically when total size exceeds the limit',
+  );
 
   // ─────────────────────────────────────────────
   // 更新日志弹窗

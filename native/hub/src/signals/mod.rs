@@ -625,3 +625,29 @@ pub struct TorrentMetaResult {
     /// Non-empty when parsing failed.
     pub error: String,
 }
+
+// ========== BT tracker subscription signals ==========
+
+/// Manually refresh the tracker subscription lists now (Dart → Rust).
+/// Rust fetches all configured subscription URLs, dedupes the result,
+/// caches it in the config table and replies with [TrackerSubscriptionResult].
+#[derive(Deserialize, DartSignal)]
+pub struct UpdateTrackerSubscription {}
+
+/// Result of a tracker subscription refresh (Rust → Dart).
+/// Sent after both manual refreshes and the automatic startup refresh.
+#[derive(Serialize, RustSignal)]
+pub struct TrackerSubscriptionResult {
+    /// True when at least one subscription source was fetched successfully.
+    pub success: bool,
+    /// Number of unique trackers fetched across all sources (after dedup).
+    pub tracker_count: i32,
+    /// Number of sources fetched successfully.
+    pub ok_sources: i32,
+    /// Total number of subscription sources attempted.
+    pub total_sources: i32,
+    /// Unix seconds of this refresh. 0 when the refresh failed.
+    pub updated_at: i64,
+    /// Non-empty when all sources failed (error summary).
+    pub error: String,
+}

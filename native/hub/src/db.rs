@@ -101,22 +101,16 @@ impl Db {
         add_column("ALTER TABLE tasks ADD COLUMN queue_id TEXT NOT NULL DEFAULT '';")?;
 
         // Phase 4: per-queue default segment count
-        add_column(
-            "ALTER TABLE queues ADD COLUMN default_segments INTEGER NOT NULL DEFAULT 0;",
-        )?;
+        add_column("ALTER TABLE queues ADD COLUMN default_segments INTEGER NOT NULL DEFAULT 0;")?;
 
         // Phase 5: per-task checksum for integrity verification
         add_column("ALTER TABLE tasks ADD COLUMN checksum TEXT NOT NULL DEFAULT '';")?;
 
         // Phase 6: per-queue default user-agent
-        add_column(
-            "ALTER TABLE queues ADD COLUMN default_user_agent TEXT NOT NULL DEFAULT '';",
-        )?;
+        add_column("ALTER TABLE queues ADD COLUMN default_user_agent TEXT NOT NULL DEFAULT '';")?;
 
         // Phase 7: BT selected file indices (comma-separated, empty = all files)
-        add_column(
-            "ALTER TABLE tasks ADD COLUMN bt_selected_files TEXT NOT NULL DEFAULT '';",
-        )?;
+        add_column("ALTER TABLE tasks ADD COLUMN bt_selected_files TEXT NOT NULL DEFAULT '';")?;
 
         // Phase 8: BT custom name — user-specified rename target, stored
         // separately so Phase 1/3 engine callbacks never overwrite it.
@@ -127,9 +121,7 @@ impl Db {
         // If-Range，从而检出"两次会话之间服务器换了文件（即便长度相同）"——避免
         // 把旧前缀 + 新尾部静默拼接（BUG-HTTP-SINGLE-RESUME-SPLICE）。
         add_column("ALTER TABLE tasks ADD COLUMN orig_etag TEXT NOT NULL DEFAULT '';")?;
-        add_column(
-            "ALTER TABLE tasks ADD COLUMN orig_last_modified TEXT NOT NULL DEFAULT '';",
-        )?;
+        add_column("ALTER TABLE tasks ADD COLUMN orig_last_modified TEXT NOT NULL DEFAULT '';")?;
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -903,6 +895,7 @@ impl Db {
     pub async fn init_default_config(&self, default_save_dir: &str) -> Result<(), DbError> {
         let conn = self.conn.clone();
         let default_save_dir = default_save_dir.to_owned();
+        let default_sub_urls = crate::tracker_subscription::default_subscription_urls();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().map_err(|_| DbError::LockPoisoned)?;
             let defaults: &[(&str, &str)] = &[
@@ -922,6 +915,13 @@ impl Db {
                 ("bt_port_start", "6881"),
                 ("bt_port_end", "6891"),
                 ("bt_custom_trackers", ""),
+                // Tracker 订阅：默认启用，订阅社区流行的两个精选列表
+                // （XIU2/TrackersListCollection + ngosang/trackerslist）。
+                // cache 由订阅刷新流程写入，updated_at=0 表示从未更新。
+                ("bt_tracker_sub_enabled", "true"),
+                ("bt_tracker_sub_urls", &default_sub_urls),
+                ("bt_tracker_sub_cache", ""),
+                ("bt_tracker_sub_updated_at", "0"),
                 ("torrent_assoc_prompted", "false"),
                 ("proxy_mode", "none"),
                 ("proxy_type", "http"),
@@ -1880,10 +1880,7 @@ mod tests {
             .await
             .expect("load")
             .expect("task exists");
-        assert_eq!(
-            task.downloaded_bytes, 800,
-            "更大的进度值必须正常写入"
-        );
+        assert_eq!(task.downloaded_bytes, 800, "更大的进度值必须正常写入");
 
         let _ = std::fs::remove_dir_all(dir);
     }

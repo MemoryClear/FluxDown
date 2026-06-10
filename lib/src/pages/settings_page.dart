@@ -1617,6 +1617,13 @@ class _BtContent extends StatelessWidget {
               vertical: true,
               child: _BtTrackerEditor(settingsProvider: settingsProvider),
             ),
+            const SizedBox(height: 10),
+            _SettingCard(
+              label: LocaleScope.of(context).btTrackerSub,
+              description: LocaleScope.of(context).btTrackerSubDesc,
+              vertical: true,
+              child: _BtTrackerSubEditor(settingsProvider: settingsProvider),
+            ),
             const SizedBox(height: 6),
             // 重启提示
             Padding(
@@ -3268,11 +3275,16 @@ class _BtTrackerEditorState extends State<_BtTrackerEditor> {
   }
 
   void _save() {
-    final lines = _controller.text
-        .split('\n')
-        .map((l) => l.trim())
-        .where((l) => l.isNotEmpty)
-        .toList();
+    // 清洗 + 去重：按 trim 后小写、去尾部斜杠的形式判重，保留首次出现的原始行
+    // （Rust 端合并订阅时还会按 URL 规范化形式再去重一次）
+    final seen = <String>{};
+    final lines = <String>[];
+    for (final raw in _controller.text.split('\n')) {
+      final l = raw.trim();
+      if (l.isEmpty) continue;
+      final key = l.toLowerCase().replaceAll(RegExp(r'/+$'), '');
+      if (seen.add(key)) lines.add(l);
+    }
     final cleaned = lines.join('\n');
     _controller.text = cleaned;
     widget.settingsProvider.setBtCustomTrackers(cleaned);
@@ -3437,6 +3449,316 @@ class _BtTrackerEditorState extends State<_BtTrackerEditor> {
               child: Text(s.confirm),
             ),
           ),
+        ],
+      ],
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
+// BT Tracker 订阅编辑器
+// ─────────────────────────────────────────────
+
+/// 默认订阅地址（与 Rust 端 tracker_subscription::DEFAULT_SUBSCRIPTION_URLS 保持同步）：
+/// - trackerslist.com — XIU2/TrackersListCollection 官方 CDN（中文社区最流行，国内可达）
+/// - ngosang.github.io — ngosang/trackerslist（每日自动更新，按延迟排序）
+const _kDefaultTrackerSubUrls = [
+  'https://trackerslist.com/best.txt',
+  'https://ngosang.github.io/trackerslist/trackers_best.txt',
+];
+
+/// BT Tracker 订阅编辑器：启用开关 + 订阅状态 + 立即更新 + 订阅地址管理。
+class _BtTrackerSubEditor extends StatefulWidget {
+  final SettingsProvider settingsProvider;
+
+  const _BtTrackerSubEditor({required this.settingsProvider});
+
+  @override
+  State<_BtTrackerSubEditor> createState() => _BtTrackerSubEditorState();
+}
+
+class _BtTrackerSubEditorState extends State<_BtTrackerSubEditor> {
+  late TextEditingController _controller;
+  bool _isExpanded = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(
+      text: widget.settingsProvider.btTrackerSubUrls,
+    );
+  }
+
+  @override
+  void didUpdateWidget(_BtTrackerSubEditor oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 仅在外部值变化时同步（例如从 Rust 端加载初始值）
+    if (widget.settingsProvider.btTrackerSubUrls != _controller.text &&
+        !_isExpanded) {
+      _controller.text = widget.settingsProvider.btTrackerSubUrls;
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _save() {
+    // 清洗 + 去重（忽略大小写与尾部斜杠差异）
+    final seen = <String>{};
+    final lines = <String>[];
+    for (final raw in _controller.text.split('\n')) {
+      final l = raw.trim();
+      if (l.isEmpty) continue;
+      final key = l.toLowerCase().replaceAll(RegExp(r'/+$'), '');
+      if (seen.add(key)) lines.add(l);
+    }
+    final cleaned = lines.join('\n');
+    _controller.text = cleaned;
+    widget.settingsProvider.setBtTrackerSubUrls(cleaned);
+  }
+
+  void _resetToDefault() {
+    showShadDialog(
+      context: context,
+      barrierColor: AppColors.of(context).dialogBarrier,
+      animateIn: const [],
+      animateOut: const [],
+      builder: (ctx) => ShadDialog.alert(
+        title: Text(LocaleScope.of(ctx).btResetTrackers),
+        description: Text(LocaleScope.of(ctx).btTrackerSubResetConfirm),
+        actions: [
+          ShadButton.outline(
+            child: Text(LocaleScope.of(ctx).cancel),
+            onPressed: () => Navigator.of(ctx).pop(),
+          ),
+          ShadButton(
+            child: Text(LocaleScope.of(ctx).confirm),
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              final defaults = _kDefaultTrackerSubUrls.join('\n');
+              _controller.text = defaults;
+              widget.settingsProvider.setBtTrackerSubUrls(defaults);
+              setState(() {});
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _formatUpdatedAt(int unixSecs) {
+    final dt = DateTime.fromMillisecondsSinceEpoch(unixSecs * 1000);
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${dt.year}-${two(dt.month)}-${two(dt.day)} '
+        '${two(dt.hour)}:${two(dt.minute)}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppColors.of(context);
+    final s = LocaleScope.of(context);
+    final sp = widget.settingsProvider;
+
+    // 状态文本：已订阅 N 个 Tracker · 更新于… / 尚未更新 / 更新中
+    final String statusText;
+    if (sp.btTrackerSubRefreshing) {
+      statusText = s.btTrackerSubUpdating;
+    } else if (sp.btTrackerSubUpdatedAt > 0) {
+      statusText =
+          '${s.btTrackerSubStatus(sp.btTrackerSubCount)} · '
+          '${s.btTrackerSubUpdatedAt(_formatUpdatedAt(sp.btTrackerSubUpdatedAt))}';
+    } else {
+      statusText = s.btTrackerSubNeverUpdated;
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // 状态行 + 启用开关
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                statusText,
+                style: TextStyle(fontSize: 12, color: c.textMuted),
+              ),
+            ),
+            ShadSwitch(
+              value: sp.btTrackerSubEnabled,
+              onChanged: (v) => sp.setBtTrackerSubEnabled(v),
+            ),
+          ],
+        ),
+        if (sp.btTrackerSubEnabled) ...[
+          // 错误提示
+          if (sp.btTrackerSubLastError.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+              '${s.btTrackerSubUpdateFailed}: ${sp.btTrackerSubLastError}',
+              style: TextStyle(fontSize: 11, color: c.statusError),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+          const SizedBox(height: 4),
+          // 操作行：立即更新 / 管理订阅地址
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              ShadButton.ghost(
+                size: ShadButtonSize.sm,
+                onPressed: sp.btTrackerSubRefreshing
+                    ? null
+                    : () => sp.refreshTrackerSubscription(),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (sp.btTrackerSubRefreshing)
+                      SizedBox(
+                        width: 12,
+                        height: 12,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: c.textSecondary,
+                        ),
+                      )
+                    else
+                      Icon(
+                        LucideIcons.refreshCw,
+                        size: 12,
+                        color: c.textSecondary,
+                      ),
+                    const SizedBox(width: 4),
+                    Text(
+                      sp.btTrackerSubRefreshing
+                          ? s.btTrackerSubUpdating
+                          : s.btTrackerSubUpdateNow,
+                      style: TextStyle(fontSize: 11, color: c.textSecondary),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 4),
+              ShadButton.ghost(
+                size: ShadButtonSize.sm,
+                onPressed: () => setState(() => _isExpanded = !_isExpanded),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      _isExpanded
+                          ? LucideIcons.chevronUp
+                          : LucideIcons.chevronDown,
+                      size: 14,
+                      color: c.textSecondary,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      _isExpanded ? s.cancel : s.manage,
+                      style: TextStyle(fontSize: 11, color: c.textSecondary),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          // 展开时显示订阅地址编辑区（与 Tracker 编辑器一致的实现）
+          if (_isExpanded) ...[
+            const SizedBox(height: 8),
+            SizedBox(
+              height: 100,
+              child: Localizations(
+                locale: const Locale('en'),
+                delegates: const [
+                  DefaultWidgetsLocalizations.delegate,
+                  DefaultMaterialLocalizations.delegate,
+                ],
+                child: Material(
+                  type: MaterialType.transparency,
+                  child: TextSelectionTheme(
+                    data: TextSelectionThemeData(
+                      selectionColor: c.accent.withValues(alpha: 0.25),
+                      cursorColor: c.accent,
+                      selectionHandleColor: c.accent,
+                    ),
+                    child: TextField(
+                      controller: _controller,
+                      maxLines: null,
+                      expands: true,
+                      textAlignVertical: TextAlignVertical.top,
+                      cursorColor: c.accent,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: c.textPrimary,
+                        fontFamily: 'monospace',
+                        height: 1.5,
+                      ),
+                      decoration: InputDecoration(
+                        hintText: s.btTrackerSubPlaceholder,
+                        hintStyle: TextStyle(fontSize: 12, color: c.textMuted),
+                        hintMaxLines: 3,
+                        contentPadding: const EdgeInsets.all(10),
+                        filled: true,
+                        fillColor: c.inputBg,
+                        hoverColor: Colors.transparent,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: BorderSide(color: c.inputBorder),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: BorderSide(color: c.inputBorder),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: BorderSide(color: c.inputFocusBorder),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                ShadButton.ghost(
+                  size: ShadButtonSize.sm,
+                  onPressed: _resetToDefault,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        LucideIcons.rotateCcw,
+                        size: 12,
+                        color: c.textSecondary,
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        s.btResetTrackers,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: c.textSecondary,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Spacer(),
+                ShadButton(
+                  size: ShadButtonSize.sm,
+                  onPressed: () {
+                    _save();
+                    setState(() => _isExpanded = false);
+                  },
+                  child: Text(s.confirm),
+                ),
+              ],
+            ),
+          ],
         ],
       ],
     );
@@ -4938,7 +5260,7 @@ class _AboutContent extends StatelessWidget {
             ),
             const SizedBox(height: 10),
             // Log export card
-            _LogExportCard(colors: c),
+            _LogExportCard(colors: c, settingsProvider: settingsProvider),
           ],
         );
       },
@@ -5241,7 +5563,8 @@ class _AboutContent extends StatelessWidget {
 
 class _LogExportCard extends StatefulWidget {
   final AppColors colors;
-  const _LogExportCard({required this.colors});
+  final SettingsProvider settingsProvider;
+  const _LogExportCard({required this.colors, required this.settingsProvider});
 
   @override
   State<_LogExportCard> createState() => _LogExportCardState();
@@ -5249,6 +5572,9 @@ class _LogExportCard extends StatefulWidget {
 
 class _LogExportCardState extends State<_LogExportCard> {
   bool _exporting = false;
+
+  /// 日志总大小上限可选项（MB）
+  static const _maxSizeOptions = [5, 10, 20, 50, 100];
 
   Future<void> _exportLogs() async {
     if (_exporting) return;
@@ -5329,6 +5655,45 @@ class _LogExportCardState extends State<_LogExportCard> {
           Text(
             s.logExportInfo(fileCount, sizeText),
             style: TextStyle(fontSize: 12, color: c.textMuted),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      s.logMaxSize,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: c.textPrimary,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      s.logMaxSizeDesc,
+                      style: TextStyle(fontSize: 11, color: c.textMuted),
+                    ),
+                  ],
+                ),
+              ),
+              ShadSelect<int>(
+                initialValue: widget.settingsProvider.logMaxSizeMb,
+                placeholder: Text('${widget.settingsProvider.logMaxSizeMb} MB'),
+                options: _maxSizeOptions
+                    .map((mb) => ShadOption(value: mb, child: Text('$mb MB')))
+                    .toList(),
+                selectedOptionBuilder: (context, value) => Text('$value MB'),
+                onChanged: (v) {
+                  if (v != null) {
+                    widget.settingsProvider.setLogMaxSizeMb(v);
+                    setState(() {});
+                  }
+                },
+              ),
+            ],
           ),
           const SizedBox(height: 10),
           Row(

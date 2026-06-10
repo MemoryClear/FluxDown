@@ -27,6 +27,7 @@ class SettingsProvider extends ChangeNotifier {
   bool _autoCheckUpdate = true; // 默认启动时自动检查更新
   bool _analyticsEnabled = true; // 默认启用匿名数据分析
   bool _notifyOnComplete = true; // 默认任务完成时弹出通知
+  int _logMaxSizeMb = 10; // 日志总大小上限（MB），超出自动清理
 
   // 侧边栏区块显示设置
   bool _showSidebarStatus = true;    // 显示状态区块
@@ -64,6 +65,14 @@ class SettingsProvider extends ChangeNotifier {
   int _btPortEnd = 6891; // 监听端口结束
   String _btCustomTrackers = ''; // 用户自定义 Tracker 列表（换行分隔）
 
+  // BT Tracker 订阅（社区维护的 tracker 列表，Rust 端拉取后合并去重）
+  bool _btTrackerSubEnabled = true; // 启用 Tracker 订阅
+  String _btTrackerSubUrls = ''; // 订阅地址（换行分隔）
+  int _btTrackerSubCount = 0; // 订阅缓存中的 tracker 数量
+  int _btTrackerSubUpdatedAt = 0; // 上次订阅更新时间（Unix 秒，0=从未）
+  bool _btTrackerSubRefreshing = false; // 是否正在刷新订阅
+  String _btTrackerSubLastError = ''; // 上次刷新的错误信息（空=成功）
+
   // 本地下载服务（油猴脚本接管）
   bool _localServerEnabled = true;
   int _localServerPort = 17800;
@@ -92,6 +101,7 @@ class SettingsProvider extends ChangeNotifier {
 
   StreamSubscription<RustSignalPack<ConfigLoaded>>? _configSub;
   StreamSubscription<RustSignalPack<FileAssociationStatus>>? _fileAssocSub;
+  StreamSubscription<RustSignalPack<TrackerSubscriptionResult>>? _trackerSubSub;
 
   SettingsProvider({bool enableFileAssoc = true})
     : _enableFileAssoc = enableFileAssoc {
@@ -110,6 +120,7 @@ class SettingsProvider extends ChangeNotifier {
     _proxyDebounceTimer?.cancel();
     _configSub?.cancel();
     _fileAssocSub?.cancel();
+    _trackerSubSub?.cancel();
     if (globalInstance == this) {
       globalInstance = null;
     }
@@ -133,6 +144,7 @@ class SettingsProvider extends ChangeNotifier {
   bool get autoCheckUpdate => _autoCheckUpdate;
   bool get analyticsEnabled => _analyticsEnabled;
   bool get notifyOnComplete => _notifyOnComplete;
+  int get logMaxSizeMb => _logMaxSizeMb;
 
   // 侧边栏显示 Getters
   bool get showSidebarStatus => _showSidebarStatus;
@@ -169,6 +181,14 @@ class SettingsProvider extends ChangeNotifier {
   int get btPortStart => _btPortStart;
   int get btPortEnd => _btPortEnd;
   String get btCustomTrackers => _btCustomTrackers;
+
+  // BT Tracker 订阅 Getters
+  bool get btTrackerSubEnabled => _btTrackerSubEnabled;
+  String get btTrackerSubUrls => _btTrackerSubUrls;
+  int get btTrackerSubCount => _btTrackerSubCount;
+  int get btTrackerSubUpdatedAt => _btTrackerSubUpdatedAt;
+  bool get btTrackerSubRefreshing => _btTrackerSubRefreshing;
+  String get btTrackerSubLastError => _btTrackerSubLastError;
 
   // 本地下载服务 Getters
   bool get localServerEnabled => _localServerEnabled;
@@ -276,6 +296,15 @@ class SettingsProvider extends ChangeNotifier {
     _notifyOnComplete = value;
     notifyListeners();
     _saveToRust('notify_on_complete', value.toString());
+  }
+
+  void setLogMaxSizeMb(int value) {
+    if (_logMaxSizeMb == value || value < 1) return;
+    _logMaxSizeMb = value;
+    notifyListeners();
+    // Rust 端收到后同步更新 logger 上限并执行超量清理
+    _saveToRust('log_max_size_mb', value.toString());
+    LogService.instance.maxTotalBytes = value * 1024 * 1024;
   }
 
   // 侧边栏显示 Setters
@@ -463,6 +492,34 @@ class SettingsProvider extends ChangeNotifier {
     _saveToRust('bt_custom_trackers', value);
   }
 
+  // BT Tracker 订阅 Setters
+
+  void setBtTrackerSubEnabled(bool value) {
+    if (_btTrackerSubEnabled == value) return;
+    _btTrackerSubEnabled = value;
+    notifyListeners();
+    _saveToRust('bt_tracker_sub_enabled', value.toString());
+  }
+
+  void setBtTrackerSubUrls(String value) {
+    if (_btTrackerSubUrls == value) return;
+    _btTrackerSubUrls = value;
+    // Rust 端会在订阅地址变化后自动后台刷新一次
+    _btTrackerSubRefreshing = true;
+    _btTrackerSubLastError = '';
+    notifyListeners();
+    _saveToRust('bt_tracker_sub_urls', value);
+  }
+
+  /// 请求 Rust 立即刷新 Tracker 订阅（结果通过 TrackerSubscriptionResult 回传）
+  void refreshTrackerSubscription() {
+    if (_btTrackerSubRefreshing) return;
+    _btTrackerSubRefreshing = true;
+    _btTrackerSubLastError = '';
+    notifyListeners();
+    const UpdateTrackerSubscription().sendSignalToRust();
+  }
+
   // 本地下载服务 Setters
 
   void setLocalServerEnabled(bool value) {
@@ -593,11 +650,32 @@ class SettingsProvider extends ChangeNotifier {
 
   void _startListening() {
     _configSub = ConfigLoaded.rustSignalStream.listen(_onConfigLoaded);
+    _trackerSubSub = TrackerSubscriptionResult.rustSignalStream.listen(
+      _onTrackerSubResult,
+    );
     if (_enableFileAssoc) {
       _fileAssocSub = FileAssociationStatus.rustSignalStream.listen(
         _onFileAssocStatus,
       );
     }
+  }
+
+  void _onTrackerSubResult(RustSignalPack<TrackerSubscriptionResult> pack) {
+    final msg = pack.message;
+    logInfo(
+      'Settings',
+      'tracker subscription result: success=${msg.success}, '
+          'count=${msg.trackerCount}, sources=${msg.okSources}/${msg.totalSources}',
+    );
+    _btTrackerSubRefreshing = false;
+    if (msg.success) {
+      _btTrackerSubCount = msg.trackerCount;
+      _btTrackerSubUpdatedAt = msg.updatedAt;
+      _btTrackerSubLastError = '';
+    } else {
+      _btTrackerSubLastError = msg.error;
+    }
+    notifyListeners();
   }
 
   void _onFileAssocStatus(RustSignalPack<FileAssociationStatus> pack) {
@@ -645,12 +723,24 @@ class SettingsProvider extends ChangeNotifier {
           _btPortEnd = int.tryParse(entry.value) ?? 6891;
         case 'bt_custom_trackers':
           _btCustomTrackers = entry.value;
+        case 'bt_tracker_sub_enabled':
+          _btTrackerSubEnabled = entry.value == 'true';
+        case 'bt_tracker_sub_urls':
+          _btTrackerSubUrls = entry.value;
+        case 'bt_tracker_sub_cache':
+          final cache = entry.value.trim();
+          _btTrackerSubCount = cache.isEmpty ? 0 : cache.split('\n').length;
+        case 'bt_tracker_sub_updated_at':
+          _btTrackerSubUpdatedAt = int.tryParse(entry.value) ?? 0;
         case 'torrent_assoc_prompted':
           _torrentAssocPrompted = entry.value == 'true';
         case 'analytics_enabled':
           _analyticsEnabled = entry.value != 'false'; // 默认 true
         case 'notify_on_complete':
           _notifyOnComplete = entry.value != 'false'; // 默认 true
+        case 'log_max_size_mb':
+          _logMaxSizeMb = int.tryParse(entry.value) ?? 10;
+          LogService.instance.maxTotalBytes = _logMaxSizeMb * 1024 * 1024;
         case 'proxy_mode':
           _proxyMode = entry.value;
         case 'proxy_type':

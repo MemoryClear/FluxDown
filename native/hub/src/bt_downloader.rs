@@ -292,6 +292,10 @@ pub struct BtConfig {
     /// User-supplied extra tracker URLs (newline-separated).
     /// These are **merged** with the built-in `PUBLIC_TRACKERS` list.
     pub custom_trackers: String,
+    /// Trackers fetched from subscription sources (newline-separated cache,
+    /// see `tracker_subscription`).  Empty when the subscription feature is
+    /// disabled.  Merged + deduped with `custom_trackers` at session build.
+    pub subscription_trackers: String,
 }
 
 impl Default for BtConfig {
@@ -302,6 +306,7 @@ impl Default for BtConfig {
             port_start: 6881,
             port_end: 6891,
             custom_trackers: String::new(),
+            subscription_trackers: String::new(),
         }
     }
 }
@@ -401,22 +406,20 @@ impl SharedBtSession {
             .build()
             .map_err(|e| DownloadError::Other(format!("failed to build BT runtime: {e}")))?;
 
-        // If the user has a non-empty tracker list in settings, use it directly.
-        // Otherwise fall back to the built-in PUBLIC_TRACKERS list.
-        let trackers: HashSet<url::Url> = if bt_config.custom_trackers.trim().is_empty() {
-            PUBLIC_TRACKERS
-                .iter()
-                .filter_map(|s| s.parse().ok())
-                .collect()
+        // Base list: the user's tracker list from Settings, falling back to
+        // the built-in PUBLIC_TRACKERS when empty.  Subscription trackers
+        // (fetched from community-maintained lists) are appended, and the
+        // whole set is deduped by normalized URL form.
+        let base: Vec<&str> = if bt_config.custom_trackers.trim().is_empty() {
+            PUBLIC_TRACKERS.to_vec()
         } else {
-            bt_config
-                .custom_trackers
-                .lines()
-                .map(|l| l.trim())
-                .filter(|l| !l.is_empty())
-                .filter_map(|l| l.parse().ok())
-                .collect()
+            bt_config.custom_trackers.lines().collect()
         };
+        let merged = crate::tracker_subscription::merge_dedup(
+            base.into_iter()
+                .chain(bt_config.subscription_trackers.lines()),
+        );
+        let trackers: HashSet<url::Url> = merged.iter().filter_map(|s| s.parse().ok()).collect();
 
         let total_tracker_count = trackers.len();
 
@@ -1913,8 +1916,9 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     AddTorrentResponse::Added(id, handle) => {
                         let id = *id;
                         let handle = handle.clone();
-                        if let Some(del_files) =
-                            shared_bt_for_add.take_pending_delete(&task_id_for_add).await
+                        if let Some(del_files) = shared_bt_for_add
+                            .take_pending_delete(&task_id_for_add)
+                            .await
                         {
                             // Delete was requested before we got here.
                             let _ = session_for_add.delete(id.into(), del_files).await;
@@ -1929,12 +1933,15 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                             // may have raced in just after our first check.  We
                             // also register the torrent_id so `delete_task` can
                             // clean up the mapping.
-                            shared_bt_for_add.register_torrent_id(id, &task_id_for_add).await;
+                            shared_bt_for_add
+                                .register_torrent_id(id, &task_id_for_add)
+                                .await;
                             shared_bt_for_add
                                 .store_handle(&task_id_for_add, handle)
                                 .await;
-                            if let Some(del_files) =
-                                shared_bt_for_add.take_pending_delete(&task_id_for_add).await
+                            if let Some(del_files) = shared_bt_for_add
+                                .take_pending_delete(&task_id_for_add)
+                                .await
                             {
                                 // A delete arrived between the two checks; consume
                                 // it and remove the handle we just stored
@@ -1956,8 +1963,9 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                         // delete it (that would clobber the real owner).  Only
                         // consume a pending delete if this very task owns the
                         // torrent_id mapping — otherwise leave it to the owner.
-                        if let Some(del_files) =
-                            shared_bt_for_add.take_pending_delete(&task_id_for_add).await
+                        if let Some(del_files) = shared_bt_for_add
+                            .take_pending_delete(&task_id_for_add)
+                            .await
                         {
                             let owner = shared_bt_for_add.task_for_torrent(*id).await;
                             if owner.as_deref() == Some(task_id_for_add.as_str()) {
@@ -3060,7 +3068,10 @@ mod tests {
         assert_eq!(s.end_byte, 99);
         assert_eq!(s.downloaded_bytes, 50);
         for s in &segs {
-            assert!(s.downloaded_bytes >= 0, "downloaded_bytes must be non-negative");
+            assert!(
+                s.downloaded_bytes >= 0,
+                "downloaded_bytes must be non-negative"
+            );
             assert!(s.end_byte >= s.start_byte, "end must not precede start");
         }
     }
@@ -3099,8 +3110,16 @@ mod tests {
             None => panic!("layout should be Some"),
         };
         assert_eq!(moves.len(), 2);
-        let dst0 = moves[0].1.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        let dst1 = moves[1].1.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let dst0 = moves[0]
+            .1
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        let dst1 = moves[1]
+            .1
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
         assert_eq!(dst0, "file.txt");
         assert_eq!(dst1, "file (1).txt");
         // No underscore-prefixed name should ever be produced.

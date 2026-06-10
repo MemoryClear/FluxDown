@@ -20,6 +20,7 @@ mod segment_advisor;
 mod segment_coordinator;
 mod signals;
 mod speed_limiter;
+mod tracker_subscription;
 mod updater;
 
 #[cfg(test)]
