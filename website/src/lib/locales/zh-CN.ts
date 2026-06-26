@@ -8,6 +8,17 @@ const zhCN: Messages = {
   "announcement.3": "Telegram 群已创建！欢迎加入 FluxDown 国际社区交流群！",
   "announcement.4":
     "🎨 Logo 投票开启！为 FluxDown 新 Logo 投票，或提交你的原创设计，快来参与！",
+  "announcement.5":
+    "⚠️ 安全警告：发现仿冒网站 fluxdown.com.cn 传播「银狐」木马病毒，切勿下载！",
+  "announcementModal.title": "安全警告",
+  "announcementModal.body":
+    "我们发现有非官方网站冒充 FluxDown，传播携带「银狐」远控木马的恶意安装包。请勿在该网站下载或运行任何文件，谨防资金与隐私损失。",
+  "announcementModal.fakeLabel": "仿冒网站（请勿访问）",
+  "announcementModal.fakeSite": "fluxdown.com.cn",
+  "announcementModal.officialLabel": "官方网址（认准此域名）",
+  "announcementModal.officialSite": "https://fluxdown.zerx.dev",
+  "announcementModal.confirm": "我已知晓",
+  "announcementModal.goOfficial": "前往官网",
   "announcement.close": "关闭",
   "announcement.badge": "公告",
   "announcement.title": "最新",

@@ -2,6 +2,7 @@
 import Layout from "../layouts/Layout.astro";
 import { FloatingNavbar } from "../components/ui/floating-navbar";
 import AnnouncementBar from "../components/AnnouncementBar";
+import AnnouncementModal from "../components/AnnouncementModal";
 import HeroSection from "../components/HeroSection";
 import FeaturesSection from "../components/FeaturesSection";
 import ExtensionSection from "../components/ExtensionSection";
@@ -13,6 +14,7 @@ import CommunityFloat from "../components/CommunityFloat";
 
 <Layout>
   <AnnouncementBar client:load />
+  <AnnouncementModal client:load />
   <FloatingNavbar client:load />
   <main>
     <HeroSection client:load />

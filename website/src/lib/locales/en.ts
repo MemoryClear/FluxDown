@@ -8,6 +8,17 @@ const en = {
     "Telegram Group is live! Join the global FluxDown community on Telegram now!",
   "announcement.4":
     "🎨 Logo Vote is open! Vote for the new FluxDown logo or submit your own design. Join in!",
+  "announcement.5":
+    "⚠️ Security Alert: A fake site fluxdown.com.cn is spreading the \"SilverFox\" trojan. Do NOT download from it!",
+  "announcementModal.title": "Security Alert",
+  "announcementModal.body":
+    "We have found unofficial sites impersonating FluxDown and distributing malicious installers carrying the \"SilverFox\" remote-access trojan. Do not download or run any files from such sites to avoid loss of funds and privacy.",
+  "announcementModal.fakeLabel": "Fake site (do NOT visit)",
+  "announcementModal.fakeSite": "fluxdown.com.cn",
+  "announcementModal.officialLabel": "Official site (trust only this domain)",
+  "announcementModal.officialSite": "https://fluxdown.zerx.dev",
+  "announcementModal.confirm": "I Understand",
+  "announcementModal.goOfficial": "Go to Official Site",
   "announcement.close": "Close",
   "announcement.badge": "Announcements",
   "announcement.title": "Latest ",

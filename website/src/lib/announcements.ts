@@ -6,15 +6,25 @@ export interface Announcement {
   link?: string;
   date: string;
   active: boolean;
+  /** 以弹窗形式强提示（如安全警告），而非顶部横幅 */
+  popup?: boolean;
 }
 
 export const ANNOUNCEMENTS: Announcement[] = [
   {
+    id: "security-warning-fake-site",
+    messageKey: "announcement.5",
+    link: "https://fluxdown.zerx.dev",
+    date: "2026-06-25",
+    active: true,
+    popup: true,
+  },
+  {
     id: "logo-vote-active",
     messageKey: "announcement.4",
     link: "/logo-vote",
-    date: "2026-07-15",
-    active: true,
+    date: "2026-02-15",
+    active: false,
   },
   {
     id: "telegram-group-created",

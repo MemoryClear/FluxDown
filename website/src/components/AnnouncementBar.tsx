@@ -30,9 +30,9 @@ export default function AnnouncementBar() {
 
   useEffect(() => {
     const dismissed = getDismissed();
-    const active = ANNOUNCEMENTS.find(
+    const active = ANNOUNCEMENTS.filter(
       (a) => a.active && !dismissed.includes(a.id),
-    );
+    ).sort((a, b) => b.date.localeCompare(a.date))[0];
     if (active) {
       setCurrent(active);
       setVisible(true);

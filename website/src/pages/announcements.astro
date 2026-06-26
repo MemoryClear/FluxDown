@@ -2,6 +2,7 @@
 import Layout from "../layouts/Layout.astro";
 import { FloatingNavbar } from "../components/ui/floating-navbar";
 import AnnouncementBar from "../components/AnnouncementBar";
+import AnnouncementModal from "../components/AnnouncementModal";
 import AnnouncementsPage from "../components/AnnouncementsPage";
 import Footer from "../components/Footer";
 import CommunityFloat from "../components/CommunityFloat";
@@ -9,6 +10,7 @@ import CommunityFloat from "../components/CommunityFloat";
 
 <Layout title="Announcements - FluxDown" description="Latest announcements, events, and updates from the FluxDown team.">
   <AnnouncementBar client:load />
+  <AnnouncementModal client:load />
   <FloatingNavbar client:load />
   <main class="relative">
     <div class="absolute inset-0 -z-10 overflow-hidden pointer-events-none">

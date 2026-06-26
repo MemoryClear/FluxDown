@@ -1,3 +1,4 @@
+name: fluxdown
 services:
   website:
     build:
