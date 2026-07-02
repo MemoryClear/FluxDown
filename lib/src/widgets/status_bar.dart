@@ -375,6 +375,9 @@ class _SpeedLimitPopoverContent extends StatelessWidget {
                 ShadSwitch(
                   value: isLimited,
                   onChanged: onToggle,
+                  width: 34,
+                  height: 18,
+                  margin: 2,
                 ),
               ],
             ),

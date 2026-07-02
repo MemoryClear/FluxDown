@@ -28,8 +28,8 @@ class SearchResult {
   /// 任务搜索结果的 taskId
   final String? taskId;
 
-  /// 设置项搜索结果的目标分类
-  final SettingsCategory? settingsCategory;
+  /// 设置项搜索结果的目标项（含分类/标签/描述，用于导航 + 高亮定位）
+  final SettingsSearchItem? settingsItem;
 
   const SearchResult({
     required this.type,
@@ -37,7 +37,7 @@ class SearchResult {
     required this.subtitle,
     required this.icon,
     this.taskId,
-    this.settingsCategory,
+    this.settingsItem,
   });
 }
 
@@ -48,7 +48,7 @@ class SearchResult {
 class HeaderBar extends StatefulWidget {
   final VoidCallback onNewDownload;
   final DownloadController controller;
-  final void Function(SettingsCategory category) onNavigateToSettings;
+  final void Function(SettingsSearchItem item) onNavigateToSettings;
   final VoidCallback? onSettings;
 
   const HeaderBar({
@@ -166,7 +166,7 @@ class HeaderBarState extends State<HeaderBar> {
               item.description,
             ),
             icon: item.icon,
-            settingsCategory: item.category,
+            settingsItem: item,
           ),
         );
       }
@@ -206,8 +206,8 @@ class HeaderBarState extends State<HeaderBar> {
     if (result.type == SearchResultType.task && result.taskId != null) {
       widget.controller.selectTask(result.taskId);
     } else if (result.type == SearchResultType.settings &&
-        result.settingsCategory != null) {
-      widget.onNavigateToSettings(result.settingsCategory!);
+        result.settingsItem != null) {
+      widget.onNavigateToSettings(result.settingsItem!);
     }
   }
 
@@ -242,7 +242,7 @@ class HeaderBarState extends State<HeaderBar> {
     final themeProvider = FluxDownApp.of(context);
     return TitleDragArea(
       child: Container(
-        height: 48,
+        height: 40,
         padding: const EdgeInsets.only(left: 16),
         decoration: BoxDecoration(
           color: c.surface1,
@@ -253,6 +253,8 @@ class HeaderBarState extends State<HeaderBar> {
             // New download button
             ShadButton(
               onPressed: widget.onNewDownload,
+              height: 30,
+              padding: const EdgeInsets.symmetric(horizontal: 12),
               backgroundColor: c.accent,
               hoverBackgroundColor: c.accentHover,
               child: Row(
@@ -402,13 +404,16 @@ class HeaderBarState extends State<HeaderBar> {
 
     final offset = box.localToGlobal(Offset.zero);
     final size = box.size;
+    final theme = ShadTheme.of(context);
 
     return Positioned(
       left: offset.dx,
       top: offset.dy + size.height + 4,
       width: size.width.clamp(240, 380),
-      child: Material(
-        color: Colors.transparent,
+      child: DefaultTextStyle(
+        style: theme.textTheme.p.copyWith(
+          color: theme.colorScheme.foreground,
+        ),
         child: _SearchResultsPanel(
           results: _results,
           highlightedIndex: _highlightedIndex,
@@ -659,7 +664,7 @@ class WindowControls extends StatelessWidget {
   Widget _buildToolButtons(BuildContext context) {
     final themeProvider = FluxDownApp.of(context);
     return SizedBox(
-      height: 48,
+      height: 40,
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -702,7 +707,7 @@ class WindowControls extends StatelessWidget {
     final c = AppColors.of(context);
     final themeProvider = FluxDownApp.of(context);
     return SizedBox(
-      height: 48,
+      height: 40,
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -813,7 +818,7 @@ class _WindowButtonState extends State<_WindowButton> {
         onTap: widget.onPressed,
         child: Container(
           width: 40,
-          height: 48,
+          height: 40,
           color: _isHovered
               ? (widget.isClose
                     ? AppColors.red.withValues(alpha: 0.9)
@@ -866,7 +871,7 @@ class _ToolButtonState extends State<_ToolButton> {
         onTap: widget.onPressed,
         child: Container(
           width: 40,
-          height: 48,
+          height: 40,
           decoration: BoxDecoration(
             color: isActive
                 ? c.accentBg
