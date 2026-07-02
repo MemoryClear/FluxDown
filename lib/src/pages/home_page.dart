@@ -12,6 +12,7 @@ import '../services/analytics_service.dart';
 import '../services/external_download_service.dart';
 import '../services/log_service.dart';
 import '../services/notification_service.dart';
+import '../services/power_service.dart';
 import '../theme/app_colors.dart';
 import '../widgets/sidebar.dart';
 import '../widgets/header_bar.dart';
@@ -50,6 +51,7 @@ class _HomePageState extends State<HomePage> {
   // 页面切换
   bool _showSettings = false;
   SettingsCategory? _initialSettingsCategory;
+  SettingsSearchItem? _initialSettingsHighlight;
 
   // Sidebar
   double _sidebarWidth = 224;
@@ -86,6 +88,8 @@ class _HomePageState extends State<HomePage> {
     AnalyticsService.instance.trackView('HomePage');
     // 监听侧边栏区块可见性变化
     _settingsProvider.addListener(_checkSidebarVisibility);
+    // 下载期间阻止系统睡眠/息屏（按设置项）
+    PowerService.instance.bind(_controller, _settingsProvider);
     // 首次启动 .torrent 文件关联提示（仅 Windows）
     if (Platform.isWindows) {
       _settingsProvider.addListener(_onSettingsLoadedForAssocPrompt);
@@ -99,6 +103,7 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         _showSettings = false;
         _initialSettingsCategory = null;
+        _initialSettingsHighlight = null;
         AnalyticsService.instance.trackView('HomePage');
       });
     }
@@ -108,6 +113,7 @@ class _HomePageState extends State<HomePage> {
   void dispose() {
     logInfo('HomePage', 'dispose');
     ExternalDownloadService.onNavigateToHome = null;
+    PowerService.instance.unbind();
     _clearMenuCallbacks();
     HardwareKeyboard.instance.removeHandler(_onGlobalKey);
     _settingsProvider.removeListener(_checkSidebarVisibility);
@@ -331,7 +337,7 @@ class _HomePageState extends State<HomePage> {
             top: 0,
             left: 0,
             right: 0,
-            height: 48,
+            height: 40,
             child: TitleDragArea(child: ColoredBox(color: c.surface1)),
           ),
           ColoredBox(
@@ -340,11 +346,13 @@ class _HomePageState extends State<HomePage> {
               onBack: () => setState(() {
                 _showSettings = false;
                 _initialSettingsCategory = null;
+                _initialSettingsHighlight = null;
                 AnalyticsService.instance.trackView('HomePage');
               }),
               settingsProvider: _settingsProvider,
               downloadController: _controller,
               initialCategory: _initialSettingsCategory,
+              initialHighlight: _initialSettingsHighlight,
             ),
           ),
 
@@ -357,6 +365,7 @@ class _HomePageState extends State<HomePage> {
               onSettings: () => setState(() {
                 _showSettings = false;
                 _initialSettingsCategory = null;
+                _initialSettingsHighlight = null;
                 AnalyticsService.instance.trackView('HomePage');
               }),
               isSettingsActive: true,
@@ -388,7 +397,7 @@ class _HomePageState extends State<HomePage> {
               top: 0,
               left: 0,
               right: 0,
-              height: 48,
+              height: 40,
               child: TitleDragArea(child: ColoredBox(color: c.surface1)),
             ),
             // 内容区 — 全部从 titlebar 下方开始
@@ -407,7 +416,7 @@ class _HomePageState extends State<HomePage> {
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Container(height: 48, width: 1, color: c.border),
+                      Container(height: 40, width: 1, color: c.border),
                       Expanded(
                         child: _ResizeHandle(
                           color: c.border,
@@ -430,7 +439,7 @@ class _HomePageState extends State<HomePage> {
                     color: c.bg,
                     child: Column(
                       children: [
-                        const SizedBox(height: 48),
+                        const SizedBox(height: 40),
                         TaskTabBar(controller: _controller),
                         ListenableBuilder(
                           listenable: _controller,
@@ -478,7 +487,7 @@ class _HomePageState extends State<HomePage> {
                 if (_isDetailOpen) ...[
                   Column(
                     children: [
-                      const SizedBox(height: 48),
+                      const SizedBox(height: 40),
                       Expanded(
                         child: _ResizeHandle(
                           color: c.border,
@@ -498,7 +507,7 @@ class _HomePageState extends State<HomePage> {
                     width: _detailWidth,
                     child: Column(
                       children: [
-                        const SizedBox(height: 48),
+                        const SizedBox(height: 40),
                         Expanded(
                           child: DetailPanel(
                             controller: _controller,
@@ -516,7 +525,7 @@ class _HomePageState extends State<HomePage> {
               top: 0,
               left: _sidebarVisible ? _sidebarWidth + 1 : 0,
               right: 0,
-              height: 48,
+              height: 40,
               child: HeaderBar(
                 key: _headerBarKey,
                 controller: _controller,
@@ -525,14 +534,16 @@ class _HomePageState extends State<HomePage> {
                   _controller,
                   _settingsProvider,
                 ),
-                onNavigateToSettings: (category) {
+                onNavigateToSettings: (item) {
                   setState(() {
-                    _initialSettingsCategory = category;
+                    _initialSettingsCategory = item.category;
+                    _initialSettingsHighlight = item;
                     _showSettings = true;
                     AnalyticsService.instance.trackView('SettingsPage');
                   });
                 },
                 onSettings: () => setState(() {
+                  _initialSettingsHighlight = null;
                   _showSettings = true;
                   AnalyticsService.instance.trackView('SettingsPage');
                 }),
@@ -548,6 +559,7 @@ class _HomePageState extends State<HomePage> {
               child: WindowControls(
                 controller: _controller,
                 onSettings: () => setState(() {
+                  _initialSettingsHighlight = null;
                   _showSettings = true;
                   AnalyticsService.instance.trackView('SettingsPage');
                 }),
