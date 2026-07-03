@@ -1,6 +1,8 @@
 # FluxDown
 
-A new Flutter project.
+**Downloads, Supercharged.** A blazing fast, multi-protocol download manager powered by a Rust engine — HTTP/HTTPS/FTP/BitTorrent/HLS, intelligent segmentation, browser integration. Free forever, no ads, no tracking.
+
+Website: https://fluxdown.app
 
 ## Getting Started
 
@@ -136,3 +138,14 @@ python scripts/release_tag.py v0.1.7 --model sonnet --lang both --push
 # 仅预览效果
 python scripts/release_tag.py v0.1.7 --dry-run
 ```
+
+## License
+
+FluxDown is licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0).
+
+- The core application, download engine, and browser extension are free and open source.
+- Contributions require signing our CLA (prompted automatically on your first pull request), which allows us to offer commercial licensing for future premium features.
+
+## Trademark
+
+"FluxDown" and the FluxDown logo are trademarks of zerx-lab. The AGPL-3.0 license covers the source code only — forks and derivative works may not use the FluxDown name or logo without permission.
