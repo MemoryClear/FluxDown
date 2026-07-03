@@ -1,0 +1,25 @@
+# FluxDown Server 部署（Web UI + REST API + WebSocket 实时推送）
+#
+# 启动：docker compose up -d
+# 首次启动会生成管理 token 并打印到日志（唯一一次可见）：
+#   docker compose logs fluxdown-server 2>&1 | grep -i token
+services:
+  fluxdown-server:
+    image: ghcr.io/zerx-lab/fluxdown-server:latest
+    # 本地构建（替代 image 一行）：
+    # build:
+    #   context: ..
+    #   dockerfile: docker/server.Dockerfile
+    container_name: fluxdown-server
+    restart: unless-stopped
+    ports:
+      - "17800:17800"
+    volumes:
+      - fluxdown-data:/data # DB / 日志 / 管理 token
+      - ./downloads:/root/Downloads # 默认下载目录（容器内 HOME=/root）
+    # environment:
+    #   FLUXDOWN_DEMO: "1" # 演示模式：仅允许下载内置演示文件
+    #   FLUXDOWN_DATABASE_URL: postgres://user:pass@host:5432/fluxdown # 外部数据库
+
+volumes:
+  fluxdown-data:
