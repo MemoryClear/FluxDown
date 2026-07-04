@@ -25,7 +25,7 @@ const _tag = 'ExtDownSvc';
 /// 3. 本服务监听该信号：
 ///    - 免打扰开启 → 不弹窗，直接按默认设置创建任务；
 ///    - 否则首选**独立小窗**（PopupWindowService，原生窗口承载第二引擎，
-///      置顶且不抢主窗口前台，对标迅雷浏览器下载弹窗）；
+///      置顶且不抢主窗口前台）；
 ///    - 原生宿主不可用时回退主窗口内快速下载对话框（恢复主窗口并前台激活）
 /// 4. 用户确认后由主引擎发送 ConfirmExternalDownload/BatchCreateTask 信号
 class ExternalDownloadService {
@@ -144,7 +144,7 @@ class ExternalDownloadService {
       logError(_tag, 'silent download: no entries or save dir, falling back');
     }
 
-    // ── 首选路径：独立小窗（不抢主窗口前台，对标迅雷浏览器下载弹窗）──
+    // ── 首选路径：独立小窗（不抢主窗口前台）──
     // 小窗仍可见时忽略新请求（与主窗口对话框的去重语义一致）。
     if (PopupWindowService.instance.isVisible) {
       logInfo(_tag, 'popup still open, ignoring request');

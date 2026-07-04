@@ -7,7 +7,7 @@ G_BEGIN_DECLS
 
 // 外部唤起下载小窗的原生宿主控制器（跨端弹窗契约 v1：外部下载请求——浏览器
 // 扩展 / aria2 RPC / 管理 API——唤起时，弹出独立原生小窗承载第二个 Flutter
-// 引擎渲染快速下载表单，对标迅雷浏览器弹窗）。
+// 引擎渲染快速下载表单）。
 //
 // 职责：
 // - 在主引擎 messenger 上注册 fluxdown/popup_host 通道，响应 show/close，

@@ -16,7 +16,7 @@ const DEFAULT_URL: &str = "http://127.0.0.1:17800";
 /// 默认请求超时（秒），当命令行/环境/持久化配置都未指定时使用。
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
-/// FluxDown 命令行下载客户端（对标 aria2c）。
+/// FluxDown 命令行下载客户端。
 #[derive(Debug, Parser)]
 #[command(name = "fluxdown", version, about, long_about = None)]
 struct Cli {

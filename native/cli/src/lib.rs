@@ -1,4 +1,4 @@
-//! FluxDown CLI —— 对标 aria2c 的命令行下载客户端。
+//! FluxDown CLI
 //!
 //! 复用 [`fluxdown_api`] 的路径常量与 wire 类型作 typed HTTP 客户端，
 //! 与运行中的 FluxDown App / headless server 通信（本机 API 服务，

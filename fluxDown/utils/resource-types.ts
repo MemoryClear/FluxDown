@@ -698,7 +698,7 @@ export function isSniffableContentType(contentType: string): boolean {
  *
  * 独立于 Content-Type 的判定路径：当服务器对媒体文件返回不规范的
  * Content-Type（text/plain、binary/octet-stream、空值、错误的 text/html）时，
- * 靠 URL 扩展名兜底命中。对标 cat-catch 的 CheckExtension 判定路径。
+ * 靠 URL 扩展名兜底命中。
  *
  * 排除 image/other/magnet：媒体嗅探器不收图片（与 isSniffableContentType 一致，
  * 图片噪音大），magnet/other 无扩展名意义。下游 isWorthShowing 仍做分片/小文件过滤。

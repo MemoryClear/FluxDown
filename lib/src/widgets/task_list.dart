@@ -92,7 +92,7 @@ class _TaskListState extends State<TaskList> {
         color: c.textPrimary,
         action: () => widget.onNewDownload?.call(),
       ),
-      // 对标迅雷：全部开始 / 全部暂停 常驻显示，不可用时置灰
+      // 全部开始 / 全部暂停 常驻显示，不可用时置灰
       ContextMenuItem(
         icon: LucideIcons.play,
         label: s.startAll,
