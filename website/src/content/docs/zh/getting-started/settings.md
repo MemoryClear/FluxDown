@@ -3,7 +3,7 @@ title: 设置参考
 description: 按设置页侧边栏的分类逐项说明 FluxDown 的全部设置项及其默认值。
 section: getting-started
 order: 4
-sourceHash: "9115a884cef4"
+sourceHash: "e71cd42a2da2"
 ---
 
 点击顶栏的齿轮图标打开**设置**。设置侧边栏共 8 个分类,顺序为:通用、外观、下载、BitTorrent、eD2K、代理、API 服务、关于。本页按分类逐项说明每个设置项及其默认值。设置侧边栏顶部的搜索框可以按名称直接定位到任意设置项。
@@ -50,6 +50,30 @@ sourceHash: "9115a884cef4"
 | "在文件夹中显示"命令 | 定位下载文件的自定义命令模板(占位符 `{path}`/`{dir}`)。留空使用平台默认(资源管理器/Finder/Nautilus)。 | 空 |
 | "打开目录"命令 | 打开文件夹的自定义命令模板(占位符 `{dir}`)。留空使用平台默认。 | 空 |
 | 默认下载队列 | 未指定队列时新任务归属的队列(浏览器扩展下载也使用此队列)。创建过命名队列后才会显示。 | 默认队列 |
+
+### 第三方文件管理器
+
+"在文件夹中显示"与"打开目录"会跟随系统的**默认文件管理器**,大多数情况下无需任何配置:
+
+- **Windows**:遵循 `Directory\shell` 下注册的默认文件夹处理程序(即双击文件夹时打开的程序)。被设为默认的第三方管理器会被自动使用——**OneCommander 即为开箱即用**;Directory Opus、Total Commander、Files 等将自身注册为默认文件夹处理程序的管理器也以同样方式被识别。由于 Windows 只允许资源管理器选中具体文件,当第三方管理器为默认时,"在文件夹中显示"会打开所在文件夹,而非高亮该文件。
+- **macOS**:使用 Launch Services 中 `public.folder` 的默认处理程序。
+- **Linux**:使用 `mimeapps.list` 中 `inode/directory` 的默认程序(经 `xdg-open`)。
+
+若要使用**未**设为系统默认的管理器,或希望在第三方管理器中精确高亮文件,请填写上方的**"在文件夹中显示"命令** / **"打开目录"命令**模板。占位符会被替换为目标路径,且已自动做 shell 转义,无需自己再加引号:
+
+- `{path}`:完整文件路径(用于"在文件夹中显示")。
+- `{dir}`:目录(用于"在文件夹中显示"时为文件所在父目录,用于"打开目录"时为该目录本身)。
+
+Windows 下"在文件夹中显示"命令示例(请按实际安装路径调整,并使用各管理器自身的命令行参数来选中文件):
+
+| 管理器 | 命令 |
+|---|---|
+| OneCommander | `"C:\Program Files\OneCommander\OneCommander.exe" "{path}"` |
+| Everything | `"C:\Program Files\Everything\Everything.exe" -select "{path}"` |
+| Directory Opus | `"C:\Program Files\GPSoftware\Directory Opus\dopusrt.exe" /cmd Go "{path}" NEW` |
+| Total Commander | `"C:\totalcmd\TOTALCMD64.EXE" /O /T "{dir}"` |
+
+已配置的模板始终优先于自动识别;若模板启动失败,FluxDown 会回退到平台默认方式。
 
 ## BitTorrent
 

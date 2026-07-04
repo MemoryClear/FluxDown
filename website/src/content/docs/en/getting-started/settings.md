@@ -50,6 +50,30 @@ Open **Settings** from the top bar's gear icon. The settings sidebar has eight c
 | "Open Folder" command | Custom command template to open a folder (`{dir}` placeholder). Empty uses the platform default. | Empty |
 | Default Queue | Which queue new downloads join when none is explicitly chosen (used by the browser extension too). Only shown once you've created a named queue. | Default Queue |
 
+### Third-party file managers
+
+"Show in Folder" and "Open Folder" follow your system's **default file manager**, so most setups need no configuration:
+
+- **Windows** — respects the default folder handler registered under `Directory\shell` (the app that opens when you double-click a folder). A third-party manager set as the default is used automatically. **OneCommander is supported out of the box** this way; Directory Opus, Total Commander, Files, and other managers that register themselves as the default folder handler are picked up the same way. Because Windows lets only Explorer select a specific file, when a third-party manager is the default, "Show in Folder" opens the containing folder instead of highlighting the file.
+- **macOS** — uses the Launch Services default for `public.folder`.
+- **Linux** — uses the `inode/directory` default from `mimeapps.list` (via `xdg-open`).
+
+To use a manager that is **not** your system default, or to highlight the exact file inside a third-party manager, fill in the **"Show in Folder" command** / **"Open Folder" command** templates above. Placeholders are replaced with the target path and are already shell-quoted, so don't add your own quotes:
+
+- `{path}` — the full file path (for "Show in Folder").
+- `{dir}` — the folder (the file's parent for "Show in Folder", the folder itself for "Open Folder").
+
+Example "Show in Folder" commands on Windows (adjust the install path, and use each manager's own command-line options to select a file):
+
+| Manager | Command |
+|---|---|
+| OneCommander | `"C:\Program Files\OneCommander\OneCommander.exe" "{path}"` |
+| Everything | `"C:\Program Files\Everything\Everything.exe" -select "{path}"` |
+| Directory Opus | `"C:\Program Files\GPSoftware\Directory Opus\dopusrt.exe" /cmd Go "{path}" NEW` |
+| Total Commander | `"C:\totalcmd\TOTALCMD64.EXE" /O /T "{dir}"` |
+
+A configured template always takes priority over auto-detection; if it fails to launch, FluxDown falls back to the platform default.
+
 ## BitTorrent
 
 | Setting | Purpose | Default |

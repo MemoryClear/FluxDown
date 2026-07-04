@@ -14,7 +14,7 @@
 /// 平台默认行为（无模板时）：
 /// | 平台    | 文件                                                   | 目录                          |
 /// |---------|--------------------------------------------------------|-------------------------------|
-/// | Windows | `explorer.exe /select,"path"`                          | `cmd /c start "" "dir"`       |
+/// | Windows | 第三方默认 FM→打开父目录，否则 `explorer.exe /select,"path"`     | `cmd /c start "" "dir"`       |
 /// | macOS   | `open -R path`                                         | `open path`                   |
 /// | Linux   | D-Bus `FileManager1.ShowItems`，失败 fallback xdg-open | `xdg-open dir`                |
 pub fn reveal(path: &str, file_tpl: &str, dir_tpl: &str) {
@@ -140,13 +140,100 @@ fn shell_quote(s: &str) -> String {
 #[cfg(target_os = "windows")]
 fn platform_reveal_file(path: &str) {
     use std::os::windows::process::CommandExt;
-    // /select 是 Explorer 私有 verb，仅 explorer.exe 识别
+
+    // 若用户把"打开目录"的默认处理程序替换成第三方文件管理器（改
+    // HKCR\Directory\shell\open\command，OneCommander/Directory Opus/Total
+    // Commander/Files 等的统一机制），尊重该设置：用其打开父目录。Windows 的
+    // /select（打开目录并选中文件）是 Explorer 私有 verb，第三方 FM 普遍不支持，
+    // 也无通用 API 可重定向，故退化为"打开父目录"。想在第三方 FM 里精确选中的
+    // 用户可在设置里配置 reveal 文件命令模板（reveal() 已优先于此处理）。
+    if default_dir_handler_is_third_party() {
+        let dir = std::path::Path::new(path)
+            .parent()
+            .map(|d| d.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string());
+        crate::logger::log_info!(
+            "[reveal] third-party default file manager detected; opening parent dir instead of explorer /select"
+        );
+        platform_open_dir(&dir);
+        return;
+    }
+
+    // Explorer 仍是默认：用 /select 打开父目录并选中文件。
     let arg = format!(r#"/select,"{}""#, path);
     if let Err(e) = std::process::Command::new("explorer.exe")
         .raw_arg(&arg)
         .spawn()
     {
         crate::logger::log_info!("[reveal] explorer /select failed: {e}");
+    }
+}
+
+/// Windows：系统"打开目录"的默认处理程序是否已被替换成第三方文件管理器。
+///
+/// 读取 `HKCR\Directory\shell\<默认 verb>\command` 并解析其可执行文件名。
+/// 非 `explorer.exe` 时返回 `true`；键缺失、读取失败或仍是 Explorer 时返回
+/// `false`（保留 `/select` 的选中体验）。`<默认 verb>` 取 `Directory\shell`
+/// 的默认值，为空或 `none` 时回退到 `open`（第三方替换的常用写法）。
+#[cfg(target_os = "windows")]
+fn default_dir_handler_is_third_party() -> bool {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_CLASSES_ROOT;
+
+    let hkcr = RegKey::predef(HKEY_CLASSES_ROOT);
+    let Ok(shell) = hkcr.open_subkey(r"Directory\shell") else {
+        return false;
+    };
+    let verb = shell.get_value::<String, _>("").unwrap_or_default();
+    let verb = verb.trim();
+    let verb = if verb.is_empty() || verb.eq_ignore_ascii_case("none") {
+        "open"
+    } else {
+        verb
+    };
+    let Ok(cmd_key) = hkcr.open_subkey(format!(r"Directory\shell\{verb}\command")) else {
+        return false;
+    };
+    let Ok(cmd) = cmd_key.get_value::<String, _>("") else {
+        return false;
+    };
+    match exe_basename(&cmd) {
+        Some(name) => !name.eq_ignore_ascii_case("explorer.exe"),
+        None => false,
+    }
+}
+
+/// 返回裸路径字符串中首个（不区分大小写）以 `.exe` 结尾的字节偏移；找不到
+/// 时返回 `None`。`.exe` 全为 ASCII，`to_ascii_lowercase` 不改变字节长度
+/// 与 UTF-8 边界，返回的偏移量可直接用于原字符串按字节切片。
+#[cfg(target_os = "windows")]
+fn find_exe_end(cmd: &str) -> Option<usize> {
+    cmd.to_ascii_lowercase().find(".exe").map(|idx| idx + 4)
+}
+
+/// 从注册表 shell command 字符串解析出可执行文件的文件名（basename）。
+/// 支持带引号路径（`"C:\..\fm.exe" "%1"`）与裸路径
+/// (`%SystemRoot%\Explorer.exe /idlist,...`)；返回 `None` 表示无法解析。
+#[cfg(target_os = "windows")]
+fn exe_basename(cmd: &str) -> Option<String> {
+    let cmd = cmd.trim();
+    let exe = if let Some(rest) = cmd.strip_prefix('"') {
+        rest.split('"').next().unwrap_or(rest)
+    } else {
+        // 裸路径可能含空格且未加引号写入注册表（如部分第三方文件管理器的安装
+        // 程序），不能简单按空白切分；取字符串中首个（不区分大小写）以
+        // ".exe" 结尾的位置，把它之前的内容整体当作可执行文件路径，大小写
+        // 按原样保留。找不到 ".exe" 时退回按空白切分。
+        match find_exe_end(cmd) {
+            Some(end) => &cmd[..end],
+            None => cmd.split_whitespace().next().unwrap_or(cmd),
+        }
+    };
+    let base = exe.rsplit(['\\', '/']).next().unwrap_or(exe).trim();
+    if base.is_empty() {
+        None
+    } else {
+        Some(base.to_string())
     }
 }
 
@@ -251,4 +338,80 @@ fn path_to_file_uri(path: &str) -> String {
         })
         .collect();
     format!("file://{encoded}")
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod exe_basename_tests {
+    use super::exe_basename;
+
+    #[test]
+    fn quoted_path_with_spaces_and_arg_returns_exe_name() {
+        assert_eq!(
+            exe_basename("\"C:\\Program Files\\OneCommander\\OneCommander.exe\" \"%1\""),
+            Some("OneCommander.exe".to_string())
+        );
+    }
+
+    #[test]
+    fn bare_path_with_env_var_and_idlist_args_preserves_case() {
+        assert_eq!(
+            exe_basename("%SystemRoot%\\Explorer.exe /idlist,%I,%L"),
+            Some("Explorer.exe".to_string())
+        );
+    }
+
+    #[test]
+    fn forward_slash_path_with_trailing_arg() {
+        assert_eq!(
+            exe_basename("C:/tools/fm.exe arg"),
+            Some("fm.exe".to_string())
+        );
+    }
+
+    #[test]
+    fn quoted_path_without_extra_args() {
+        assert_eq!(
+            exe_basename("\"C:\\a b\\fm.exe\""),
+            Some("fm.exe".to_string())
+        );
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_trimmed() {
+        assert_eq!(exe_basename("   C:\\x\\y.exe  "), Some("y.exe".to_string()));
+    }
+
+    #[test]
+    fn empty_string_returns_none() {
+        assert_eq!(exe_basename(""), None);
+    }
+
+    #[test]
+    fn whitespace_only_returns_none() {
+        assert_eq!(exe_basename("   "), None);
+    }
+
+    #[test]
+    fn bare_path_with_spaces_and_quoted_percent1_arg_returns_exe_name() {
+        assert_eq!(
+            exe_basename("C:\\Program Files\\OneCommander\\OneCommander.exe -\"%1\""),
+            Some("OneCommander.exe".to_string())
+        );
+    }
+
+    #[test]
+    fn bare_path_with_spaces_and_no_args_returns_exe_name() {
+        assert_eq!(
+            exe_basename("C:\\Program Files\\App\\App.exe"),
+            Some("App.exe".to_string())
+        );
+    }
+
+    #[test]
+    fn bare_path_with_spaces_uppercase_extension_preserves_case() {
+        assert_eq!(
+            exe_basename("C:\\Tools\\FM.EXE /x"),
+            Some("FM.EXE".to_string())
+        );
+    }
 }
