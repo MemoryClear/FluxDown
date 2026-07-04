@@ -27,7 +27,7 @@ use tokio::sync::{Mutex, Semaphore, mpsc};
 
 use crate::downloader::{
     DB_SAVE_INTERVAL_SECS, DownloadError, DownloadParams, ProgressUpdate, TEMP_EXT, dedup_filename,
-    extract_from_url,
+    extract_from_url, sanitize_filename,
 };
 use crate::logger::log_info;
 use crate::model::HlsQualityOption;
@@ -838,7 +838,7 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
         let url_name = extract_from_url(&p.url).unwrap_or_else(|| "download.ts".to_string());
         force_ts_extension(&url_name)
     } else {
-        force_ts_extension(&p.file_name)
+        force_ts_extension(&sanitize_filename(&p.file_name))
     };
 
     let save_dir = PathBuf::from(&p.save_dir);

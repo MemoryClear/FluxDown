@@ -7,7 +7,7 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
 use crate::downloader::{
     DB_SAVE_INTERVAL_SECS, DownloadError, DownloadParams, ProgressUpdate, TEMP_EXT,
-    extract_from_url,
+    extract_from_url, sanitize_filename,
 };
 use crate::logger::log_info;
 use crate::model::HlsQualityOption;
@@ -314,7 +314,7 @@ async fn run_dash_download_inner(p: &DownloadParams) -> Result<i64, DownloadErro
             format!("{}.mp4", url_name)
         }
     } else {
-        p.file_name.clone()
+        sanitize_filename(&p.file_name)
     };
 
     let save_dir = PathBuf::from(&p.save_dir);

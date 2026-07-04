@@ -2116,10 +2116,13 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
         return Err(DownloadError::Cancelled);
     }
 
+    // info.file_name 来自 probe，已经过 sanitize_filename；用户/API 显式提供的
+    // p.file_name 是外部输入（RPC out / 管理 API file_name / 浏览器接管），必须
+    // 清洗路径分隔符与 `..`，否则 save_dir.join(name) 可穿越 save_dir 落盘任意路径。
     let auto_name = if p.file_name.is_empty() {
         info.file_name.clone()
     } else {
-        p.file_name.clone()
+        sanitize_filename(&p.file_name)
     };
 
     let save_dir = PathBuf::from(&p.save_dir);
@@ -3195,6 +3198,35 @@ mod tests {
     #[test]
     fn sanitize_control_characters() {
         assert_eq!(sanitize_filename("file\x00name\x1F.txt"), "file_name_.txt");
+    }
+
+    #[test]
+    fn sanitize_blocks_path_traversal() {
+        // 安全回归：用户/API 显式提供的 file_name（RPC `out` / 管理 API file_name /
+        // 浏览器接管）经 sanitize_filename 后必须不含路径分隔符，且不是绝对路径，
+        // 否则 save_dir.join(name) 会穿越 save_dir 落盘任意路径。
+        for evil in [
+            "../../../etc/passwd",
+            "..\\..\\Windows\\System32\\evil.exe",
+            "/etc/passwd",
+            "C:\\Windows\\evil.exe",
+            "foo/../bar",
+        ] {
+            let safe = sanitize_filename(evil);
+            let p = std::path::Path::new(&safe);
+            assert!(
+                !safe.contains('/') && !safe.contains('\\'),
+                "sanitized {evil:?} → {safe:?} still contains a path separator"
+            );
+            assert!(
+                !p.is_absolute(),
+                "sanitized {evil:?} → {safe:?} is still an absolute path"
+            );
+            assert!(
+                p.components().count() == 1,
+                "sanitized {evil:?} → {safe:?} resolves to multiple path components"
+            );
+        }
     }
 
     #[test]
