@@ -116,6 +116,14 @@ bool FlutterWindow::OnCreate() {
   // window is shown. It is a no-op if the first frame hasn't completed yet.
   flutter_controller_->ForceRedraw();
 
+  // UIPI hardening: allow a lower-integrity (Medium IL) second instance to
+  // deliver its command-line args via WM_COPYDATA when this instance runs
+  // elevated (High IL). Pairs with the single-instance mutex hardening in
+  // main.cpp; without it the forwarded URL/torrent is silently dropped.
+  if (HWND handle = GetHandle()) {
+    ::ChangeWindowMessageFilterEx(handle, WM_COPYDATA, MSGFLT_ALLOW, nullptr);
+  }
+
   return true;
 }
 

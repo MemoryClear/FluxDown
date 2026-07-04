@@ -21,6 +21,16 @@ HRESULT FloatingBallDropTarget::RegisterOn(HWND hwnd) {
   HRESULT hr = ::RegisterDragDrop(hwnd, this);
   if (SUCCEEDED(hr)) {
     registered_hwnd_ = hwnd;
+    // UIPI hardening: when FluxDown runs elevated (High IL), Windows silently
+    // filters drag-drop window messages posted by lower-integrity sources
+    // (Explorer / browser at Medium IL), so OLE drops onto the ball never
+    // fire. Explicitly allow them for this HWND. Best-effort; failures and
+    // pre-Win7 systems are harmless (equal-IL drops already work).
+    static constexpr UINT kWmCopyGlobalData = 0x0049;  // undocumented, no macro
+    ::ChangeWindowMessageFilterEx(hwnd, WM_DROPFILES, MSGFLT_ALLOW, nullptr);
+    ::ChangeWindowMessageFilterEx(hwnd, WM_COPYDATA, MSGFLT_ALLOW, nullptr);
+    ::ChangeWindowMessageFilterEx(hwnd, kWmCopyGlobalData, MSGFLT_ALLOW,
+                                  nullptr);
   }
   return hr;
 }

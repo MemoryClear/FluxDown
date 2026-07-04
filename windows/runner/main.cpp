@@ -2,6 +2,7 @@
 #include <flutter/flutter_view_controller.h>
 #include <windows.h>
 #include <dbghelp.h>
+#include <sddl.h>
 
 #include <iostream>
 #include <sstream>
@@ -11,6 +12,7 @@
 #include "utils.h"
 
 #pragma comment(lib, "dbghelp.lib")
+#pragma comment(lib, "advapi32.lib")
 
 static LONG WINAPI FluxDownCrashHandler(EXCEPTION_POINTERS* ep) {
   std::ostringstream oss;
@@ -75,6 +77,31 @@ static bool SendArgsToExistingInstance(const std::vector<std::string>& args) {
   return true;
 }
 
+// Build a SECURITY_ATTRIBUTES that grants Everyone full access to the
+// single-instance mutex and stamps it with a Low mandatory integrity label
+// (no-write-up). Without this, a Medium-IL second instance cannot open the
+// mutex a High-IL (elevated) first instance created: CreateMutex then returns
+// ACCESS_DENIED instead of ERROR_ALREADY_EXISTS and the app double-launches.
+// Returns nullptr (default security) on failure; on success the caller must
+// LocalFree(*out_sd) after CreateMutex.
+static LPSECURITY_ATTRIBUTES BuildCrossIntegritySA(SECURITY_ATTRIBUTES* sa,
+                                                   PSECURITY_DESCRIPTOR* out_sd) {
+  *out_sd = nullptr;
+  PSECURITY_DESCRIPTOR sd = nullptr;
+  // D: Everyone (WD) mutex all-access (0x1F0001). S: Low mandatory label,
+  // no-write-up so equal/higher IL subjects may still open it.
+  if (!::ConvertStringSecurityDescriptorToSecurityDescriptorW(
+          L"D:(A;;0x1F0001;;;WD)S:(ML;;NW;;;LW)", SDDL_REVISION_1, &sd,
+          nullptr)) {
+    return nullptr;
+  }
+  sa->nLength = sizeof(*sa);
+  sa->lpSecurityDescriptor = sd;
+  sa->bInheritHandle = FALSE;
+  *out_sd = sd;
+  return sa;
+}
+
 int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
                       _In_ wchar_t *command_line, _In_ int show_command) {
   // Collect command-line arguments early (needed for both paths).
@@ -85,8 +112,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   // --- Single-instance check ---
   // Try to create a named mutex. If it already exists, another instance
   // is running -- forward our args to it and exit.
-  HANDLE mutex = ::CreateMutex(nullptr, FALSE, kMutexName);
-  if (mutex && ::GetLastError() == ERROR_ALREADY_EXISTS) {
+  SECURITY_ATTRIBUTES mutex_sa = {};
+  PSECURITY_DESCRIPTOR mutex_sd = nullptr;
+  LPSECURITY_ATTRIBUTES mutex_psa = BuildCrossIntegritySA(&mutex_sa, &mutex_sd);
+  HANDLE mutex = ::CreateMutex(mutex_psa, FALSE, kMutexName);
+  const DWORD mutex_err = ::GetLastError();  // capture before LocalFree
+  if (mutex_sd) ::LocalFree(mutex_sd);
+  if (mutex && mutex_err == ERROR_ALREADY_EXISTS) {
     SendArgsToExistingInstance(command_line_arguments);
     ::CloseHandle(mutex);
     return EXIT_SUCCESS;

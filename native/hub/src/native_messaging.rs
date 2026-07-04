@@ -172,6 +172,117 @@ mod server {
         }
     }
 
+    /// Windows pipe security: grant Everyone read/write and stamp a Low
+    /// mandatory integrity label so a Medium-IL `fluxdown_nmh.exe` (spawned by
+    /// the browser) can connect even when FluxDown runs elevated (High IL).
+    /// Without it the pipe inherits the creator's High IL and the no-write-up
+    /// rule silently rejects the relay — browser interception dies until the
+    /// app next runs unelevated.
+    mod pipe_security {
+        use std::ffi::c_void;
+        use std::io;
+
+        #[repr(C)]
+        struct SecurityAttributes {
+            n_length: u32,
+            lp_security_descriptor: *mut c_void,
+            b_inherit_handle: i32,
+        }
+
+        #[link(name = "advapi32")]
+        unsafe extern "system" {
+            fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                string_security_descriptor: *const u16,
+                string_sddl_revision: u32,
+                security_descriptor: *mut *mut c_void,
+                security_descriptor_size: *mut u32,
+            ) -> i32;
+        }
+
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn LocalFree(hmem: *mut c_void) -> *mut c_void;
+        }
+
+        /// Owns the security descriptor allocated by the SDDL conversion plus
+        /// the `SECURITY_ATTRIBUTES` pointing at it; frees it on drop. Never
+        /// held across an `.await` (built and dropped inside the synchronous
+        /// `create_instance`), so the raw pointer needs no `Send`.
+        pub struct PipeSecurity {
+            attrs: SecurityAttributes,
+        }
+
+        impl PipeSecurity {
+            /// Build the descriptor, or error if the SDDL conversion fails.
+            pub fn new() -> io::Result<Self> {
+                // D: Everyone (WD) generic read+write. S: Low mandatory label,
+                // no-write-up (equal/higher IL subjects may still write).
+                let sddl: Vec<u16> = "D:(A;;GRGW;;;WD)S:(ML;;NW;;;LW)"
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect();
+                let mut psd: *mut c_void = std::ptr::null_mut();
+                // SAFETY: `sddl` is a valid NUL-terminated UTF-16 string; on
+                // success the call allocates `psd`, freed in `Drop`. Revision
+                // 1 == SDDL_REVISION_1.
+                let ok = unsafe {
+                    ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                        sddl.as_ptr(),
+                        1,
+                        &mut psd,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if ok == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(Self {
+                    attrs: SecurityAttributes {
+                        n_length: std::mem::size_of::<SecurityAttributes>() as u32,
+                        lp_security_descriptor: psd,
+                        b_inherit_handle: 0,
+                    },
+                })
+            }
+
+            /// Pointer to the `SECURITY_ATTRIBUTES`, valid while `self` lives.
+            pub fn as_ptr(&self) -> *mut c_void {
+                (&raw const self.attrs).cast::<c_void>().cast_mut()
+            }
+        }
+
+        impl Drop for PipeSecurity {
+            fn drop(&mut self) {
+                if !self.attrs.lp_security_descriptor.is_null() {
+                    // SAFETY: descriptor was allocated by the SDDL conversion.
+                    unsafe { LocalFree(self.attrs.lp_security_descriptor) };
+                }
+            }
+        }
+    }
+
+    /// Create one pipe server instance with a hardened security descriptor
+    /// (Everyone R/W + Low integrity label) so a Medium-IL NMH relay can
+    /// connect even when FluxDown runs elevated. Falls back to default security
+    /// if the descriptor cannot be built, never breaking the unelevated path.
+    fn create_instance(
+        first: bool,
+    ) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+        let mut options = ServerOptions::new();
+        options.first_pipe_instance(first);
+        match pipe_security::PipeSecurity::new() {
+            // SAFETY: `sec` and its descriptor outlive this create call, which
+            // copies the SECURITY_ATTRIBUTES into the pipe synchronously.
+            Ok(sec) => unsafe {
+                options.create_with_security_attributes_raw(PIPE_NAME, sec.as_ptr())
+            },
+            Err(e) => {
+                log_info!("[nmh-pipe] pipe security unavailable, using default: {}", e);
+                options.create(PIPE_NAME)
+            }
+        }
+    }
+
     /// Spawn the Named Pipe server, feeding download requests into `tx`.
     /// The receiving end is owned by `download_actor` and shared with the
     /// local HTTP takeover server so both transports converge on one channel.
@@ -180,10 +291,7 @@ mod server {
             log_info!("[nmh-pipe] starting Named Pipe server at {}", PIPE_NAME);
 
             // Create the first server instance before entering the loop.
-            let mut server = match ServerOptions::new()
-                .first_pipe_instance(true)
-                .create(PIPE_NAME)
-            {
+            let mut server = match create_instance(true) {
                 Ok(s) => s,
                 Err(e) => {
                     log_info!("[nmh-pipe] failed to create pipe server: {}", e);
@@ -204,7 +312,7 @@ mod server {
 
                 // Create the next server instance to accept the next client
                 // while we handle the current one.
-                let next_server = match ServerOptions::new().create(PIPE_NAME) {
+                let next_server = match create_instance(false) {
                     Ok(s) => s,
                     Err(e) => {
                         log_info!("[nmh-pipe] failed to create next pipe instance: {}", e);
