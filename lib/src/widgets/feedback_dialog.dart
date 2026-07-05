@@ -14,6 +14,7 @@ import 'package:flutter/widgets.dart';
 import 'package:shadcn_ui/shadcn_ui.dart';
 import '../i18n/locale_provider.dart';
 import '../services/feedback_service.dart';
+import '../services/log_service.dart';
 import '../theme/app_colors.dart';
 
 /// 在底部状态栏点击反馈按钮时调用此方法打开反馈对话框。
@@ -41,6 +42,9 @@ class _FeedbackDialogContentState extends State<_FeedbackDialogContent> {
 
   FeedbackType _type = FeedbackType.feature;
 
+  /// 是否附带今日日志一并提交（默认开启）
+  bool _attachLogs = true;
+
   /// idle | submitting | success | error
   String _status = 'idle';
   String _errorMsg = '';
@@ -65,11 +69,15 @@ class _FeedbackDialogContentState extends State<_FeedbackDialogContent> {
       _errorMsg = '';
     });
 
+    final logs = _attachLogs ? await LogService.instance.readTodayLog() : null;
+    if (!mounted) return;
+
     final result = await FeedbackService.instance.submit(
       type: _type,
       title: _titleController.text.trim(),
       description: _descController.text.trim(),
       contact: _contactController.text.trim(),
+      logs: logs,
     );
 
     if (!mounted) return;
@@ -298,6 +306,39 @@ class _FeedbackDialogContentState extends State<_FeedbackDialogContent> {
             Text(
               s.feedbackContactHint,
               style: TextStyle(fontSize: 11, color: c.textMuted),
+            ),
+            const SizedBox(height: 14),
+
+            // ── 附带今日日志 ──
+            GestureDetector(
+              onTap: () => setState(() => _attachLogs = !_attachLogs),
+              behavior: HitTestBehavior.opaque,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          s.feedbackAttachLogs,
+                          style: TextStyle(fontSize: 13, color: c.textPrimary),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          s.feedbackAttachLogsHint,
+                          style: TextStyle(fontSize: 11, color: c.textMuted),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  ShadSwitch(
+                    value: _attachLogs,
+                    onChanged: (v) => setState(() => _attachLogs = v),
+                    width: 34,
+                  ),
+                ],
+              ),
             ),
           ],
         ),

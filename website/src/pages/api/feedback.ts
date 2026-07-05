@@ -11,6 +11,7 @@
  *   description: string,
  *   contact?: string     // 可选的联系方式（邮箱等）
  *   pagePath?: string    // 可选，docs 反馈关联的页面路径（需以 /docs/ 开头且 ≤200 字符，校验失败则静默忽略）
+ *   logs?: string        // 可选，客户端日志（脱敏后），独立折叠展示，上限 30000 字符（超限截断保留末尾）
  * }
  *
  * 防滥用:
@@ -95,6 +96,7 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
     description?: string;
     contact?: string;
     pagePath?: string;
+    logs?: string;
   };
 
   try {
@@ -106,7 +108,7 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
     });
   }
 
-  const { type, title, description, contact, pagePath } = body;
+  const { type, title, description, contact, pagePath, logs } = body;
 
   // 验证必填字段
   if (!type || !title || !description) {
@@ -152,6 +154,14 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
       ? pagePath
       : undefined;
 
+  // 可选字段：logs（客户端日志）。独立字段而非塞进 description，避免挤占
+  // 用户描述配额；上限 30000 字符（GitHub Issue body 上限 65536，留足余量），
+  // 超限则截断保留末尾（最新日志），校验失败静默忽略不阻塞提交。
+  const safeLogs =
+    typeof logs === "string" && logs.trim().length > 0
+      ? logs.trim().slice(-30000)
+      : undefined;
+
   // 构造 Issue 内容
   const emoji = TYPE_EMOJI[type] || "\uD83D\uDCAC";
   const label = TYPE_LABELS[type] || "feedback";
@@ -170,6 +180,9 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
     `**Source:** Website feedback form`,
     `**Submitted:** ${new Date().toISOString()}`,
     `**IP:** \`${ip}\``,
+    safeLogs
+      ? `\n<details>\n<summary>Client Logs</summary>\n\n\`\`\`log\n${safeLogs}\n\`\`\`\n</details>`
+      : null,
   ]
     .filter(Boolean)
     .join("\n");

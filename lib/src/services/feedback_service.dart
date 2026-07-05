@@ -50,11 +50,13 @@ class FeedbackService {
   /// [title] 标题（最长 200 字符）
   /// [description] 详细描述（最长 5000 字符）
   /// [contact] 可选的联系方式
+  /// [logs] 当天日志文本，非空时作为独立 logs 字段提交（服务端折叠展示）
   Future<FeedbackResult> submit({
     required FeedbackType type,
     required String title,
     required String description,
     String? contact,
+    String? logs,
   }) async {
     _ensureHttpClient();
 
@@ -65,6 +67,9 @@ class FeedbackService {
     };
     if (contact != null && contact.trim().isNotEmpty) {
       body['contact'] = contact.trim();
+    }
+    if (logs != null && logs.trim().isNotEmpty) {
+      body['logs'] = logs.trim();
     }
 
     final jsonBody = utf8.encode(json.encode(body));

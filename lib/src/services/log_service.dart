@@ -193,6 +193,49 @@ class LogService {
     return logFiles.length;
   }
 
+  /// 读取当天（最新分卷）日志文本内容，用于随反馈一并提交。
+  ///
+  /// 已做脱敏处理并按 [maxChars] 截断（保留末尾，日志越新越靠后）。
+  /// 无日志时返回空字符串。
+  Future<String> readTodayLog({int maxChars = 25000}) async {
+    try {
+      _raf?.flushSync();
+      _dirty = false;
+    } catch (_) {}
+
+    if (!_logDir.existsSync()) return '';
+
+    final now = DateTime.now();
+    final dateTag = '${now.year}-${_pad2(now.month)}-${_pad2(now.day)}';
+
+    // 收集当天全部分卷，按序号排序后拼接。
+    final parts = <({int part, File file})>[];
+    try {
+      for (final entity in _logDir.listSync()) {
+        if (entity is! File) continue;
+        final m = _logNamePattern.firstMatch(p.basename(entity.path));
+        if (m == null || m.group(1) != dateTag) continue;
+        parts.add((part: int.parse(m.group(2) ?? '0'), file: entity));
+      }
+    } catch (_) {
+      return '';
+    }
+    if (parts.isEmpty) return '';
+    parts.sort((a, b) => a.part.compareTo(b.part));
+
+    final buffer = StringBuffer();
+    for (final f in parts) {
+      try {
+        buffer.write(f.file.readAsStringSync());
+      } catch (_) {}
+    }
+    var content = _sanitizeLogContent(buffer.toString());
+    if (content.length > maxChars) {
+      content = content.substring(content.length - maxChars);
+    }
+    return content;
+  }
+
   /// 计算日志目录的总大小（字节）。
   int get logDirSizeBytes {
     if (!_logDir.existsSync()) return 0;
