@@ -97,14 +97,13 @@ async function renderPngFrom(src: string, size: number): Promise<Buffer> {
 }
 
 /**
- * 生成 macOS 应用图标 — 内容占画布约 80%，四周留透明边距。
- *
- * macOS Big Sur+ 图标规范要求 artwork 占据画布约 80%（1024 画布内 ~824px），
- * 四周留透明边距；系统不会自动缩放（不同于 iOS 的圆角遮罩），铺满画布会显得比其他 app 大。
+ * 生成 macOS 应用图标 — 遵循 Apple HIG：圆角矩形形状精确占画布 824/1024（≈80.5%），
+ * 四周各留 100px 透明边距（1024 画布）。系统会自动为图标叠加阴影，故源 SVG 不含手绘阴影，
+ * viewBox 已收紧到圆角矩形边界（内容占比 1.0），此处直接把内容渲染到画布的 824/1024。
  */
+const MAC_RECT_RATIO = 824 / 1024; // Apple HIG：形状占画布比例
 async function renderMacAppIcon(size: number): Promise<Buffer> {
-  // 内容占比 ~80%，其余为透明边距
-  const content = Math.round(size * 0.8);
+  const content = Math.round(size * MAC_RECT_RATIO);
   const logo = await renderPngFrom(SVG_SRC, content);
   return sharp({
     create: {

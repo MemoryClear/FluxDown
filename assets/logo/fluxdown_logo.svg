@@ -1,14 +1,8 @@
-<svg width="512" height="512" viewBox="30 30 452 452" role="img" xmlns="http://www.w3.org/2000/svg">
+<svg width="512" height="512" viewBox="56 56 400 400" role="img" xmlns="http://www.w3.org/2000/svg">
   <title>Download icon</title>
   <desc>Bright blue rounded square with a solid white download arrow</desc>
-  <defs>
-    <filter id="s" x="-8%" y="-8%" width="116%" height="116%">
-      <feDropShadow dx="0" dy="10" stdDeviation="20" flood-color="#00000020"/>
-    </filter>
-  </defs>
 
-  <rect x="56" y="56" width="400" height="400" rx="88"
-        fill="#3B82F6" filter="url(#s)"/>
+  <rect x="56" y="56" width="400" height="400" rx="88" fill="#3B82F6"/>
 
   <path d="
     M 226 131
