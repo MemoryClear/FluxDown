@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shadcn_ui/shadcn_ui.dart';
@@ -464,7 +462,8 @@ void showTaskContextMenu(
   }
 
   // --- 打开文件 / 打开所在文件夹 ---
-  final filePath = '${task.saveDir}${Platform.pathSeparator}${task.fileName}';
+  final filePath = task.filePath;
+  final folderPath = task.revealFolderPath;
 
   if (task.status == TaskStatus.completed && !task.fileMissing) {
     items.add(
@@ -481,7 +480,7 @@ void showTaskContextMenu(
       icon: LucideIcons.folderOpen,
       label: s.openFolder,
       color: c.textPrimary,
-      action: () => _openFolder(filePath),
+      action: () => _openFolder(folderPath),
     ),
   );
   dividers.add(items.length - 1); // 文件操作组后加分隔线
