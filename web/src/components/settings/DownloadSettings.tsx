@@ -1,4 +1,5 @@
 // 下载：默认保存目录 / 全局限速 / 全局 User-Agent（服务器 config 表）。
+import { useI18n } from '../../lib/i18n'
 import type { ConfigMap } from '../../lib/types'
 import { FsPicker } from '../dialogs/fs-picker'
 import { NumberFieldRow, SetRow, SetSelect, TextInput } from './controls'
@@ -6,7 +7,6 @@ import { NumberFieldRow, SetRow, SetSelect, TextInput } from './controls'
 const MB = 1024 * 1024
 
 const UA_PRESETS = [
-  { label: '默认（不设置）', value: '' },
   {
     label: 'Chrome',
     value:
@@ -35,31 +35,35 @@ export function DownloadSettings({
   config: ConfigMap
   mutate: (entries: ConfigMap) => void
 }) {
+  const { t } = useI18n()
   const saveDir = config.default_save_dir ?? ''
   const speedBytes = Number(config.speed_limit_bytes ?? '0')
   const speedMB = speedBytes > 0 ? speedBytes / MB : 0
   const ua = config.global_user_agent ?? ''
-  const uaOptions = ua && !UA_PRESETS.some((p) => p.value === ua) ? [{ label: '自定义', value: ua }, ...UA_PRESETS] : UA_PRESETS
+
+  const uaPresets = [{ label: t('set.download.uaDefault'), value: '' }, ...UA_PRESETS]
+  const uaOptions =
+    ua && !uaPresets.some((p) => p.value === ua) ? [{ label: t('common.custom'), value: ua }, ...uaPresets] : uaPresets
 
   return (
     <>
-      <h2 className="set-title">下载</h2>
-      <p className="set-desc">保存在服务器 config 表，作用于下载引擎</p>
+      <h2 className="set-title">{t('set.download')}</h2>
+      <p className="set-desc">{t('set.download.desc')}</p>
       <div className="set-group">
-        <SetRow title="默认保存目录" desc="服务器文件系统路径">
+        <SetRow title={t('set.download.saveDir')} desc={t('set.download.saveDirDesc')}>
           <div className="dir-row" style={{ width: 300, flexShrink: 0 }}>
             <TextInput value={saveDir} onCommit={(v) => mutate({ default_save_dir: v })} />
             <FsPicker value={saveDir} onChange={(p) => mutate({ default_save_dir: p })} />
           </div>
         </SetRow>
         <NumberFieldRow
-          title="全局限速"
-          desc="单位 MB/s，Token Bucket，0 = 不限速"
+          title={t('set.download.speedLimit')}
+          desc={t('set.download.speedLimitDesc')}
           value={speedMB}
           min={0}
           onCommit={(n) => mutate({ speed_limit_bytes: String(Math.max(0, Math.round(n * MB))) })}
         />
-        <SetRow title="全局 User-Agent" desc="预设：Chrome / Firefox / Edge / Safari">
+        <SetRow title={t('set.download.ua')} desc={t('set.download.uaDesc')}>
           <SetSelect value={ua} onValueChange={(v) => mutate({ global_user_agent: v })} options={uaOptions} />
         </SetRow>
       </div>

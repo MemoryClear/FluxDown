@@ -10,41 +10,9 @@ import { Check, ChevronDown, ChevronRight, X } from 'lucide-react'
 import { api } from '../../lib/api'
 import { cn } from '../../lib/cn'
 import { newDownloadOpenStore } from '../../lib/dialogs'
+import { useI18n } from '../../lib/i18n'
 import { useStore } from '../../lib/ws'
 import { FsPicker } from './fs-picker'
-
-const SEGMENT_OPTIONS = [
-  { value: '0', label: '自动（segment_advisor）' },
-  { value: '1', label: '1 线程' },
-  { value: '2', label: '2 线程' },
-  { value: '4', label: '4 线程' },
-  { value: '8', label: '8 线程' },
-  { value: '16', label: '16 线程' },
-  { value: '32', label: '32 线程' },
-]
-
-const USER_AGENTS = [
-  { value: '', label: '全局默认' },
-  {
-    value:
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    label: 'Chrome',
-  },
-  {
-    value: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
-    label: 'Firefox',
-  },
-  {
-    value:
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0',
-    label: 'Edge',
-  },
-  {
-    value:
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15',
-    label: 'Safari',
-  },
-]
 
 /** Radix Select 不允许 Item 的 value 为空字符串，用哨兵值代表"未设置/默认"语义。 */
 const EMPTY_VALUE = '__default__'
@@ -133,6 +101,38 @@ export function NewDownloadDialog() {
   const [form, setForm] = useState<FormState>(() => emptyForm())
   const [lineErrors, setLineErrors] = useState<Record<number, string>>({})
   const [submitting, setSubmitting] = useState(false)
+  const { t } = useI18n()
+  const segmentOptions = [
+    { value: '0', label: t('newDl.segmentsAuto') },
+    { value: '1', label: t('newDl.segmentsN', { n: 1 }) },
+    { value: '2', label: t('newDl.segmentsN', { n: 2 }) },
+    { value: '4', label: t('newDl.segmentsN', { n: 4 }) },
+    { value: '8', label: t('newDl.segmentsN', { n: 8 }) },
+    { value: '16', label: t('newDl.segmentsN', { n: 16 }) },
+    { value: '32', label: t('newDl.segmentsN', { n: 32 }) },
+  ]
+  const userAgentOptions = [
+    { value: '', label: t('newDl.globalDefault') },
+    {
+      value:
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      label: 'Chrome',
+    },
+    {
+      value: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
+      label: 'Firefox',
+    },
+    {
+      value:
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0',
+      label: 'Edge',
+    },
+    {
+      value:
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15',
+      label: 'Safari',
+    },
+  ]
 
   const { data: config } = useQuery({ queryKey: ['config'], queryFn: api.getConfig, enabled: open })
   const { data: queues } = useQuery({ queryKey: ['queues'], queryFn: api.listQueues, enabled: open })
@@ -232,18 +232,18 @@ export function NewDownloadDialog() {
           >
             <header className="dlg-head">
               <Dialog.Title asChild>
-                <b>新建下载</b>
+                <b>{t('newDl.title')}</b>
               </Dialog.Title>
               <Dialog.Close asChild>
-                <button type="button" className="icon-btn sm" aria-label="关闭">
+                <button type="button" className="icon-btn sm" aria-label={t('common.close')}>
                   <X size={16} />
                 </button>
               </Dialog.Close>
             </header>
-            <Dialog.Description className="sr-only">填写下载链接与选项，创建一个或多个下载任务</Dialog.Description>
+            <Dialog.Description className="sr-only">{t('newDl.desc')}</Dialog.Description>
             <div className="dlg-body">
               <label className="field-label" htmlFor="nd-urls">
-                {demoMode ? '下载链接（演示模式，已锁定）' : '下载链接（每行一条，支持 HTTP / FTP / 磁力链 / M3U8）'}
+                {demoMode ? t('newDl.urlLabelDemo') : t('newDl.urlLabel')}
               </label>
               <textarea
                 id="nd-urls"
@@ -261,31 +261,31 @@ export function NewDownloadDialog() {
               />
               {demoMode && (
                 <p className="mt-1 text-xs break-all text-text3">
-                  演示模式：仅允许下载上方的演示文件，其它链接会被服务器拒绝。
+                  {t('newDl.demoHint')}
                 </p>
               )}
               <div className="grid2">
                 <div>
                   <label className="field-label" htmlFor="nd-filename">
-                    文件名（留空自动推断）
+                    {t('newDl.fileName')}
                   </label>
                   <input
                     id="nd-filename"
                     className="text-input"
                     type="text"
-                    placeholder="自动"
+                    placeholder={t('newDl.fileNamePlaceholder')}
                     disabled={!isSingle}
                     value={form.fileName}
                     onChange={(e) => set('fileName', e.target.value)}
                   />
                 </div>
                 <div>
-                  <label className="field-label">线程数</label>
-                  <SelectField value={form.segments} onChange={(v) => set('segments', v)} options={SEGMENT_OPTIONS} ariaLabel="线程数" />
+                  <label className="field-label">{t('newDl.segments')}</label>
+                  <SelectField value={form.segments} onChange={(v) => set('segments', v)} options={segmentOptions} ariaLabel={t('newDl.segments')} />
                 </div>
               </div>
               <label className="field-label" htmlFor="nd-savedir">
-                保存目录（服务器路径）
+                {t('newDl.saveDir')}
               </label>
               <div className="dir-row">
                 <input
@@ -300,26 +300,26 @@ export function NewDownloadDialog() {
               </div>
               <div className="grid2">
                 <div>
-                  <label className="field-label">队列</label>
+                  <label className="field-label">{t('newDl.queue')}</label>
                   <SelectField
                     value={form.queueId}
                     onChange={(v) => set('queueId', v)}
-                    options={[{ value: '', label: '默认队列' }, ...(queues ?? []).map((q) => ({ value: q.queueId, label: q.name }))]}
-                    ariaLabel="队列"
+                    options={[{ value: '', label: t('newDl.defaultQueue') }, ...(queues ?? []).map((q) => ({ value: q.queueId, label: q.name }))]}
+                    ariaLabel={t('newDl.queue')}
                   />
                 </div>
                 <div>
-                  <label className="field-label">User-Agent</label>
-                  <SelectField value={form.userAgent} onChange={(v) => set('userAgent', v)} options={USER_AGENTS} ariaLabel="User-Agent" />
+                  <label className="field-label">{t('newDl.userAgent')}</label>
+                  <SelectField value={form.userAgent} onChange={(v) => set('userAgent', v)} options={userAgentOptions} ariaLabel={t('newDl.userAgent')} />
                 </div>
               </div>
               <button type="button" className={cn('adv-toggle', form.advOpen && 'open')} onClick={() => set('advOpen', !form.advOpen)}>
                 <ChevronRight size={13} />
-                高级选项（Cookies / Referrer / 代理 / Checksum）
+                {t('newDl.advanced')}
               </button>
               <div className={cn('adv-panel', form.advOpen && 'open')}>
                 <label className="field-label" htmlFor="nd-cookies">
-                  Cookies
+                  {t('newDl.cookies')}
                 </label>
                 <input
                   id="nd-cookies"
@@ -332,7 +332,7 @@ export function NewDownloadDialog() {
                 <div className="grid2">
                   <div>
                     <label className="field-label" htmlFor="nd-referrer">
-                      Referrer
+                      {t('newDl.referrer')}
                     </label>
                     <input
                       id="nd-referrer"
@@ -345,7 +345,7 @@ export function NewDownloadDialog() {
                   </div>
                   <div>
                     <label className="field-label" htmlFor="nd-proxy">
-                      单任务代理
+                      {t('newDl.proxy')}
                     </label>
                     <input
                       id="nd-proxy"
@@ -358,13 +358,13 @@ export function NewDownloadDialog() {
                   </div>
                 </div>
                 <label className="field-label" htmlFor="nd-checksum">
-                  Checksum（algo=hexhash，下载完成后校验）
+                  {t('newDl.checksum')}
                 </label>
                 <input
                   id="nd-checksum"
                   className="text-input"
                   type="text"
-                  placeholder="sha256=a1b2c3…"
+                  placeholder={t('newDl.checksumPlaceholder')}
                   value={form.checksum}
                   onChange={(e) => set('checksum', e.target.value)}
                 />
@@ -375,7 +375,7 @@ export function NewDownloadDialog() {
                     (line, i) =>
                       lineErrors[i] && (
                         <p key={i} className="text-xs break-all text-danger">
-                          第 {i + 1} 行 {line}：{lineErrors[i]}
+                          {t('newDl.lineError', { n: i + 1, line, error: lineErrors[i] })}
                         </p>
                       ),
                   )}
@@ -385,11 +385,11 @@ export function NewDownloadDialog() {
             <footer className="dlg-foot">
               <Dialog.Close asChild>
                 <button type="button" className="btn ghost">
-                  取消
+                  {t('common.cancel')}
                 </button>
               </Dialog.Close>
               <button type="submit" className="btn primary" disabled={urlLines.length === 0 || submitting}>
-                {submitting ? '创建中…' : '开始下载'}
+                {submitting ? t('newDl.creating') : t('newDl.create')}
               </button>
             </footer>
           </form>

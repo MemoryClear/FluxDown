@@ -1038,6 +1038,35 @@ class S {
   String get autoCheckUpdate => _t('自动检查更新', 'Auto Check for Updates');
   String get autoCheckUpdateDesc =>
       _t('启动应用时自动检查新版本', 'Automatically check for updates on startup');
+  String get donateTitle => _t('支持 FluxDown', 'Support FluxDown');
+  String donateDate(int y, int m, int d) => _t(
+    '$y 年 $m 月 $d 日',
+    '${const [
+      'January',
+      'February',
+      'March',
+      'April',
+      'May',
+      'June',
+      'July',
+      'August',
+      'September',
+      'October',
+      'November',
+      'December',
+    ][m - 1]} $d, $y',
+  );
+  String donateBody(String date, int releases, int commits) => _t(
+    '自 $date 首次提交以来，FluxDown 已累计发布 $releases 个版本，提交代码超过 $commits 次。'
+        '永久免费、零广告、零追踪的背后，是长期坚持不懈的开发与维护，离不开您的支持与反馈。',
+    'Since $date, FluxDown has shipped $releases releases with over $commits commits — '
+        'always free, with zero ads and zero tracking. Ongoing development relies on your support and feedback.',
+  );
+  String get donateThanks => _t(
+    '您的支持能让 FluxDown 更好地开发与发展下去，我们会用心做好产品。非常感谢！',
+    'Your support helps FluxDown keep improving. Thank you so much!',
+  );
+  String get donateButton => _t('给开发者捐赠', 'Donate to the Developer');
   String get upToDate => _t('已是最新版本', 'Up to Date');
   String newVersionFound(String v) =>
       _t('发现新版本 v$v', 'New version v$v available');
@@ -1176,6 +1205,10 @@ class S {
     '日志,导出,反馈,调试,排查,log',
     'log,export,feedback,debug,diagnostic',
   ).split(',')..addAll(['log', 'export', 'debug']);
+  List<String> get searchKeywordsDonate => _t(
+    '捐赠,赞助,支持,打赏,donate',
+    'donate,sponsor,support',
+  ).split(',')..addAll(['donate', 'sponsor', 'support']);
   List<String> get searchKeywordsSidebarVisibility => _t(
     '侧边栏,显示,隐藏,区块,状态,队列,分类',
     'sidebar,show,hide,section,status,queue,category',

@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:file_selector/file_selector.dart';
 import '../services/file_picker_service.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../services/build_stats.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -303,6 +304,13 @@ List<SettingsSearchItem> get settingsSearchItems {
       description: s.logExportDesc,
       keywords: s.searchKeywordsLogExport,
       icon: LucideIcons.fileText,
+    ),
+    SettingsSearchItem(
+      category: SettingsCategory.about,
+      label: s.donateTitle,
+      description: s.donateButton,
+      keywords: s.searchKeywordsDonate,
+      icon: LucideIcons.heart,
     ),
   ];
 }
@@ -7093,6 +7101,9 @@ class _AboutContent extends StatelessWidget {
             const SizedBox(height: 10),
             // Log export card
             _LogExportCard(colors: c, settingsProvider: settingsProvider),
+            const SizedBox(height: 10),
+            // Donate card
+            _DonateCard(colors: c),
           ],
         );
       },

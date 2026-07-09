@@ -30,7 +30,7 @@ pub struct ServerApiHost {
 pub fn demo_guard(demo_url: Option<&str>, url: &str) -> Result<(), ApiError> {
     match demo_url {
         Some(allowed) if url.trim() != allowed => Err(ApiError::BadRequest(
-            "演示模式：仅允许下载指定的演示文件".to_string(),
+            "demo mode: only the designated demo file can be downloaded".to_string(),
         )),
         _ => Ok(()),
     }
