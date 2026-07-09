@@ -116,6 +116,10 @@ pub fn open_file(path: &str) {
 /// `{path}`/`{dir}`），`cmd /c` 会剥掉命令行的首尾引号，把 exe 路径从空格
 /// 处截断（报 `'C:\Program' is not recognized`）。外层引号确保 cmd 剥掉的
 /// 是这一层，还原出完整的用户命令。规则见 `cmd /?`。
+///
+/// Windows `CREATE_NO_WINDOW`：cmd.exe 是控制台程序，不设此标志会闪现黑框。
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[cfg(target_os = "windows")]
 fn windows_cmd_c_arg(cmdline: &str) -> String {
     format!("/c \"{cmdline}\"")
@@ -132,6 +136,7 @@ fn run_template(tpl: &str, path: &str, dir: &str) -> bool {
         // 会剥掉用户命令的首尾引号（exe 装在含空格目录时把路径截断）。
         match std::process::Command::new("cmd.exe")
             .raw_arg(windows_cmd_c_arg(&cmdline))
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn()
         {
             Ok(_) => true,
@@ -348,7 +353,11 @@ fn platform_open_dir(dir: &str) {
     // start 的第一个引号串是窗口标题，必须保留为空，否则 cmd 会把目录路径
     // 当成标题而打开新 cmd 窗口。
     let arg = format!(r#"/c start "" "{}""#, dir);
-    if let Err(e) = std::process::Command::new("cmd.exe").raw_arg(&arg).spawn() {
+    if let Err(e) = std::process::Command::new("cmd.exe")
+        .raw_arg(&arg)
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+    {
         crate::logger::log_info!("[reveal] cmd /c start failed: {e}");
     }
 }
