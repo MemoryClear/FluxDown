@@ -252,6 +252,13 @@ List<SettingsSearchItem> get settingsSearchItems {
     ),
     SettingsSearchItem(
       category: SettingsCategory.download,
+      label: s.connPolicyCache,
+      description: s.connPolicyCacheDesc,
+      keywords: s.searchKeywordsThreads,
+      icon: LucideIcons.shieldOff,
+    ),
+    SettingsSearchItem(
+      category: SettingsCategory.download,
       label: s.maxConcurrent,
       description: s.maxConcurrentDesc,
       keywords: s.searchKeywordsConcurrent,
@@ -2376,6 +2383,12 @@ class _DownloadContent extends StatelessWidget {
             ],
             const SizedBox(height: 10),
             _SettingCard(
+              label: s.connPolicyCache,
+              description: s.connPolicyCacheDesc,
+              child: _ConnPolicyClearButton(settingsProvider: settingsProvider),
+            ),
+            const SizedBox(height: 10),
+            _SettingCard(
               label: s.maxConcurrent,
               description: s.maxConcurrentDesc,
               child: _ConcurrentSelector(settingsProvider: settingsProvider),
@@ -2728,6 +2741,52 @@ class _AutoMaxConnSelector extends StatelessWidget {
       max: 64,
       fallback: 16,
       onChanged: settingsProvider.setAutoMaxConnections,
+    );
+  }
+}
+
+class _ConnPolicyClearButton extends StatefulWidget {
+  final SettingsProvider settingsProvider;
+
+  const _ConnPolicyClearButton({required this.settingsProvider});
+
+  @override
+  State<_ConnPolicyClearButton> createState() => _ConnPolicyClearButtonState();
+}
+
+class _ConnPolicyClearButtonState extends State<_ConnPolicyClearButton> {
+  @override
+  void initState() {
+    super.initState();
+    // 记录由引擎在下载过程中随时写入，进入设置页时拉取最新 config 刷新条数。
+    widget.settingsProvider.requestConfig();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final s = LocaleScope.of(context);
+    final c = AppColors.of(context);
+    final count = widget.settingsProvider.connPolicyCount;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          count > 0 ? s.nRecords(count) : s.connPolicyCacheEmpty,
+          style: TextStyle(fontSize: 12, color: c.textMuted),
+        ),
+        const SizedBox(width: 8),
+        ShadButton.outline(
+          size: ShadButtonSize.sm,
+          enabled: count > 0,
+          onPressed: () {
+            widget.settingsProvider.clearDomainConnCaps();
+            ShadSonner.of(
+              context,
+            ).show(ShadToast(title: Text(s.connPolicyCacheCleared)));
+          },
+          child: Text(s.connPolicyCacheClear),
+        ),
+      ],
     );
   }
 }

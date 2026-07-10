@@ -649,6 +649,16 @@ class S {
     '连接数设为 Auto 时智能调度允许的最大连接数',
     'Maximum connections the auto scheduler may use when threads are set to Auto',
   );
+  String get connPolicyCache => _t('已学习的服务器策略', 'Learned Server Policies');
+  String get connPolicyCacheDesc => _t(
+    '服务器拒绝多连接（403/429）后引擎会记住其连接上限 24 小时；若服务器已解除限制，可手动清除重新学习',
+    'After a server rejects parallel connections (403/429), its cap is remembered for 24h; clear to relearn if the limit was lifted',
+  );
+  String get connPolicyCacheClear => _t('清除', 'Clear');
+  String get connPolicyCacheCleared =>
+      _t('已清除服务器策略缓存', 'Server policy cache cleared');
+  String get connPolicyCacheEmpty => _t('暂无记录', 'No records');
+  String nRecords(int n) => _t('$n 条记录', '$n records');
   String get maxConcurrent => _t('最大同时下载数', 'Max Concurrent Downloads');
   String get maxConcurrentDesc =>
       _t('同时进行的最大下载任务数量', 'Maximum number of simultaneous downloads');

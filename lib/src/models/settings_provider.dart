@@ -18,6 +18,7 @@ class SettingsProvider extends ChangeNotifier {
   String _defaultSaveDir = _platformDefaultSaveDir();
   int _defaultSegments = 0; // 0 = 自动（由 Rust segment_advisor 动态计算）
   int _autoMaxConnections = 16; // 自动模式下智能调度的最大连接数上限
+  int _connPolicyCount = 0; // 已学习的域名连接上限记录数（未过期）
   int _maxConcurrentTasks = 5;
   int _speedLimitBytes = 0; // 0 = 无限制
   int _maxAutoRetries = 3; // -1 = 无限, 0 = 关闭, 1..10 = 次数
@@ -175,6 +176,9 @@ class SettingsProvider extends ChangeNotifier {
   String get defaultSaveDir => _defaultSaveDir;
   int get defaultSegments => _defaultSegments;
   int get autoMaxConnections => _autoMaxConnections;
+
+  /// 引擎已学习的域名连接上限记录数（未过期条目；随 ConfigLoaded 刷新）。
+  int get connPolicyCount => _connPolicyCount;
   int get maxConcurrentTasks => _maxConcurrentTasks;
   int get speedLimitBytes => _speedLimitBytes;
   int get maxAutoRetries => _maxAutoRetries;
@@ -362,6 +366,34 @@ class SettingsProvider extends ChangeNotifier {
     _autoMaxConnections = value;
     notifyListeners();
     _saveToRust('auto_max_connections', value.toString());
+  }
+
+  /// 清除引擎学习的域名连接上限缓存（空值 = 清除指令，Rust 侧据此识别）。
+  void clearDomainConnCaps() {
+    _connPolicyCount = 0;
+    notifyListeners();
+    _saveToRust('domain_conn_caps', '');
+  }
+
+  /// 解析引擎持久化的域名连接上限数据，返回未过期的记录条数。
+  ///
+  /// 格式与 Rust 侧 serialize_conn_caps 对应：首行版本标记 `v1`，之后每行
+  /// `host<TAB>cap<TAB>unix_secs`。版本不匹配视为 0 条（引擎侧会整体丢弃）。
+  static int _parseConnPolicyCount(String raw) {
+    final lines = raw.split('\n');
+    if (lines.isEmpty || lines.first.trim() != 'v1') return 0;
+    final nowSecs = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    const ttlSecs = 24 * 3600;
+    var count = 0;
+    for (final line in lines.skip(1)) {
+      final parts = line.split('\t');
+      if (parts.length != 3) continue;
+      final cap = int.tryParse(parts[1]);
+      final ts = int.tryParse(parts[2]);
+      if (parts[0].isEmpty || cap == null || cap < 1 || ts == null) continue;
+      if (nowSecs - ts < ttlSecs) count++;
+    }
+    return count;
   }
 
   /// 记住新建下载对话框中用户选择的线程数（'auto' 或数字字符串）
@@ -1097,6 +1129,8 @@ class SettingsProvider extends ChangeNotifier {
           _defaultSegments = int.tryParse(entry.value) ?? 0;
         case 'auto_max_connections':
           _autoMaxConnections = int.tryParse(entry.value) ?? 16;
+        case 'domain_conn_caps':
+          _connPolicyCount = _parseConnPolicyCount(entry.value);
         case 'max_concurrent_tasks':
           _maxConcurrentTasks = int.tryParse(entry.value) ?? 5;
         case 'speed_limit_bytes':

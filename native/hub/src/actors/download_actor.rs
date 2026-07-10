@@ -1403,6 +1403,14 @@ async fn apply_config_key(
                 engine.manager.set_auto_retry_delay_secs(v);
             }
         }
+        // 值为空 = 用户在设置中点了「清除已学习的服务器策略」：清空内存缓存
+        // 并重写持久化（非空值是引擎自己落盘的数据，不经此路径回流）。
+        "domain_conn_caps" => {
+            if value.is_empty() {
+                log_info!("[actor] clearing learned domain connection caps");
+                engine.manager.clear_domain_conn_caps();
+            }
+        }
         // 本机 API 服务器配置变更 → 热重启监听（优雅停机旧实例
         // 后按最新配置重启，含端口/token/子功能开关，无需重启应用）。
         k if k.starts_with("local_server_") => {
