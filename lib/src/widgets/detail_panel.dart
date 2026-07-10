@@ -14,10 +14,18 @@ class DetailPanel extends StatefulWidget {
   final DownloadController controller;
   final VoidCallback onClose;
 
+  /// 当前是否为底部布局（决定切换按钮图标方向）
+  final bool isBottom;
+
+  /// 切换面板位置（底部 ↔ 右侧）
+  final VoidCallback? onTogglePosition;
+
   const DetailPanel({
     super.key,
     required this.controller,
     required this.onClose,
+    this.isBottom = true,
+    this.onTogglePosition,
   });
 
   @override
@@ -25,8 +33,6 @@ class DetailPanel extends StatefulWidget {
 }
 
 class _DetailPanelState extends State<DetailPanel> {
-  bool _isBottomLayout = false;
-
   @override
   Widget build(BuildContext context) {
     final c = AppColors.of(context);
@@ -43,6 +49,43 @@ class _DetailPanelState extends State<DetailPanel> {
               builder: (context, _) {
                 final task = widget.controller.selectedTask;
                 if (task == null) return _buildNoSelection(c);
+                if (widget.isBottom) {
+                  // 底部面板：横向布局（左：文件+进度分布；右：信息表+操作）
+                  return Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Expanded(
+                        flex: 2,
+                        child: SingleChildScrollView(
+                          padding: const EdgeInsets.all(16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              _buildFileInfo(c, m, task),
+                              const SizedBox(height: 16),
+                              _buildProgress(c, m, task),
+                            ],
+                          ),
+                        ),
+                      ),
+                      Container(width: 1, color: c.border),
+                      Expanded(
+                        child: Column(
+                          children: [
+                            Expanded(
+                              child: SingleChildScrollView(
+                                padding: const EdgeInsets.all(16),
+                                child: _buildInfoTable(c, task),
+                              ),
+                            ),
+                            _buildActions(c, m, task),
+                          ],
+                        ),
+                      ),
+                    ],
+                  );
+                }
+                // 右侧面板：竖直布局
                 return Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -52,9 +95,9 @@ class _DetailPanelState extends State<DetailPanel> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-            _buildFileInfo(c, m, task),
+                            _buildFileInfo(c, m, task),
                             const SizedBox(height: 20),
-            _buildProgress(c, m, task),
+                            _buildProgress(c, m, task),
                             const SizedBox(height: 20),
                             _buildInfoTable(c, task),
                           ],
@@ -90,16 +133,17 @@ class _DetailPanelState extends State<DetailPanel> {
             ),
           ),
           const Spacer(),
+          // 切换面板位置按钮（底部 ↔ 右侧）
           ShadButton.ghost(
-            onPressed: () {
-              setState(() => _isBottomLayout = !_isBottomLayout);
-            },
+            onPressed: widget.onTogglePosition,
             size: ShadButtonSize.sm,
             width: 28,
             height: 28,
             padding: EdgeInsets.zero,
             child: Icon(
-              _isBottomLayout ? LucideIcons.columns : LucideIcons.rows,
+              widget.isBottom
+                  ? LucideIcons.panelRight
+                  : LucideIcons.panelBottom,
               size: 14,
               color: c.textMuted,
             ),
