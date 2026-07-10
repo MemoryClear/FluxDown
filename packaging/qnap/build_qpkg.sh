@@ -31,8 +31,9 @@ cp -r "$SCRIPT_DIR/shared" "$pkg/shared"
 chmod 755 "$pkg/shared/fluxdown.sh"
 sed -i "s/^QPKG_VER=.*/QPKG_VER=\"$VERSION\"/" "$pkg/qpkg.cfg"
 
-cp "$SCRIPT_DIR/qpkg.cfg" "$pkg/"
 cp "$SCRIPT_DIR/package_routines" "$pkg/"
+
+# 二进制放入 arch 专属目录（qbuild --build-arch 只打对应架构），webroot 各架构共用
 mkdir -p "$pkg/$ARCH"
 cp "$BIN" "$pkg/$ARCH/fluxdown-server"
 chmod 755 "$pkg/$ARCH/fluxdown-server"

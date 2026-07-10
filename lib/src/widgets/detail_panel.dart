@@ -25,7 +25,7 @@ class DetailPanel extends StatefulWidget {
 }
 
 class _DetailPanelState extends State<DetailPanel> {
-  late bool _isBottomLayout;
+  bool _isBottomLayout = false;
 
   @override
   Widget build(BuildContext context) {

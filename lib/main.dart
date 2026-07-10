@@ -366,6 +366,10 @@ class _FluxDownAppState extends State<FluxDownApp>
     // 悬浮球服务 — 配置加载完成后初始化（S0.5 初始化钩子）
     _initFloatingBallAfterConfigLoad();
 
+    // 启动时最小化到托盘：配置加载完成后按设置决定是否隐藏主窗口
+    // （原生层 first_frame_cb 默认会显示窗口，此处按用户设置补做隐藏）
+    _applyStartMinimizedToTrayAfterConfigLoad();
+
     // 延迟 5 秒后台静默检查更新（避免阻塞启动流程）
     Future.delayed(const Duration(seconds: 5), () {
       if (!mounted) return;
