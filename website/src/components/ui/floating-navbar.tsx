@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn, DEMO_URL, GITHUB_REPO_URL } from "@/lib/utils";
-import { useLocale } from "@/lib/i18n";
+import { useLocale, type Locale } from "@/lib/i18n";
+import { LOCALES } from "@/lib/locales";
 
 declare global {
   interface Window {
@@ -370,9 +371,28 @@ export function FloatingNavbar({ className }: { className?: string }) {
     window.__toggleTheme?.();
   }, []);
 
-  const handleToggleLocale = useCallback(() => {
-    setLocale(locale === "zh" ? "en" : "zh");
-  }, [locale, setLocale]);
+  const [localeMenuOpen, setLocaleMenuOpen] = useState(false);
+  const localeMenuRef = useRef<HTMLDivElement>(null);
+
+  // 点击外部关闭语言菜单
+  useEffect(() => {
+    if (!localeMenuOpen) return;
+    const onClick = (e: MouseEvent) => {
+      if (!localeMenuRef.current?.contains(e.target as Node)) {
+        setLocaleMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, [localeMenuOpen]);
+
+  const handleSelectLocale = useCallback(
+    (loc: Locale) => {
+      setLocale(loc);
+      setLocaleMenuOpen(false);
+    },
+    [setLocale],
+  );
 
   useEffect(() => {
     const handleScroll = () => {
@@ -507,16 +527,76 @@ export function FloatingNavbar({ className }: { className?: string }) {
             {/* 占位——移动端将语言/主题推到右侧 */}
             <div className="flex-1 sm:hidden" />
 
-            {/* 语言切换 */}
-            <button
-              onClick={handleToggleLocale}
-              className="flex items-center justify-center w-7 h-7 rounded-full hover:bg-dark-surface3/50 transition-colors duration-200 cursor-pointer"
-              aria-label="Toggle language"
-            >
-              <span className="text-[10px] font-semibold text-dark-text-secondary">
-                {locale === "zh" ? "EN" : "中"}
-              </span>
-            </button>
+            {/* 语言选择下拉框（语言列表由 locales/*.json 自动发现） */}
+            <div ref={localeMenuRef} className="relative">
+              <button
+                onClick={() => setLocaleMenuOpen((v) => !v)}
+                className="flex items-center justify-center gap-0.5 h-7 px-1.5 rounded-full hover:bg-dark-surface3/50 transition-colors duration-200 cursor-pointer"
+                aria-label="Select language"
+                aria-expanded={localeMenuOpen}
+              >
+                <svg
+                  width="13"
+                  height="13"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="text-dark-text-secondary"
+                >
+                  <circle cx="12" cy="12" r="10" />
+                  <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+                  <path d="M2 12h20" />
+                </svg>
+                <span className="text-[10px] font-semibold text-dark-text-secondary uppercase">
+                  {locale}
+                </span>
+              </button>
+              <AnimatePresence>
+                {localeMenuOpen && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -4, scale: 0.97 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: -4, scale: 0.97 }}
+                    transition={{ duration: 0.15, ease: "easeOut" }}
+                    className="absolute top-full right-0 mt-2 min-w-[140px] rounded-xl border border-dark-border bg-dark-bg/95 backdrop-blur-xl shadow-xl shadow-black/25 overflow-hidden z-50"
+                  >
+                    <div className="py-1.5">
+                      {LOCALES.map(({ code, name }) => (
+                        <button
+                          key={code}
+                          onClick={() => handleSelectLocale(code)}
+                          className={cn(
+                            "flex w-full items-center justify-between px-4 py-2 text-xs font-medium transition-colors duration-150 cursor-pointer",
+                            code === locale
+                              ? "text-dark-text bg-dark-surface2/60"
+                              : "text-dark-text-secondary hover:text-dark-text hover:bg-dark-surface2/80",
+                          )}
+                        >
+                          {name}
+                          {code === locale && (
+                            <svg
+                              width="12"
+                              height="12"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2.5"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            >
+                              <polyline points="20 6 9 17 4 12" />
+                            </svg>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
 
             {/* 主题切换 */}
             <button

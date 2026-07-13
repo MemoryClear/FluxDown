@@ -9,15 +9,11 @@
  */
 
 import { useState, useEffect, useCallback } from "react";
-import { en, zhCN } from "./locales";
+import { en, localeRegistry, htmlLang } from "./locales";
 import type { Messages } from "./locales";
 
-export type Locale = "en" | "zh";
-
-const localeMap: Record<string, Messages> = {
-  en,
-  zh: zhCN,
-};
+/** locale 代码（"en"、"zh"、"ja"…），可用集合由 locales/*.json 自动发现 */
+export type Locale = string;
 
 const STORAGE_KEY = "fluxdown-locale";
 
@@ -25,9 +21,14 @@ const STORAGE_KEY = "fluxdown-locale";
 export function detectLocale(): Locale {
   if (typeof navigator === "undefined") return "en";
   const langs = navigator.languages ?? [navigator.language];
+  const available = Object.keys(localeRegistry);
   for (const lang of langs) {
-    if (lang.startsWith("zh")) return "zh";
-    if (lang.startsWith("en")) return "en";
+    const lower = lang.toLowerCase();
+    // 精确匹配（如 pt-br），其次主语言前缀匹配（如 zh-TW → zh、ja-JP → ja）
+    const exact = available.find((c) => c === lower);
+    if (exact) return exact;
+    const prefix = available.find((c) => c === lower.split("-")[0]);
+    if (prefix) return prefix;
   }
   return "en";
 }
@@ -37,7 +38,7 @@ export function loadLocale(): Locale {
   if (typeof window === "undefined") return detectLocale();
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved === "en" || saved === "zh") return saved;
+    if (saved && saved in localeRegistry) return saved;
   } catch {
     // localStorage 不可用（SSR / 隐私模式）
   }
@@ -61,7 +62,7 @@ export function saveLocale(locale: Locale): void {
 
 /** 获取翻译消息 */
 export function getMessages(locale: Locale): Messages {
-  return localeMap[locale] ?? en;
+  return localeRegistry[locale] ?? en;
 }
 
 /** 翻译函数 */
@@ -109,7 +110,7 @@ export function useLocale() {
     setLocaleState(loc);
     setMessages(getMessages(loc));
     saveLocale(loc);
-    document.documentElement.lang = loc === "zh" ? "zh-CN" : "en";
+    document.documentElement.lang = htmlLang(loc);
     window.dispatchEvent(new CustomEvent("locale-change", { detail: { locale: loc } }));
   }, []);
 
