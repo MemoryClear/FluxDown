@@ -1022,9 +1022,10 @@ pub async fn run(db_dir: PathBuf) {
             // --- Auto-update signals ---
             Some(signal) = check_update_recv.recv() => {
                 let version = signal.message.current_version;
+                let channel = signal.message.channel;
                 tokio::spawn(async move {
                     let result = std::panic::AssertUnwindSafe(
-                        updater::check(&version)
+                        updater::check(&version, &channel)
                     );
                     if futures_util::FutureExt::catch_unwind(result).await.is_err() {
                         log_info!("[updater] check panicked for version={}", version);

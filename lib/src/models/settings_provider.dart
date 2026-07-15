@@ -28,6 +28,7 @@ class SettingsProvider extends ChangeNotifier {
   bool _startMinimizedToTray = false; // 默认启动时显示主窗口
   bool _autoStartup = false; // 默认不开机启动
   bool _autoCheckUpdate = true; // 默认启动时自动检查更新
+  String _updateChannel = 'stable'; // 更新渠道：stable 稳定版 / frontier 前沿版（含预发布）
   bool _notifyOnComplete = true; // 默认任务完成时弹出通知
   bool _silentDownloadEnabled = false; // 免打扰下载：外部请求不弹确认框直接下载
   bool _useServerTime = false; // 完成文件的修改时间采用服务器 Last-Modified
@@ -190,6 +191,7 @@ class SettingsProvider extends ChangeNotifier {
   bool get startMinimizedToTray => _startMinimizedToTray;
   bool get autoStartup => _autoStartup;
   bool get autoCheckUpdate => _autoCheckUpdate;
+  String get updateChannel => _updateChannel;
   bool get notifyOnComplete => _notifyOnComplete;
   bool get silentDownloadEnabled => _silentDownloadEnabled;
   bool get useServerTime => _useServerTime;
@@ -477,6 +479,14 @@ class SettingsProvider extends ChangeNotifier {
     _autoCheckUpdate = value;
     notifyListeners();
     _saveToRust('auto_check_update', value.toString());
+  }
+
+  /// 设置更新渠道（'stable' 稳定版 / 'frontier' 前沿版）。
+  void setUpdateChannel(String value) {
+    if (_updateChannel == value) return;
+    _updateChannel = value;
+    notifyListeners();
+    _saveToRust('update_channel', value);
   }
 
   void setFloatingBallEnabled(bool value) {
@@ -1167,6 +1177,8 @@ class SettingsProvider extends ChangeNotifier {
           _autoStartup = entry.value == 'true';
         case 'auto_check_update':
           _autoCheckUpdate = entry.value == 'true';
+        case 'update_channel':
+          _updateChannel = entry.value.isEmpty ? 'stable' : entry.value;
         case 'bt_enable_dht':
           _btEnableDht = entry.value == 'true';
         case 'bt_enable_upnp':

@@ -67,9 +67,78 @@ interface GitHubRelease {
   assets: GitHubAsset[];
 }
 
-export const GET: APIRoute = async () => {
-  // 检查缓存
-  const cached = getCached<unknown>(CACHE_KEY, CACHE_TTL);
+/**
+ * SemVer 2.0 精度比较两个 release tag（去组件前缀后），a>b 时返回 >0。
+ * 处理 frontier 的 `-rc.N` 预发布后缀——普通数字切分会误判。
+ */
+function cmpReleaseTag(a: string, b: string): number {
+  const norm = (t: string) =>
+    t.replace(/^(cli|mobile|server|extension|website)-/, "").replace(/^v/, "");
+  const [ca, pa = ""] = norm(a).split("-", 2);
+  const [cb, pb = ""] = norm(b).split("-", 2);
+  const na = ca.split(".").map((s) => Number.parseInt(s, 10) || 0);
+  const nb = cb.split(".").map((s) => Number.parseInt(s, 10) || 0);
+  for (let i = 0; i < 3; i++) {
+    const d = (na[i] ?? 0) - (nb[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  // core 相等：无预发布 > 有预发布（SemVer 2.0 §11.3）
+  if (!pa && !pb) return 0;
+  if (!pa) return 1;
+  if (!pb) return -1;
+  const ida = pa.split(".");
+  const idb = pb.split(".");
+  for (let i = 0; i < Math.max(ida.length, idb.length); i++) {
+    const x = ida[i];
+    const y = idb[i];
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    const xn = /^\d+$/.test(x);
+    const yn = /^\d+$/.test(y);
+    if (xn && yn) {
+      const d = Number.parseInt(x, 10) - Number.parseInt(y, 10);
+      if (d !== 0) return d;
+    } else if (xn !== yn) {
+      return xn ? -1 : 1; // 数字标识符 < 字母数字标识符
+    } else if (x !== y) {
+      return x < y ? -1 : 1;
+    }
+  }
+  return 0;
+}
+
+/**
+ * 从候选池挑选匹配 `re` 且含目标资产的 release。
+ * stable 保留 GitHub created_at 倒序的首个匹配（与旧行为一致）；
+ * frontier 取 SemVer 最大，避免旧版本线上发布时间更晚的 hotfix 盖过更高的预发布。
+ */
+function pickRelease(
+  pool: GitHubRelease[],
+  re: RegExp,
+  wanted: (a: GitHubAsset) => boolean,
+  frontier: boolean,
+): GitHubRelease | undefined {
+  const matches = pool.filter(
+    (r) => re.test(r.tag_name) && r.assets.some(wanted),
+  );
+  if (!frontier) return matches[0];
+  return matches.reduce<GitHubRelease | undefined>(
+    (best, r) =>
+      best && cmpReleaseTag(best.tag_name, r.tag_name) >= 0 ? best : r,
+    undefined,
+  );
+}
+
+export const GET: APIRoute = async ({ url }) => {
+  // 渠道：缺省 stable（官网/存量客户端不带 channel 参数 → 永远稳定版）；
+  // frontier 放行 prerelease，供客户端"前沿版"更新通道使用。
+  const channel =
+    url.searchParams.get("channel") === "frontier" ? "frontier" : "stable";
+  const includePrerelease = channel === "frontier";
+  const cacheKey = `${CACHE_KEY}:${channel}`;
+
+  // 检查缓存（按渠道分键，避免 stable/frontier 互相污染）
+  const cached = getCached<unknown>(cacheKey, CACHE_TTL);
   if (cached) {
     return new Response(JSON.stringify(cached), {
       status: 200,
@@ -124,19 +193,24 @@ export const GET: APIRoute = async () => {
 
     const releases = allReleases;
     const published = releases.filter((r) => !r.draft && !r.prerelease);
+    // 渠道感知候选池：frontier 放行 prerelease（含稳定版），stable 等同 published。
+    // 仅桌面客户端(version/assets)与移动端(mobile)按渠道选取；扩展/服务器/CLI
+    // 恒取稳定版——官网下载页消费它们，且缺省 channel=stable 已保证官网永远稳定。
+    const appPool = includePrerelease
+      ? releases.filter((r) => !r.draft)
+      : published;
+    const appTagRe = includePrerelease
+      ? /^v\d+\.\d+\.\d+(-[\w.]+)?$/
+      : /^v\d+\.\d+\.\d+$/;
 
-    // 桌面客户端 release：Release 已按组件拆分（v* / extension-v* / website-v*），
-    // 以「严格三段式 semver tag 且包含 Windows 安装包」为准挑选最新客户端 release，
-    // 同时兼容旧的合并 release 与脚本预创建的空 release。
-    // 必须严格 v<major>.<minor>.<patch>：旧客户端 parse_semver 只接受三段式，
-    // 两段式/带后缀的 tag 会导致其静默不弹更新，这里直接跳过以保护更新通道
-    const latest = published.find(
-      (r) =>
-        /^v\d+\.\d+\.\d+$/.test(r.tag_name) &&
-        r.assets.some(
-          (a) =>
-            a.name.endsWith("-setup.exe") || a.name.endsWith("-portable.zip"),
-        ),
+    // 桌面客户端 release：严格三段式(stable)或带预发布后缀(frontier) tag，
+    // 且含 Windows 安装包；frontier 取 SemVer 最大，防止旧线 hotfix 盖过 RC。
+    const latest = pickRelease(
+      appPool,
+      appTagRe,
+      (a) =>
+        a.name.endsWith("-setup.exe") || a.name.endsWith("-portable.zip"),
+      includePrerelease,
     );
 
     if (!latest) {
@@ -147,6 +221,9 @@ export const GET: APIRoute = async () => {
     }
 
     const version = latest.tag_name.replace(/^v/, "");
+    // frontier 的 latest 是 prerelease，资产必须带 tag 定位（/api/download 的
+    // 无 tag "最新"路径只认稳定版）；stable 保持无 tag（官网下载与旧行为一致）。
+    const appTag = includePrerelease ? latest.tag_name : undefined;
 
     // 浏览器扩展 release：优先最新的独立 extension-v* release，
     // 旧版本扩展资产与客户端合并在同一个 release 中，同样能被匹配到
@@ -174,10 +251,14 @@ export const GET: APIRoute = async () => {
     );
 
     // FluxDown 移动端 release：独立 mobile-v* release（Android APK）
-    const mobileRelease = published.find(
-      (r) =>
-        /^mobile-v\d+\.\d+\.\d+$/.test(r.tag_name) &&
-        r.assets.some((a) => a.name.includes("-android-")),
+    const mobileRe = includePrerelease
+      ? /^mobile-v\d+\.\d+\.\d+(-[\w.]+)?$/
+      : /^mobile-v\d+\.\d+\.\d+$/;
+    const mobileRelease = pickRelease(
+      appPool,
+      mobileRe,
+      (a) => a.name.includes("-android-"),
+      includePrerelease,
     );
 
     // 匹配资产文件（兼容旧命名：-windows-setup.exe / 新命名：-windows-x64-setup.exe）
@@ -314,23 +395,23 @@ export const GET: APIRoute = async () => {
       published_at: latest.published_at,
       total_downloads: totalDownloads,
       assets: {
-        setup: formatAsset(setupAsset),
-        portable: formatAsset(portableAsset),
-        setup_arm64: formatAsset(setupArm64Asset),
-        portable_arm64: formatAsset(portableArm64Asset),
+        setup: formatAsset(setupAsset, appTag),
+        portable: formatAsset(portableAsset, appTag),
+        setup_arm64: formatAsset(setupArm64Asset, appTag),
+        portable_arm64: formatAsset(portableArm64Asset, appTag),
         extension: formatAsset(extensionAsset, extensionRelease?.tag_name),
         firefox_extension: formatAsset(
           firefoxExtensionAsset,
           extensionRelease?.tag_name,
         ),
-        macos_dmg_arm64: formatAsset(macosDmgArm64Asset),
-        macos_dmg_x64: formatAsset(macosDmgX64Asset),
-        macos_tarball_arm64: formatAsset(macosTarballArm64Asset),
-        macos_tarball_x64: formatAsset(macosTarballX64Asset),
-        linux_appimage: formatAsset(linuxAppImageAsset),
-        linux_deb: formatAsset(linuxDebAsset),
-        linux_arch: formatAsset(linuxArchAsset),
-        linux_tarball: formatAsset(linuxTarballAsset),
+        macos_dmg_arm64: formatAsset(macosDmgArm64Asset, appTag),
+        macos_dmg_x64: formatAsset(macosDmgX64Asset, appTag),
+        macos_tarball_arm64: formatAsset(macosTarballArm64Asset, appTag),
+        macos_tarball_x64: formatAsset(macosTarballX64Asset, appTag),
+        linux_appimage: formatAsset(linuxAppImageAsset, appTag),
+        linux_deb: formatAsset(linuxDebAsset, appTag),
+        linux_arch: formatAsset(linuxArchAsset, appTag),
+        linux_tarball: formatAsset(linuxTarballAsset, appTag),
       },
       server: serverRelease
         ? {
@@ -435,7 +516,7 @@ export const GET: APIRoute = async () => {
     };
 
     // 更新缓存
-    setCached(CACHE_KEY, data);
+    setCached(cacheKey, data);
 
     return new Response(JSON.stringify(data), {
       status: 200,

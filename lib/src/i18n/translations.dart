@@ -722,6 +722,10 @@ class S {
   String get checkUpdateDesc => _r('checkUpdateDesc');
   String get autoCheckUpdate => _r('autoCheckUpdate');
   String get autoCheckUpdateDesc => _r('autoCheckUpdateDesc');
+  String get updateChannel => _r('updateChannel');
+  String get updateChannelDesc => _r('updateChannelDesc');
+  String get updateChannelStable => _r('updateChannelStable');
+  String get updateChannelFrontier => _r('updateChannelFrontier');
   String get donateTitle => _r('donateTitle');
   String donateDate(int y, int m, int d) => _r('donateDate', {
     'y': y,

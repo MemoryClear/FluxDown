@@ -1,18 +1,26 @@
-// 关于：版本信息 + 更新检测 + 退出登录。
+// 关于：版本信息 + 更新渠道 + 更新检测 + 退出登录。
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { api } from '../../lib/api'
 import { clearCredentials } from '../../lib/auth'
 import { useI18n } from '../../lib/i18n'
+import type { ConfigMap } from '../../lib/types'
 import { useUpdateCheck } from '../../lib/update'
 import { disconnectWs } from '../../lib/ws'
-import { SetRow } from './controls'
+import { SetRow, SetSelect } from './controls'
 
-export function AboutSettings() {
+export function AboutSettings({
+  config,
+  mutate,
+}: {
+  config?: ConfigMap
+  mutate: (entries: ConfigMap) => void
+}) {
   const navigate = useNavigate()
   const { t } = useI18n()
   const { data: info, isLoading } = useQuery({ queryKey: ['info'], queryFn: api.info })
   const update = useUpdateCheck()
+  const channel = config?.web_update_channel === 'frontier' ? 'frontier' : 'stable'
 
   function logout() {
     clearCredentials()
@@ -27,6 +35,17 @@ export function AboutSettings() {
       <div className="set-group">
         <SetRow title={t('set.about.version')}>
           <span className="set-value">{isLoading ? t('common.loading') : info ? `${info.app} ${info.version}` : '—'}</span>
+        </SetRow>
+        <SetRow title={t('set.about.channel')} desc={t('set.about.channelDesc')}>
+          <SetSelect
+            value={channel}
+            onValueChange={(v) => mutate({ web_update_channel: v })}
+            options={[
+              { value: 'stable', label: t('set.about.channelStable') },
+              { value: 'frontier', label: t('set.about.channelFrontier') },
+            ]}
+            width={160}
+          />
         </SetRow>
         {update.hasUpdate && update.releaseUrl ? (
           <SetRow title={t('set.about.newVersion', { version: `v${update.latest}` })}>

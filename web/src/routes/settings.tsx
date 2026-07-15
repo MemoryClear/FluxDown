@@ -45,7 +45,7 @@ export function SettingsScreen() {
 
   function renderBody() {
     if (cat === 'appearance') return <AppearanceSettings />
-    if (cat === 'about') return <AboutSettings />
+    if (cat === 'about') return <AboutSettings config={config} mutate={mutate} />
     if (cat === 'plugins') return <PluginsSettings />
     if (cat === 'components') return <ComponentsSettings />
     if (isLoading) return <p className="set-desc">{t('common.loading')}</p>

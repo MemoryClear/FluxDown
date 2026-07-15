@@ -216,6 +216,13 @@ class MobileSettingsScreen extends StatelessWidget {
                         _Row(label: s.currentVersion, value: _appVersion),
                         _buildUpdateRow(context),
                         _Row(
+                          label: s.updateChannel,
+                          value: settings.updateChannel == 'frontier'
+                              ? s.updateChannelFrontier
+                              : s.updateChannelStable,
+                          onTap: () => _selectChannel(context),
+                        ),
+                        _Row(
                           label: s.mobilePrivacyPolicy,
                           onTap: () => launchUrl(
                             Uri.parse('https://fluxdown.zerx.dev/privacy'),
@@ -422,6 +429,20 @@ class MobileSettingsScreen extends StatelessWidget {
         ('manual', s.proxyModeManual),
       ],
       onSelect: settings.setProxyMode,
+    );
+  }
+
+  void _selectChannel(BuildContext context) {
+    final s = LocaleScope.of(context);
+    _showSelectSheet<String>(
+      context,
+      title: s.updateChannel,
+      current: settings.updateChannel,
+      options: [
+        ('stable', s.updateChannelStable),
+        ('frontier', s.updateChannelFrontier),
+      ],
+      onSelect: settings.setUpdateChannel,
     );
   }
 

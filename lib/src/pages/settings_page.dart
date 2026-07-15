@@ -8058,6 +8058,59 @@ class _AboutContent extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              LocaleScope.of(context).updateChannel,
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: c.textPrimary,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              LocaleScope.of(context).updateChannelDesc,
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: c.textMuted,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      ShadSelect<String>(
+                        initialValue: settingsProvider.updateChannel,
+                        options: [
+                          ShadOption(
+                            value: 'stable',
+                            child: Text(
+                              LocaleScope.of(context).updateChannelStable,
+                            ),
+                          ),
+                          ShadOption(
+                            value: 'frontier',
+                            child: Text(
+                              LocaleScope.of(context).updateChannelFrontier,
+                            ),
+                          ),
+                        ],
+                        selectedOptionBuilder: (context, value) => Text(
+                          value == 'frontier'
+                              ? LocaleScope.of(context).updateChannelFrontier
+                              : LocaleScope.of(context).updateChannelStable,
+                        ),
+                        onChanged: (v) {
+                          if (v != null) settingsProvider.setUpdateChannel(v);
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
                   _buildUpdateSection(context, svc, c),
                 ],
               ),

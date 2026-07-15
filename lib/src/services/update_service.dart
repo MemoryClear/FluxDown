@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:rinf/rinf.dart';
 
 import '../bindings/bindings.dart';
+import '../models/settings_provider.dart';
 import 'kv_store.dart';
 import 'log_service.dart';
 
@@ -186,7 +187,11 @@ class UpdateService extends ChangeNotifier {
     _checkTimeoutTimer?.cancel();
     _checkTimeoutTimer = Timer(_checkTimeout, _onCheckTimeout);
 
-    CheckForUpdate(currentVersion: _appVersion).sendSignalToRust();
+    final channel = SettingsProvider.globalInstance?.updateChannel ?? 'stable';
+    CheckForUpdate(
+      currentVersion: _appVersion,
+      channel: channel,
+    ).sendSignalToRust();
   }
 
   void _onCheckTimeout() {

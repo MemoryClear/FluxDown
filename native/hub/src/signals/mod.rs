@@ -352,6 +352,8 @@ pub struct SegmentSplitEvent {
 #[derive(Deserialize, DartSignal)]
 pub struct CheckForUpdate {
     pub current_version: String,
+    /// Update channel: "stable" (default) or "frontier" (includes prereleases).
+    pub channel: String,
 }
 
 /// Update check result (Rust → Dart)

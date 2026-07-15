@@ -314,12 +314,43 @@ fn select_mobile_asset(assets: &MobileAssets) -> Option<&AssetInfo> {
 }
 
 // ---------------------------------------------------------------------------
-// Simple semver comparison (major.minor.patch only)
+// SemVer comparison (major.minor.patch with optional prerelease suffix)
 // ---------------------------------------------------------------------------
+//
+// Release channels map to the SemVer prerelease suffix: stable builds are
+// tagged `vX.Y.Z`, frontier builds `vX.Y.Z-rc.N` (any `-suffix`). Comparison
+// follows SemVer 2.0 precedence (§11) so that:
+//   * a stable release outranks its own prereleases: `1.3.0 > 1.3.0-rc.2`
+//   * a prerelease of a higher core outranks a lower stable: `1.4.0-rc.1 > 1.3.0`
+//   * prereleases order by dot-separated identifiers (numeric < non-numeric,
+//     numeric compared numerically, text lexically).
+// Build metadata (`+meta`) is ignored, as SemVer requires.
 
-fn parse_semver(s: &str) -> Result<(u64, u64, u64), UpdateError> {
+/// A single prerelease identifier. Numeric identifiers compare numerically and
+/// always rank below alphanumeric ones (SemVer 2.0 §11.4).
+enum PreId {
+    Num(u64),
+    Text(String),
+}
+
+/// Parsed semantic version: `major.minor.patch` core plus optional prerelease
+/// identifiers. Only the subset FluxDown emits (`X.Y.Z` / `X.Y.Z-pre`) is used.
+struct SemVer {
+    core: (u64, u64, u64),
+    pre: Vec<PreId>,
+}
+
+fn parse_semver(s: &str) -> Result<SemVer, UpdateError> {
     let s = s.strip_prefix('v').unwrap_or(s);
-    let parts: Vec<&str> = s.split('.').collect();
+    // Drop build metadata (everything after the first '+').
+    let s = s.split('+').next().unwrap_or(s);
+    // Split the core from the prerelease suffix on the first '-'.
+    let (core_str, pre_str) = match s.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (s, None),
+    };
+
+    let parts: Vec<&str> = core_str.split('.').collect();
     if parts.len() != 3 {
         return Err(UpdateError::Semver(format!("invalid version: {s}")));
     }
@@ -332,13 +363,65 @@ fn parse_semver(s: &str) -> Result<(u64, u64, u64), UpdateError> {
     let patch = parts[2]
         .parse::<u64>()
         .map_err(|_| UpdateError::Semver(format!("invalid patch: {}", parts[2])))?;
-    Ok((major, minor, patch))
+
+    let pre = match pre_str {
+        None => Vec::new(),
+        Some("") => {
+            return Err(UpdateError::Semver(format!("empty prerelease: {s}")));
+        }
+        Some(p) => p
+            .split('.')
+            .map(|id| match id.parse::<u64>() {
+                Ok(n) => PreId::Num(n),
+                Err(_) => PreId::Text(id.to_string()),
+            })
+            .collect(),
+    };
+
+    Ok(SemVer {
+        core: (major, minor, patch),
+        pre,
+    })
+}
+
+/// Compare prerelease identifier lists (SemVer 2.0 §11.4).
+fn cmp_pre(a: &[PreId], b: &[PreId]) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    for (x, y) in a.iter().zip(b.iter()) {
+        let ord = match (x, y) {
+            (PreId::Num(m), PreId::Num(n)) => m.cmp(n),
+            (PreId::Text(m), PreId::Text(n)) => m.cmp(n),
+            (PreId::Num(_), PreId::Text(_)) => Ordering::Less,
+            (PreId::Text(_), PreId::Num(_)) => Ordering::Greater,
+        };
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    // All shared identifiers equal → the longer set has higher precedence.
+    a.len().cmp(&b.len())
+}
+
+/// SemVer 2.0 precedence. When cores are equal, a version with no prerelease
+/// outranks one that carries a prerelease suffix.
+fn cmp_semver(a: &SemVer, b: &SemVer) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match a.core.cmp(&b.core) {
+        Ordering::Equal => {}
+        non_eq => return non_eq,
+    }
+    match (a.pre.is_empty(), b.pre.is_empty()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater, // stable > prerelease
+        (false, true) => Ordering::Less,    // prerelease < stable
+        (false, false) => cmp_pre(&a.pre, &b.pre),
+    }
 }
 
 fn is_newer(latest: &str, current: &str) -> Result<bool, UpdateError> {
-    let (lmaj, lmin, lpat) = parse_semver(latest)?;
-    let (cmaj, cmin, cpat) = parse_semver(current)?;
-    Ok((lmaj, lmin, lpat) > (cmaj, cmin, cpat))
+    let l = parse_semver(latest)?;
+    let c = parse_semver(current)?;
+    Ok(cmp_semver(&l, &c) == std::cmp::Ordering::Greater)
 }
 
 // ---------------------------------------------------------------------------
@@ -347,8 +430,8 @@ fn is_newer(latest: &str, current: &str) -> Result<bool, UpdateError> {
 
 /// Check for updates by querying the website API proxy.
 /// Sends `UpdateCheckResult` signal back to Dart.
-pub async fn check(current_version: &str) {
-    let result = check_inner(current_version).await;
+pub async fn check(current_version: &str, channel: &str) {
+    let result = check_inner(current_version, channel).await;
     match result {
         Ok(()) => {} // signal already sent inside check_inner
         Err(e) => {
@@ -367,9 +450,9 @@ pub async fn check(current_version: &str) {
 }
 
 #[cfg(not(target_os = "android"))]
-async fn check_inner(current_version: &str) -> Result<(), UpdateError> {
+async fn check_inner(current_version: &str, channel: &str) -> Result<(), UpdateError> {
     let client = Client::new();
-    let url = format!("{UPDATE_API_BASE}/api/release");
+    let url = format!("{UPDATE_API_BASE}/api/release?channel={channel}");
 
     let resp = client
         .get(&url)
@@ -422,9 +505,9 @@ async fn check_inner(current_version: &str) -> Result<(), UpdateError> {
 /// Android 检查：解析 `/api/release` 顶层 `mobile` 字段（独立 mobile-v* 版本线，
 /// 与桌面 `version` 无关）。`mobile == null`（尚无移动端 release）→ 已是最新。
 #[cfg(target_os = "android")]
-async fn check_inner(current_version: &str) -> Result<(), UpdateError> {
+async fn check_inner(current_version: &str, channel: &str) -> Result<(), UpdateError> {
     let client = Client::new();
-    let url = format!("{UPDATE_API_BASE}/api/release");
+    let url = format!("{UPDATE_API_BASE}/api/release?channel={channel}");
 
     let resp = client
         .get(&url)
@@ -1772,7 +1855,36 @@ fn install_portable_tarball(tarball_path: &str) -> Result<(), UpdateError> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{SegmentRange, load_resume, resume_path, sanitize_filename, save_resume};
+    use super::{SegmentRange, is_newer, load_resume, resume_path, sanitize_filename, save_resume};
+
+    /// Stable channel: standard three-part precedence, no prerelease involved.
+    #[test]
+    fn is_newer_stable() {
+        assert!(is_newer("1.3.0", "1.2.5").unwrap());
+        assert!(is_newer("1.2.6", "1.2.5").unwrap());
+        assert!(!is_newer("1.2.5", "1.2.5").unwrap());
+        assert!(!is_newer("1.2.4", "1.2.5").unwrap());
+        // Leading `v` on either side is tolerated.
+        assert!(is_newer("v2.0.0", "1.9.9").unwrap());
+    }
+
+    /// Frontier channel prerelease precedence (SemVer 2.0 §11).
+    #[test]
+    fn is_newer_prerelease() {
+        // A stable release outranks its own prereleases.
+        assert!(is_newer("1.3.0", "1.3.0-rc.1").unwrap());
+        assert!(is_newer("1.3.0", "1.3.0-rc.2").unwrap());
+        // Later prerelease outranks earlier one (numeric identifier).
+        assert!(is_newer("1.3.0-rc.2", "1.3.0-rc.1").unwrap());
+        // A prerelease never outranks the matching stable.
+        assert!(!is_newer("1.3.0-rc.1", "1.3.0").unwrap());
+        assert!(!is_newer("1.3.0-rc.1", "1.3.0-rc.2").unwrap());
+        // A prerelease of a higher core outranks a lower stable (frontier user
+        // on 1.3.0 gets offered the next line's first RC).
+        assert!(is_newer("1.4.0-rc.1", "1.3.0").unwrap());
+        // Numeric identifiers rank below alphanumeric ones.
+        assert!(is_newer("1.3.0-rc", "1.3.0-1").unwrap());
+    }
 
     fn ranges() -> Vec<SegmentRange> {
         vec![

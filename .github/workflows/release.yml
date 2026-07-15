@@ -113,7 +113,10 @@ jobs:
       - name: Get version from tag
         id: version
         shell: bash
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+        run: |
+          V="${GITHUB_REF#refs/tags/v}"
+          echo "VERSION=$V" >> "$GITHUB_OUTPUT"
+          echo "CLEAN_VERSION=${V%%-*}" >> "$GITHUB_OUTPUT"
 
       - name: Compute repo stats (donate card)
         id: stats
@@ -204,7 +207,7 @@ jobs:
 
       - name: Build Flutter Windows app
         # Windows 使用 native-tls（Schannel），无需 aws-lc-sys，无需任何额外 TLS 环境变量
-        run: flutter build windows --release --build-name=${{ steps.version.outputs.VERSION }} --build-number=1 --dart-define=APP_VERSION=${{ steps.version.outputs.VERSION }} --dart-define=STATS_FIRST_COMMIT_DATE=${{ steps.stats.outputs.FIRST_COMMIT_DATE }} --dart-define=STATS_RELEASE_COUNT=${{ steps.stats.outputs.RELEASE_COUNT }} --dart-define=STATS_COMMIT_COUNT=${{ steps.stats.outputs.COMMIT_COUNT }}
+        run: flutter build windows --release --build-name=${{ steps.version.outputs.CLEAN_VERSION }} --build-number=1 --dart-define=APP_VERSION=${{ steps.version.outputs.VERSION }} --dart-define=STATS_FIRST_COMMIT_DATE=${{ steps.stats.outputs.FIRST_COMMIT_DATE }} --dart-define=STATS_RELEASE_COUNT=${{ steps.stats.outputs.RELEASE_COUNT }} --dart-define=STATS_COMMIT_COUNT=${{ steps.stats.outputs.COMMIT_COUNT }}
 
       # ── ARM64: Flutter 在 ARM64 runner 上以 x64 仿真运行，输出到 build\windows\x64
       #    但后续步骤（Inno Setup / portable zip）需要 build\windows\arm64 ──
@@ -266,7 +269,8 @@ jobs:
     name: Build Browser Extension
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.extension == 'true'
+    # 浏览器扩展发布后无法更改版本号，故预发布（前沿版）tag 不打包扩展。
+    if: needs.changes.outputs.extension == 'true' && !contains(github.ref_name, '-')
 
     steps:
       - name: Checkout repository
@@ -539,7 +543,10 @@ jobs:
 
       - name: Get version from tag
         id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+        run: |
+          V="${GITHUB_REF#refs/tags/v}"
+          echo "VERSION=$V" >> "$GITHUB_OUTPUT"
+          echo "CLEAN_VERSION=${V%%-*}" >> "$GITHUB_OUTPUT"
 
       - name: Compute repo stats (donate card)
         id: stats
@@ -615,7 +622,7 @@ jobs:
 
       # ── Build ──
       - name: Build Flutter Linux app
-        run: flutter build linux --release --build-name=${{ steps.version.outputs.VERSION }} --build-number=1 --dart-define=APP_VERSION=${{ steps.version.outputs.VERSION }} --dart-define=STATS_FIRST_COMMIT_DATE=${{ steps.stats.outputs.FIRST_COMMIT_DATE }} --dart-define=STATS_RELEASE_COUNT=${{ steps.stats.outputs.RELEASE_COUNT }} --dart-define=STATS_COMMIT_COUNT=${{ steps.stats.outputs.COMMIT_COUNT }}
+        run: flutter build linux --release --build-name=${{ steps.version.outputs.CLEAN_VERSION }} --build-number=1 --dart-define=APP_VERSION=${{ steps.version.outputs.VERSION }} --dart-define=STATS_FIRST_COMMIT_DATE=${{ steps.stats.outputs.FIRST_COMMIT_DATE }} --dart-define=STATS_RELEASE_COUNT=${{ steps.stats.outputs.RELEASE_COUNT }} --dart-define=STATS_COMMIT_COUNT=${{ steps.stats.outputs.COMMIT_COUNT }}
 
       # NOTE: fluxdown_nmh and fluxdown_updater are built automatically
       # by CMake custom targets defined in linux/CMakeLists.txt during flutter build.
@@ -852,7 +859,10 @@ jobs:
 
       - name: Get version from tag
         id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+        run: |
+          V="${GITHUB_REF#refs/tags/v}"
+          echo "VERSION=$V" >> "$GITHUB_OUTPUT"
+          echo "CLEAN_VERSION=${V%%-*}" >> "$GITHUB_OUTPUT"
 
       - name: Compute repo stats (donate card)
         id: stats
@@ -919,7 +929,7 @@ jobs:
       - name: Build Flutter macOS app
         run: |
           flutter build macos --release \
-            --build-name=${{ steps.version.outputs.VERSION }} \
+            --build-name=${{ steps.version.outputs.CLEAN_VERSION }} \
             --build-number=1 \
             --dart-define=APP_VERSION=${{ steps.version.outputs.VERSION }} \
             --dart-define=STATS_FIRST_COMMIT_DATE=${{ steps.stats.outputs.FIRST_COMMIT_DATE }} \
@@ -1003,7 +1013,10 @@ jobs:
 
       - name: Get version from tag
         id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+        run: |
+          V="${GITHUB_REF#refs/tags/v}"
+          echo "VERSION=$V" >> "$GITHUB_OUTPUT"
+          echo "CLEAN_VERSION=${V%%-*}" >> "$GITHUB_OUTPUT"
 
       # ── JDK 17（Android Gradle Plugin 要求）──
       - name: Setup JDK 17
@@ -1097,20 +1110,20 @@ jobs:
       - name: Derive Android versionCode
         id: vercode
         run: |
-          IFS=. read -r MAJ MIN PAT <<< "${{ steps.version.outputs.VERSION }}"
+          IFS=. read -r MAJ MIN PAT <<< "${{ steps.version.outputs.CLEAN_VERSION }}"
           echo "CODE=$((MAJ * 1000000 + MIN * 10000 + PAT * 100))" >> "$GITHUB_OUTPUT"
 
       - name: Build split-per-ABI APKs
         run: |
           flutter build apk --release --split-per-abi \
-            --build-name=${{ steps.version.outputs.VERSION }} \
+            --build-name=${{ steps.version.outputs.CLEAN_VERSION }} \
             --build-number=${{ steps.vercode.outputs.CODE }} \
             --dart-define=APP_VERSION=${{ steps.version.outputs.VERSION }}
 
       - name: Build universal APK
         run: |
           flutter build apk --release \
-            --build-name=${{ steps.version.outputs.VERSION }} \
+            --build-name=${{ steps.version.outputs.CLEAN_VERSION }} \
             --build-number=${{ steps.vercode.outputs.CODE }} \
             --dart-define=APP_VERSION=${{ steps.version.outputs.VERSION }}
 
@@ -1633,7 +1646,8 @@ jobs:
           body_path: RELEASE_NOTES.md
           generate_release_notes: false
           draft: false
-          make_latest: "true"
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}
 
   # ── Release Job 2: 浏览器扩展（独立 tag extension-v*，不抢占 latest）──
   release-extension:
@@ -1894,6 +1908,7 @@ jobs:
           generate_release_notes: false
           draft: false
           make_latest: "false"
+          prerelease: ${{ contains(github.ref_name, '-') }}
 
   # ── Release Job: CLI（独立 tag cli-v*，不抢占 latest）──
   release-cli:
@@ -2043,6 +2058,7 @@ jobs:
           generate_release_notes: false
           draft: false
           make_latest: "false"
+          prerelease: ${{ contains(github.ref_name, '-') }}
 
   # ── Release Job 4: 移动端（独立 tag mobile-v*，不抢占 latest）──
   release-mobile:
@@ -2155,6 +2171,7 @@ jobs:
           generate_release_notes: false
           draft: false
           make_latest: "false"
+          prerelease: ${{ contains(github.ref_name, '-') }}
 
   # ── 最终 Job: 清理 GitHub Actions Artifact，仅保留当前 tag 这一组 ──
   # 原因：Free 账号 artifact 配额仅 500MB，每次 release 会上传 ~400MB
