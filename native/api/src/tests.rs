@@ -261,6 +261,7 @@ fn sample_task(id: &str, status: i32) -> TaskDto {
         checksum: String::new(),
         file_missing: false,
         completed_at: String::new(),
+        referrer: String::new(),
     }
 }
 

@@ -162,6 +162,7 @@
     "infoPath": "Path",
     "infoError": "Error",
     "infoUrl": "URL",
+    "infoSourcePage": "Source",
     "resumingClickPause": "Resuming... (click to pause)",
     "dynamicSplit": "Split",
     "splitCount": "{total} ({proactive} proactive · {reactive} reactive)",

@@ -316,6 +316,9 @@ pub struct TaskInfo {
     /// 队列内启动顺序（越小越先启动）。0 = 未显式排序（按创建时间）。
     #[serde(default)]
     pub queue_order: i32,
+    /// Source page URL captured by the browser extension (empty = none).
+    #[serde(default)]
+    pub referrer: String,
 }
 
 /// 文件跟踪：一批已完成任务的「文件已丢失」标志变化（Rust → Dart）。

@@ -158,6 +158,8 @@ pub struct DownloadRequest {
 ///     file_missing: false,
 ///     completed_at: String::new(),
 ///     segments: 0,
+///     queue_order: 0,
+///     referrer: String::new(),
 /// };
 /// let dto = TaskDto::from(info);
 /// assert_eq!(dto.task_id, "t1");
@@ -191,6 +193,9 @@ pub struct TaskDto {
     /// 记录下载真正完成（status→3）的时刻，不含插件 hook 后处理耗时。
     #[serde(default)]
     pub completed_at: String,
+    /// Source page URL captured by the browser extension (empty = none).
+    #[serde(default)]
+    pub referrer: String,
 }
 
 impl From<fluxdown_engine::model::TaskInfo> for TaskDto {
@@ -210,6 +215,7 @@ impl From<fluxdown_engine::model::TaskInfo> for TaskDto {
             checksum: t.checksum,
             file_missing: t.file_missing,
             completed_at: t.completed_at,
+            referrer: t.referrer,
         }
     }
 }
@@ -754,6 +760,7 @@ mod tests {
             checksum: String::new(),
             file_missing: false,
             completed_at: String::new(),
+            referrer: String::new(),
         };
         let v = serde_json::to_value(&dto).unwrap();
         assert_eq!(v["taskId"], "t1");

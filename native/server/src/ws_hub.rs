@@ -818,6 +818,7 @@ mod tests {
             completed_at: String::new(),
             segments: 0,
             queue_order: 0,
+            referrer: String::new(),
         }]));
 
         let snap = hub.live_speeds_snapshot();
@@ -843,6 +844,7 @@ mod tests {
             completed_at: String::new(),
             segments: 0,
             queue_order: 0,
+            referrer: String::new(),
         }
     }
 

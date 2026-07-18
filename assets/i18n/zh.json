@@ -162,6 +162,7 @@
     "infoPath": "路径",
     "infoError": "错误",
     "infoUrl": "地址",
+    "infoSourcePage": "来源页",
     "resumingClickPause": "恢复中...（点击暂停）",
     "dynamicSplit": "拆分",
     "splitCount": "{total} 次（主动 {proactive} · 响应 {reactive}）",

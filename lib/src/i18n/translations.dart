@@ -261,6 +261,7 @@ class S {
   String get infoPath => _r('infoPath');
   String get infoError => _r('infoError');
   String get infoUrl => _r('infoUrl');
+  String get infoSourcePage => _r('infoSourcePage');
   String get resumingClickPause => _r('resumingClickPause');
   String get dynamicSplit => _r('dynamicSplit');
   String splitCount(int total, int reactive, int proactive) => _r(

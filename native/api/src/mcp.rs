@@ -346,6 +346,7 @@ mod tests {
             checksum: String::new(),
             file_missing: false,
             completed_at: String::new(),
+            referrer: String::new(),
         }
     }
 
