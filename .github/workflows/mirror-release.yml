@@ -109,6 +109,7 @@ jobs:
           ASSET=$(ls assets | head -1)
           URL="https://mirror.fluxdown.com/https://github.com/${{ github.repository }}/releases/download/$TAG/$ASSET"
           echo "探测: $URL"
-          SRC=$(curl -sI "$URL" | tr -d '\r' | awk -F': ' 'tolower($1)=="x-mirror-source"{print $2}')
+          # --path-as-is: 保留 URL 中的 //，否则 curl 会压成 /https:/ 导致误判未命中
+          SRC=$(curl -sI --path-as-is "$URL" | tr -d '\r' | awk -F': ' 'tolower($1)=="x-mirror-source"{print $2}')
           echo "X-Mirror-Source=$SRC"
           [ "$SRC" = "local" ] || { echo "::warning::镜像未命中本地 (source=$SRC)"; }
