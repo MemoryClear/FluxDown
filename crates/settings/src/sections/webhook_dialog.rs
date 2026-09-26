@@ -10,7 +10,7 @@ use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
 use gpui::{
     Anchor, App, AppContext as _, ClickEvent, ClipboardItem, Context, Div, Entity,
     InteractiveElement as _, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, Window, div, px,
+    StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div, px,
 };
 use gpui_component::{
     Icon, IconName, Sizable as _, Size, WindowExt as _,
@@ -20,6 +20,7 @@ use gpui_component::{
     menu::{DropdownMenu as _, PopupMenuItem},
     scroll::ScrollableElement as _,
     switch::Switch,
+    text::{TextView, TextViewStyle},
     v_flex,
 };
 use serde_json::{Value, json};
@@ -1093,14 +1094,28 @@ impl WebhookDialog {
         }
         lines.push("─".repeat(28));
         lines.extend(self.preview_body(preset, cx).lines().map(str::to_owned));
-        let mut body = v_flex()
-            .w_full()
+        let preview = lines.join("\n");
+        // 预览要能鼠标选中/复制：用无语言的围栏代码块承载纯文本（不做高亮、不解析 Markdown），
+        // 围栏长度比正文里最长的反引号串多一，保证用户模板里的 ``` 不会提前闭合。
+        let longest_ticks = preview
+            .split(|ch| ch != '`')
+            .map(str::len)
+            .max()
+            .unwrap_or(0);
+        let fence = "`".repeat(longest_ticks.max(2) + 1);
+        let markdown = format!("{fence}\n{preview}\n{fence}");
+        let code_style = StyleRefinement::default()
+            .p_0()
+            .rounded_none()
+            .bg(gpui::transparent_black())
             .font_family(tokens.typography.mono.clone())
             .text_xs()
-            .text_color(tokens.colors.foreground);
-        for line in lines {
-            body = body.child(div().whitespace_normal().child(SharedString::from(line)));
-        }
+            .text_color(tokens.colors.foreground)
+            .whitespace_normal();
+        let body = TextView::markdown("webhook-request-preview", markdown)
+            .style(TextViewStyle::default().code_block(code_style))
+            .selectable(true)
+            .w_full();
         v_flex()
             .h_full()
             .gap(tokens.spacing.sm)
@@ -1122,7 +1137,7 @@ impl WebhookDialog {
                     .bg(tokens.colors.surface)
                     .px(tokens.spacing.sm)
                     .py(tokens.spacing.sm)
-                    .child(body.overflow_y_scrollbar()),
+                    .child(v_flex().size_full().child(body).overflow_y_scrollbar()),
             )
             .child(self.hint(self.t("webhookPreviewMeta"), cx))
     }
