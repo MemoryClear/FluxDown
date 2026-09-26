@@ -324,31 +324,63 @@ fn show_about(cx: &mut App) {
     let version_label = t(&translator, "currentVersion");
     let protocol_label = t(&translator, "protocolVersionLabel");
     let website_label = t(&translator, "menuWebsite");
+    let close_label = t(&translator, "close");
     let _ = window.update(cx, |_, window, cx| {
-        window.open_dialog(cx, move |dialog, _, _| {
-            use gpui::{ParentElement as _, Styled as _};
+        window.open_dialog(cx, move |dialog, _, cx| {
+            use gpui::{IntoElement as _, ParentElement as _, Styled as _};
             let version_label = version_label.clone();
             let protocol_label = protocol_label.clone();
             let website_label = website_label.clone();
             dialog
-                .title(title.clone())
-                .w(gpui::px(420.))
-                .content(move |content, _, _| {
-                    content.child(
-                        gpui_component::v_flex()
-                            .gap_2()
-                            .child(format!("{version_label}: v{}", env!("CARGO_PKG_VERSION")))
-                            .child(format!(
-                                "{protocol_label}: {}",
-                                fluxdown_protocol::PROTOCOL_VERSION
-                            ))
-                            .child(
+                .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
+                .w(gpui::px(520.))
+                .content(move |content, _, cx| {
+                    let tokens = fluxdown_ui_theme::active_theme(cx).tokens();
+                    let value = |text: String| {
+                        gpui::div()
+                            .text_size(tokens.typography.sm.size)
+                            .line_height(tokens.typography.sm.line_height)
+                            .text_color(tokens.colors.muted_foreground)
+                            .font_features(fluxdown_ui_components::tabular_numbers())
+                            .child(text)
+                    };
+                    // 版本信息用分组卡片的「标签 — 值」行呈现，与设置页同一版式。
+                    content.child(fluxdown_ui_components::option_group(
+                        [
+                            fluxdown_ui_components::option_row(
+                                version_label.clone(),
+                                None,
+                                value(format!("v{}", env!("CARGO_PKG_VERSION"))),
+                                cx,
+                            )
+                            .into_any_element(),
+                            fluxdown_ui_components::option_row(
+                                protocol_label.clone(),
+                                None,
+                                value(fluxdown_protocol::PROTOCOL_VERSION.to_string()),
+                                cx,
+                            )
+                            .into_any_element(),
+                            fluxdown_ui_components::option_row(
+                                website_label.clone(),
+                                None,
                                 gpui_component::link::Link::new("about-website")
                                     .href(WEBSITE_URL)
-                                    .child(website_label.clone()),
-                            ),
-                    )
+                                    .text_size(tokens.typography.sm.size)
+                                    .child(WEBSITE_URL),
+                                cx,
+                            )
+                            .into_any_element(),
+                        ],
+                        cx,
+                    ))
                 })
+                .footer(fluxdown_ui_components::dialog_footer(
+                    None,
+                    close_label.clone(),
+                    fluxdown_ui_components::DialogIntent::Confirm,
+                    cx,
+                ))
         });
     });
 }

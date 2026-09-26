@@ -14,15 +14,19 @@ use crate::{
     strings::NewDownloadStrings,
 };
 use fluxdown_protocol::CreateTaskRequest;
+use fluxdown_ui_components::{
+    ControlExt as _, FluxIcon, IconControlExt as _, field_error, field_hint, field_label, form,
+    form_field, form_gap, form_row, input_with_action, option_group, option_row,
+};
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
 use gpui::{
-    Anchor, App, AppContext as _, ClickEvent, Context, Div, Entity, InteractiveElement as _,
-    IntoElement, ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement as _,
-    Styled, Window, div, prelude::FluentBuilder as _, px,
+    Anchor, AnyElement, App, AppContext as _, ClickEvent, Context, Div, Entity, FontWeight,
+    InteractiveElement as _, IntoElement, ParentElement, Pixels, Render, SharedString,
+    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Disableable as _, Icon, IconName, Sizable as _, Size, WindowExt as _,
+    Disableable as _, Icon, Sizable as _, Size, WindowExt as _,
     button::{Button, ButtonVariants as _, DropdownButton},
     h_flex,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
@@ -32,6 +36,13 @@ use gpui_component::{
     switch::Switch,
     v_flex,
 };
+
+/// 「自定义线程数」数字输入宽度。
+const CUSTOM_THREADS_WIDTH: Pixels = px(96.);
+/// 预设下拉（UA、校验算法）定宽，右侧输入框吃满剩余宽度。
+const PRESET_DROPDOWN_WIDTH: Pixels = px(140.);
+/// 请求头名称列宽。
+const HEADER_NAME_WIDTH: Pixels = px(168.);
 
 /// 队列下拉候选（显示名由表单按内置队列本地化）。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -536,6 +547,7 @@ impl NewDownloadView {
     }
 
     /// 单选下拉：当前项打勾，禁用项置灰；选择后经弱引用回写表单。
+    /// `width = None` 时铺满所在字段宽度（与输入框同高同宽）。
     fn dropdown<T: Clone + PartialEq + 'static>(
         &self,
         id: &'static str,
@@ -544,7 +556,7 @@ impl NewDownloadView {
         options: Vec<(T, SharedString, bool)>,
         on_pick: impl Fn(&mut Self, T, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let label = options
             .iter()
             .find(|(value, _, _)| *value == current)
@@ -554,11 +566,13 @@ impl NewDownloadView {
         let on_pick = Rc::new(on_pick);
         Button::new(id)
             .outline()
-            .small()
-            .h(CONTROL_HEIGHT)
+            .control(cx)
             .label(label)
             .dropdown_caret(true)
-            .when_some(width, |this, width| this.w(width))
+            .map(|button| match width {
+                Some(width) => button.flex_none().w(width),
+                None => button.w_full(),
+            })
             .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
                 options.iter().fold(menu, |menu, (value, label, disabled)| {
                     let checked = *value == current;
@@ -578,6 +592,7 @@ impl NewDownloadView {
                     )
                 })
             })
+            .into_any_element()
     }
 
     /// 队列选择菜单：选中即以该队列提交（`later` 决定是否暂停）。
@@ -614,87 +629,126 @@ impl NewDownloadView {
         }
     }
 
-    fn label(&self, text: SharedString, cx: &App) -> Div {
+    /// 多行输入（链接 / Cookie）：13px 正文、宽松内边距，与单行输入框同一视觉体系。
+    fn textarea(state: &Entity<TextareaState>, height: Pixels, cx: &App) -> Textarea {
         let tokens = active_theme(cx).tokens();
-        div()
-            .text_xs()
-            .font_weight(tokens.typography.sm.weight)
-            .text_color(tokens.colors.muted_foreground)
-            .child(text)
+        Textarea::new(state)
+            .h(height)
+            .w_full()
+            .px(tokens.spacing.md)
+            .py(tokens.spacing.sm)
+            .text_size(tokens.typography.sm.size)
+            .line_height(tokens.typography.sm.line_height)
     }
 
-    fn hint(&self, text: SharedString, cx: &App) -> Div {
-        let tokens = active_theme(cx).tokens();
-        div()
-            .text_xs()
-            .text_color(tokens.colors.muted_foreground)
-            .child(text)
+    /// 开关行（放进 `option_group`）。
+    fn toggle(
+        &self,
+        id: &'static str,
+        title: SharedString,
+        description: Option<SharedString>,
+        checked: bool,
+        on_change: fn(&mut Self, bool),
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        option_row(
+            title,
+            description,
+            Switch::new(id).checked(checked).on_click(cx.listener(
+                move |this, checked: &bool, _, cx| {
+                    on_change(this, *checked);
+                    cx.notify();
+                },
+            )),
+            cx,
+        )
+        .into_any_element()
     }
 
     /// 窗口标题栏已显示「新建下载」，这里只保留一行说明，避免标题重复。
     fn render_header(&self, cx: &App) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
-        v_flex()
-            .px(tokens.spacing.md)
-            .pt(tokens.spacing.sm)
+        let tokens = active_theme(cx).tokens();
+        div()
+            .flex_none()
+            .px(tokens.spacing.lg)
+            .pt(tokens.spacing.md)
             .pb(tokens.spacing.sm)
-            .child(self.hint(self.strings.subtitle.clone(), cx))
+            .child(field_hint(self.strings.subtitle.clone(), cx))
     }
 
+    /// 链接：标签行右侧显示已识别条数；多行输入下方是种子 / 文本导入入口。
     fn render_urls(&self, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
+        let spacing = active_theme(cx).tokens().spacing;
         let count = self.entries.len();
         let has_text = !self.urls.read(cx).value().trim().is_empty();
-        let mut column = v_flex().gap(tokens.spacing.xs).child(
-            h_flex()
-                .justify_between()
-                .items_center()
-                .child(self.label(self.strings.url_label.clone(), cx))
-                .when(count > 0, |this| {
-                    this.child(self.hint(self.strings.format_url_count(count), cx))
-                }),
-        );
-        column = column.child(Textarea::new(&self.urls).h(px(120.)).w_full());
-        if has_text && count == 0 {
-            column = column.child(
-                div()
-                    .text_xs()
-                    .text_color(tokens.colors.destructive)
-                    .child(self.strings.no_valid_url.clone()),
-            );
-        }
-        column.child(
-            h_flex()
-                .gap(tokens.spacing.xs)
-                .child(
-                    Button::new("new-download-open-torrent")
-                        .ghost()
-                        .small()
-                        .h(CONTROL_HEIGHT)
-                        .icon(IconName::FolderOpen)
-                        .label(self.strings.open_torrent.clone())
-                        .disabled(self.picking)
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.pick_torrent_files(window, cx);
-                        })),
-                )
-                .child(
-                    Button::new("new-download-import-txt")
-                        .ghost()
-                        .small()
-                        .h(CONTROL_HEIGHT)
-                        .icon(IconName::File)
-                        .label(self.strings.import_txt.clone())
-                        .disabled(self.picking)
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.import_txt_files(window, cx);
-                        })),
-                ),
+        v_flex()
+            .w_full()
+            .gap(spacing.xs + spacing.xxs)
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .child(field_label(self.strings.url_label.clone(), cx))
+                    .when(count > 0, |this| {
+                        this.child(field_hint(self.strings.format_url_count(count), cx))
+                    }),
+            )
+            .child(Self::textarea(&self.urls, px(128.), cx))
+            .when(has_text && count == 0, |this| {
+                this.child(field_error(self.strings.no_valid_url.clone(), cx))
+            })
+            .child(
+                h_flex()
+                    .gap(spacing.sm)
+                    .child(
+                        Button::new("new-download-open-torrent")
+                            .ghost()
+                            .icon(FluxIcon::FolderOpen)
+                            .label(self.strings.open_torrent.clone())
+                            .control(cx)
+                            .disabled(self.picking)
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.pick_torrent_files(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("new-download-import-txt")
+                            .ghost()
+                            .icon(FluxIcon::FileText)
+                            .label(self.strings.import_txt.clone())
+                            .control(cx)
+                            .disabled(self.picking)
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.import_txt_files(window, cx);
+                            })),
+                    ),
+            )
+    }
+
+    fn render_save_dir(&self, cx: &mut Context<Self>) -> Div {
+        form_field(
+            self.strings.save_dir.clone(),
+            input_with_action(
+                Input::new(&self.save_dir).control(cx).w_full(),
+                Button::new("new-download-browse")
+                    .outline()
+                    .icon(FluxIcon::FolderOpen)
+                    .label(self.strings.browse.clone())
+                    .control(cx)
+                    .disabled(self.picking)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.pick_save_dir(window, cx);
+                    })),
+                cx,
+            ),
+            None,
+            cx,
         )
     }
 
+    /// 线程数：下拉铺满字段；选「自定义」时右侧追加数字输入。
     fn render_threads(&self, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
+        let spacing = active_theme(cx).tokens().spacing;
         let mut options = vec![(ThreadChoice::Auto, self.strings.threads_auto.clone(), false)];
         options.extend(THREAD_PRESETS.iter().map(|value| {
             (
@@ -708,140 +762,73 @@ impl NewDownloadView {
             self.strings.threads_custom.clone(),
             false,
         ));
-        let mut row = h_flex().gap(tokens.spacing.xs).child(self.dropdown(
+        let dropdown = self.dropdown(
             "new-download-threads",
-            Some(px(120.)),
+            None,
             self.threads,
             options,
             |this, choice, window, cx| this.set_threads(choice, window, cx),
             cx,
-        ));
-        if self.threads == ThreadChoice::Custom {
-            row = row.child(
-                Input::new(&self.custom_threads)
-                    .with_size(Size::Medium)
-                    .w(px(96.)),
+        );
+        let control = h_flex()
+            .w_full()
+            .gap(spacing.sm)
+            .child(div().flex_1().min_w_0().child(dropdown))
+            .when(self.threads == ThreadChoice::Custom, |this| {
+                this.child(
+                    Input::new(&self.custom_threads)
+                        .control(cx)
+                        .flex_none()
+                        .w(CUSTOM_THREADS_WIDTH),
+                )
+            });
+        form_field(self.strings.threads.clone(), control, None, cx)
+    }
+
+    /// 文件名 | 线程数并排；批量隐藏文件名，全磁力隐藏线程数。
+    fn render_name_threads(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let mut fields = Vec::with_capacity(2);
+        if !self.is_batch() {
+            fields.push(
+                form_field(
+                    self.strings.rename.clone(),
+                    Input::new(&self.rename).control(cx).w_full(),
+                    None,
+                    cx,
+                )
+                .into_any_element(),
             );
         }
-        v_flex()
-            .gap(tokens.spacing.xs)
-            .child(self.label(self.strings.threads.clone(), cx))
-            .child(row)
-    }
-
-    fn render_save_dir_row(&self, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
-        let save_dir = v_flex()
-            .flex_1()
-            .min_w_0()
-            .gap(tokens.spacing.xs)
-            .child(self.label(self.strings.save_dir.clone(), cx))
-            .child(
-                h_flex()
-                    .gap(tokens.spacing.xs)
-                    .items_center()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(Input::new(&self.save_dir).with_size(Size::Medium).w_full()),
-                    )
-                    .child(
-                        Button::new("new-download-browse")
-                            .outline()
-                            .small()
-                            .h(CONTROL_HEIGHT)
-                            .label(self.strings.browse.clone())
-                            .disabled(self.picking)
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.pick_save_dir(window, cx);
-                            })),
-                    ),
-            );
-        h_flex()
-            .gap(tokens.spacing.md)
-            .items_end()
-            .child(save_dir)
-            .when(!self.all_magnet(), |this| {
-                this.child(self.render_threads(cx))
-            })
-    }
-
-    fn render_rename(&self, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
-        v_flex()
-            .gap(tokens.spacing.xs)
-            .child(self.label(self.strings.rename.clone(), cx))
-            .child(Input::new(&self.rename).with_size(Size::Medium).w_full())
-    }
-
-    fn render_switch_row(
-        &self,
-        id: &'static str,
-        title: SharedString,
-        description: Option<SharedString>,
-        checked: bool,
-        on_change: impl Fn(&mut Self, bool) + 'static,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
-        h_flex()
-            .gap(tokens.spacing.lg)
-            .items_start()
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap(tokens.spacing.xxs)
-                    .child(div().text_sm().child(title))
-                    .when_some(description, |this, description| {
-                        this.child(self.hint(description, cx))
-                    }),
-            )
-            .child(Switch::new(id).checked(checked).on_click(cx.listener(
-                move |this, checked: &bool, _, cx| {
-                    on_change(this, *checked);
-                    cx.notify();
-                },
-            )))
+        if !self.all_magnet() {
+            fields.push(self.render_threads(cx).into_any_element());
+        }
+        (!fields.is_empty()).then(|| form_row(fields, cx))
     }
 
     fn render_http_auth(&self, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
-        v_flex()
-            .gap(tokens.spacing.xs)
-            .child(self.label(self.strings.http_auth.clone(), cx))
-            .child(self.hint(self.strings.http_auth_desc.clone(), cx))
-            .child(
-                h_flex()
-                    .gap(tokens.spacing.sm)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(Input::new(&self.http_user).with_size(Size::Medium).w_full()),
-                    )
-                    .child(
-                        div().flex_1().min_w_0().child(
-                            Input::new(&self.http_password)
-                                .with_size(Size::Medium)
-                                .mask_toggle()
-                                .w_full(),
-                        ),
-                    ),
-            )
-            .child(self.render_switch_row(
-                "new-download-save-site-auth",
-                self.strings.http_auth_save.clone(),
-                None,
-                self.save_site_auth,
-                |this, checked| this.save_site_auth = checked,
+        form_field(
+            self.strings.http_auth.clone(),
+            form_row(
+                [
+                    Input::new(&self.http_user)
+                        .control(cx)
+                        .w_full()
+                        .into_any_element(),
+                    Input::new(&self.http_password)
+                        .control(cx)
+                        .mask_toggle()
+                        .w_full()
+                        .into_any_element(),
+                ],
                 cx,
-            ))
+            ),
+            Some(self.strings.http_auth_desc.clone()),
+            cx,
+        )
     }
 
     fn render_proxy(&self, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
+        let spacing = active_theme(cx).tokens().spacing;
         let manual = self.context.manual_proxy_url.clone();
         let options = ProxyChoice::ALL
             .into_iter()
@@ -864,135 +851,125 @@ impl NewDownloadView {
                 (choice, label, disabled)
             })
             .collect();
-        let mut column = v_flex()
-            .gap(tokens.spacing.xs)
-            .child(self.label(self.strings.proxy.clone(), cx))
-            .child(self.hint(self.strings.proxy_desc.clone(), cx))
-            .child(self.dropdown(
-                "new-download-proxy",
-                None,
-                self.proxy_choice,
-                options,
-                |this, choice, _, cx| {
-                    this.proxy_choice = choice;
-                    cx.notify();
-                },
-                cx,
-            ));
-        if self.proxy_choice == ProxyChoice::Custom {
-            column = column.child(
-                Input::new(&self.custom_proxy)
-                    .with_size(Size::Medium)
-                    .w_full(),
-            );
-        }
-        column
+        let dropdown = self.dropdown(
+            "new-download-proxy",
+            None,
+            self.proxy_choice,
+            options,
+            |this, choice, _, cx| {
+                this.proxy_choice = choice;
+                cx.notify();
+            },
+            cx,
+        );
+        let control = v_flex()
+            .w_full()
+            .gap(spacing.sm)
+            .child(dropdown)
+            .when(self.proxy_choice == ProxyChoice::Custom, |this| {
+                this.child(Input::new(&self.custom_proxy).control(cx).w_full())
+            });
+        form_field(
+            self.strings.proxy.clone(),
+            control,
+            Some(self.strings.proxy_desc.clone()),
+            cx,
+        )
+    }
+
+    /// 预设下拉 + 同行输入框（UA、校验和）：下拉定宽，输入框吃满剩余宽度。
+    fn preset_with_input(preset: AnyElement, input: &Entity<InputState>, cx: &App) -> Div {
+        let spacing = active_theme(cx).tokens().spacing;
+        h_flex().w_full().gap(spacing.sm).child(preset).child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(Input::new(input).control(cx).w_full()),
+        )
     }
 
     fn render_user_agent(&self, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
         let options = ua_preset_keys()
             .map(|key| (key, self.ua_label(key), false))
             .collect();
-        v_flex()
-            .gap(tokens.spacing.xs)
-            .child(self.label(self.strings.user_agent.clone(), cx))
-            .child(self.hint(self.strings.user_agent_desc.clone(), cx))
-            .child(
-                h_flex()
-                    .gap(tokens.spacing.sm)
-                    .items_center()
-                    .child(self.dropdown(
-                        "new-download-ua-preset",
-                        Some(px(150.)),
-                        self.ua_preset,
-                        options,
-                        |this, key, window, cx| this.set_ua_preset(key, window, cx),
-                        cx,
-                    ))
-                    .child(
-                        div().flex_1().min_w_0().child(
-                            Input::new(&self.user_agent)
-                                .with_size(Size::Medium)
-                                .w_full(),
-                        ),
-                    ),
-            )
+        let preset = self.dropdown(
+            "new-download-ua-preset",
+            Some(PRESET_DROPDOWN_WIDTH),
+            self.ua_preset,
+            options,
+            |this, key, window, cx| this.set_ua_preset(key, window, cx),
+            cx,
+        );
+        form_field(
+            self.strings.user_agent.clone(),
+            Self::preset_with_input(preset, &self.user_agent, cx),
+            Some(self.strings.user_agent_desc.clone()),
+            cx,
+        )
     }
 
     fn render_cookie(&self, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
-        v_flex()
-            .gap(tokens.spacing.xs)
-            .child(self.label(self.strings.cookie.clone(), cx))
-            .child(self.hint(self.strings.cookie_desc.clone(), cx))
-            .child(Textarea::new(&self.cookie).h(px(56.)).w_full())
+        form_field(
+            self.strings.cookie.clone(),
+            Self::textarea(&self.cookie, px(72.), cx),
+            Some(self.strings.cookie_desc.clone()),
+            cx,
+        )
     }
 
     fn render_checksum(&self, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
         let options = HASH_ALGORITHMS
             .iter()
             .map(|algorithm| (*algorithm, SharedString::from(*algorithm), false))
             .collect();
-        v_flex()
-            .gap(tokens.spacing.xs)
-            .child(self.label(self.strings.checksum.clone(), cx))
-            .child(self.hint(self.strings.checksum_desc.clone(), cx))
-            .child(
-                h_flex()
-                    .gap(tokens.spacing.sm)
-                    .items_center()
-                    .child(self.dropdown(
-                        "new-download-hash-algorithm",
-                        Some(px(110.)),
-                        self.hash_algorithm,
-                        options,
-                        |this, algorithm, _, cx| {
-                            this.hash_algorithm = algorithm;
-                            cx.notify();
-                        },
-                        cx,
-                    ))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(Input::new(&self.checksum).with_size(Size::Medium).w_full()),
-                    ),
-            )
+        let preset = self.dropdown(
+            "new-download-hash-algorithm",
+            Some(PRESET_DROPDOWN_WIDTH),
+            self.hash_algorithm,
+            options,
+            |this, algorithm, _, cx| {
+                this.hash_algorithm = algorithm;
+                cx.notify();
+            },
+            cx,
+        );
+        form_field(
+            self.strings.checksum.clone(),
+            Self::preset_with_input(preset, &self.checksum, cx),
+            Some(self.strings.checksum_desc.clone()),
+            cx,
+        )
     }
 
+    /// 自定义请求头：每行「名称 | 值 | 删除」，末尾「添加请求头」。
     fn render_headers(&self, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
-        let mut column = v_flex()
-            .gap(tokens.spacing.xs)
-            .child(self.label(self.strings.headers.clone(), cx))
-            .child(self.hint(self.strings.headers_desc.clone(), cx));
+        let spacing = active_theme(cx).tokens().spacing;
+        let mut rows = v_flex().w_full().gap(spacing.sm);
         for row in &self.headers {
             let row_id = row.id;
-            column = column.child(
+            rows = rows.child(
                 h_flex()
-                    .gap(tokens.spacing.sm)
-                    .items_center()
+                    .w_full()
+                    .gap(spacing.sm)
                     .child(
                         div()
-                            .w(px(160.))
-                            .child(Input::new(&row.key).with_size(Size::Medium).w_full()),
+                            .flex_none()
+                            .w(HEADER_NAME_WIDTH)
+                            .child(Input::new(&row.key).control(cx).w_full()),
                     )
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .child(Input::new(&row.value).with_size(Size::Medium).w_full()),
+                            .child(Input::new(&row.value).control(cx).w_full()),
                     )
                     .child(
                         Button::new(SharedString::from(format!(
                             "new-download-header-remove-{row_id}"
                         )))
                         .ghost()
-                        .xsmall()
-                        .icon(IconName::Close)
+                        .icon(FluxIcon::X)
+                        .control_icon(cx)
                         .on_click(cx.listener(
                             move |this, _: &ClickEvent, _, cx| {
                                 this.headers.retain(|row| row.id != row_id);
@@ -1002,108 +979,152 @@ impl NewDownloadView {
                     ),
             );
         }
-        column.child(
-            div().child(
+        rows = rows.child(
+            h_flex().child(
                 Button::new("new-download-header-add")
-                    .ghost()
-                    .small()
-                    .h(CONTROL_HEIGHT)
-                    .icon(IconName::Plus)
+                    .outline()
+                    .icon(FluxIcon::Plus)
                     .label(self.strings.add_header.clone())
+                    .control(cx)
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.add_header_row(window, cx);
                     })),
             ),
+        );
+        form_field(
+            self.strings.headers.clone(),
+            rows,
+            Some(self.strings.headers_desc.clone()),
+            cx,
         )
     }
 
+    /// 「高级」折叠区：标题行可点击展开；展开后字段同样走 `form_field`，开关进 `option_group`。
     fn render_advanced(&self, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let extended = theme.extended().clone();
         let open = self.advanced_open;
-        let mut column = v_flex().gap(tokens.spacing.md).child(
-            h_flex()
-                .id("new-download-advanced-toggle")
-                .gap(tokens.spacing.xs)
-                .items_center()
-                .py(tokens.spacing.xs)
-                .cursor_pointer()
-                .text_color(tokens.colors.muted_foreground)
-                .child(
-                    Icon::new(if open {
-                        IconName::ChevronDown
-                    } else {
-                        IconName::ChevronRight
-                    })
-                    .size(px(14.)),
-                )
-                .child(div().text_xs().child(self.strings.advanced.clone()))
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.advanced_open = !this.advanced_open;
-                    cx.notify();
-                })),
-        );
+        let disclosure = h_flex()
+            .id("new-download-advanced-toggle")
+            .w_full()
+            .gap(tokens.spacing.xs)
+            .items_center()
+            .cursor_pointer()
+            .child(
+                Icon::new(if open {
+                    FluxIcon::ChevronDown
+                } else {
+                    FluxIcon::ChevronRight
+                })
+                .size(extended.icon.md)
+                .text_color(extended.colors.text_tertiary),
+            )
+            .child(
+                div()
+                    .text_size(tokens.typography.sm.size)
+                    .line_height(tokens.typography.sm.line_height)
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(tokens.colors.foreground)
+                    .child(self.strings.advanced.clone()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .h(px(1.))
+                    .ml(tokens.spacing.sm)
+                    .bg(extended.colors.hairline),
+            )
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.advanced_open = !this.advanced_open;
+                cx.notify();
+            }));
+        let section = v_flex().w_full().gap(form_gap(cx)).child(disclosure);
         if !open {
-            return column;
+            return section;
         }
-        if !self.is_batch() && !self.all_magnet() {
-            column = column.child(self.render_http_auth(cx));
-        }
-        column
-            .child(self.render_proxy(cx))
-            .child(self.render_switch_row(
-                "new-download-ignore-tls",
-                self.strings.ignore_tls.clone(),
-                Some(self.strings.ignore_tls_desc.clone()),
-                self.ignore_tls_errors,
-                |this, checked| this.ignore_tls_errors = checked,
+        let show_auth = !self.is_batch() && !self.all_magnet();
+        let mut options = Vec::with_capacity(2);
+        if show_auth {
+            options.push(self.toggle(
+                "new-download-save-site-auth",
+                self.strings.http_auth_save.clone(),
+                None,
+                self.save_site_auth,
+                |this, checked| this.save_site_auth = checked,
                 cx,
-            ))
-            .child(self.render_user_agent(cx))
-            .child(self.render_cookie(cx))
-            .child(self.render_checksum(cx))
-            .child(self.render_headers(cx))
+            ));
+        }
+        options.push(self.toggle(
+            "new-download-ignore-tls",
+            self.strings.ignore_tls.clone(),
+            Some(self.strings.ignore_tls_desc.clone()),
+            self.ignore_tls_errors,
+            |this, checked| this.ignore_tls_errors = checked,
+            cx,
+        ));
+        let mut fields = form(cx);
+        if show_auth {
+            fields = fields.child(self.render_http_auth(cx));
+        }
+        section.child(
+            fields
+                .child(self.render_proxy(cx))
+                .child(self.render_user_agent(cx))
+                .child(self.render_cookie(cx))
+                .child(self.render_checksum(cx))
+                .child(self.render_headers(cx))
+                .child(option_group(options, cx)),
+        )
     }
 
     fn render_form(&self, cx: &mut Context<Self>) -> Div {
         let tokens = active_theme(cx).tokens().clone();
-        v_flex()
-            .w_full()
-            .px(tokens.spacing.md)
-            .pb(tokens.spacing.md)
-            .gap(tokens.spacing.md)
+        form(cx)
+            .px(tokens.spacing.lg)
+            .pt(tokens.spacing.xs)
+            .pb(tokens.spacing.lg)
             .child(self.render_urls(cx))
-            .child(self.render_save_dir_row(cx))
-            .when(!self.is_batch(), |this| this.child(self.render_rename(cx)))
+            .child(self.render_save_dir(cx))
+            .children(self.render_name_threads(cx))
             .child(self.render_advanced(cx))
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
         let enabled = self.can_submit(cx);
         let later_queue = self.queue_label(fluxdown_protocol::LATER_QUEUE_ID);
         let start_queue = self.queue_label(&self.context.queue_id);
+        // 分体按钮：两半统一控件高度（`Size::Size` 让右侧箭头半成为 28×28 方块，
+        // 文字取 `text_base` = 13px），左半主按钮再经 `control` 统一内边距。
+        let split_size = Size::Size(CONTROL_HEIGHT);
         h_flex()
             .w_full()
-            .p(tokens.spacing.md)
+            .flex_none()
+            .px(tokens.spacing.lg)
+            .py(tokens.spacing.md)
             .justify_end()
-            .gap(tokens.spacing.xs)
+            .gap(tokens.spacing.sm)
+            .bg(theme.extended().colors.chrome)
+            .border_t_1()
+            .border_color(theme.extended().colors.hairline)
             .child(
                 Button::new("new-download-cancel")
                     .outline()
-                    .small()
-                    .h(CONTROL_HEIGHT)
                     .label(self.strings.cancel.clone())
+                    .control(cx)
                     .on_click(|_, window, _| window.remove_window()),
             )
             .child(
                 DropdownButton::new("new-download-later")
                     .outline()
-                    .small()
-                    .h(CONTROL_HEIGHT)
+                    .with_size(split_size)
                     .disabled(!enabled)
                     .button(
                         Button::new("new-download-later-main")
                             .label(self.strings.download_later.clone())
+                            .control(cx)
                             .tooltip(self.strings.format_later_tooltip(&later_queue))
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.submit(true, None, window, cx);
@@ -1114,12 +1135,12 @@ impl NewDownloadView {
             .child(
                 DropdownButton::new("new-download-start")
                     .primary()
-                    .small()
-                    .h(CONTROL_HEIGHT)
+                    .with_size(split_size)
                     .disabled(!enabled)
                     .button(
                         Button::new("new-download-start-main")
                             .label(self.strings.format_start(self.entries.len()))
+                            .control(cx)
                             .tooltip(self.strings.format_start_tooltip(&start_queue))
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.submit(false, None, window, cx);
@@ -1144,7 +1165,6 @@ impl Render for NewDownloadView {
                     .min_h_0()
                     .child(self.render_form(cx).overflow_y_scrollbar()),
             )
-            .child(div().h(px(1.)).w_full().bg(tokens.colors.border))
             .child(self.render_footer(cx))
     }
 }

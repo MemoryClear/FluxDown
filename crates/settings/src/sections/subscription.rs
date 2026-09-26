@@ -2,10 +2,10 @@
 
 use fluxdown_protocol::method;
 use fluxdown_ui_components::{ButtonVariant, button};
-use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
+use fluxdown_ui_theme::active_theme;
 use gpui::{
     App, AppContext as _, Entity, IntoElement as _, ParentElement, SharedString, Styled,
-    Subscription, Window, div, px,
+    Subscription, Window, px,
 };
 use gpui_component::{
     h_flex,
@@ -16,7 +16,7 @@ use serde_json::json;
 
 use super::SectionContext;
 use crate::store::SettingsStore;
-use crate::ui::{Control, SettingsRow};
+use crate::ui::{Control, SettingsRow, body_text, meta_text};
 
 struct TextareaSlot {
     state: Entity<TextareaState>,
@@ -177,10 +177,9 @@ pub(crate) fn status_item(
             .child(
                 v_flex()
                     .gap(tokens.spacing.xxs)
-                    .child(div().text_sm().child(SharedString::from(status)))
+                    .child(body_text(cx).child(SharedString::from(status)))
                     .child(
-                        div()
-                            .text_xs()
+                        meta_text(cx)
                             .text_color(if last_failed {
                                 tokens.colors.destructive
                             } else {
@@ -204,7 +203,6 @@ pub(crate) fn status_item(
                     ButtonVariant::Secondary,
                     cx,
                 )
-                .h(CONTROL_HEIGHT)
                 .disabled(busy)
                 .on_click(move |_, _, cx| {
                     click_store.update(cx, |store, cx| {

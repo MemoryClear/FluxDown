@@ -3070,6 +3070,7 @@ dependencies = [
  "directories",
  "fluxdown_protocol",
  "fluxdown_ui_account",
+ "fluxdown_ui_components",
  "fluxdown_ui_downloads",
  "fluxdown_ui_extensions",
  "fluxdown_ui_i18n",
@@ -3102,6 +3103,7 @@ dependencies = [
  "fluxdown_ui_theme",
  "gpui",
  "gpui-base",
+ "gpui-component",
 ]
 
 [[package]]
@@ -3125,6 +3127,7 @@ name = "fluxdown_ui_extensions"
 version = "0.1.0"
 dependencies = [
  "fluxdown_protocol",
+ "fluxdown_ui_components",
  "fluxdown_ui_i18n",
  "fluxdown_ui_theme",
  "gpui",
@@ -3145,6 +3148,7 @@ name = "fluxdown_ui_rss"
 version = "0.1.0"
 dependencies = [
  "fluxdown_protocol",
+ "fluxdown_ui_components",
  "fluxdown_ui_i18n",
  "fluxdown_ui_theme",
  "gpui",

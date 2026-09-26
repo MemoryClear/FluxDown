@@ -15,8 +15,9 @@ use crate::{
         RevealSelected, SelectAllTasks, ToggleBoostSelected, ToggleDetailPanel,
         TogglePauseSelected,
     },
-    components::task_table::{
-        DownloadTableDelegate, SelectionSummary, TableFilter, ToolbarCommand,
+    components::{
+        task_table::{DownloadTableDelegate, SelectionSummary, TableFilter, ToolbarCommand},
+        title_bar::DownloadTitleBar,
     },
     controller::{
         DownloadsCommand, DownloadsController, DownloadsPort, LAST_SAVE_DIR_PREF,
@@ -32,16 +33,15 @@ use crate::{
     pages::task_detail::TaskDetailView,
     strings::DownloadStrings,
 };
+use fluxdown_ui_components::{ControlExt as _, FluxIcon, TOOLBAR_BUTTON_SIZE};
 use fluxdown_ui_i18n::Translator;
 use gpui::{
-    App, AppContext as _, ClipboardItem, Context, Entity, ExternalPaths, FocusHandle,
+    App, AppContext as _, ClipboardItem, Context, Entity, ExternalPaths, FocusHandle, FontWeight,
     InteractiveElement as _, IntoElement, ParentElement, PathPromptOptions, Render, SharedString,
     Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Icon, IconName, ResizableState, Sizable as _, Size, WindowExt as _,
-    button::{Button, ButtonVariants as _},
-    h_flex, h_resizable,
+    Icon, ResizableState, WindowExt as _, h_flex, h_resizable,
     input::{Input, InputEvent, InputState},
     resizable_panel,
     table::{TableEvent, TableState},
@@ -105,7 +105,7 @@ pub struct DownloadView {
     /// 根元素 focus handle：右键菜单 action_context 分派目标，`escape`
     /// 清空搜索框后也交回给它。
     pub(crate) focus_handle: FocusHandle,
-    /// 工具栏搜索框状态。
+    /// 顶栏搜索框状态（输入框渲染在 [`DownloadTitleBar`] 插槽里）。
     pub(crate) search_input: Entity<InputState>,
     /// 已下发给搜索框的 placeholder（语言切换后需重下发）。
     search_placeholder: SharedString,
@@ -118,8 +118,8 @@ pub struct DownloadView {
     pub(crate) detail: Option<Entity<TaskDetailView>>,
     /// 详情面板 / 主内容拆分的独立 resizable 状态。
     pub(crate) detail_resizable_state: Entity<ResizableState>,
-    /// 上次渲染时的工具栏选中投影；表格选中变化时与之比较，变了才重绘本页。
-    pub(crate) toolbar_selection: Cell<SelectionSummary>,
+    /// 上次渲染时的选中投影；表格选中变化时与之比较，变了才重绘本页（浮动选择条）。
+    pub(crate) selection_summary: Cell<SelectionSummary>,
 }
 
 impl DownloadView {
@@ -163,12 +163,12 @@ impl DownloadView {
         .detach();
         cx.subscribe_in(&table_state, window, Self::handle_table_event)
             .detach();
-        // 选中变化只通知表格实体；工具栏按钮可用性依赖它，按投影差异重绘本页，
+        // 选中变化只通知表格实体；浮动选择条依赖它，按投影差异重绘本页，
         // 避免表格滚动 / 悬停等高频 notify 带着整页重绘。
         cx.observe(&table_state, |this, table_state, cx| {
             let selection = table_state.read(cx).delegate().selection_summary();
-            if this.toolbar_selection.get() != selection {
-                this.toolbar_selection.set(selection);
+            if this.selection_summary.get() != selection {
+                this.selection_summary.set(selection);
                 cx.notify();
             }
         })
@@ -202,13 +202,22 @@ impl DownloadView {
             prefs_loaded: false,
             detail: None,
             detail_resizable_state: cx.new(|_| ResizableState::default()),
-            toolbar_selection: Cell::new(SelectionSummary::default()),
+            selection_summary: Cell::new(SelectionSummary::default()),
         }
     }
 
     /// 注入宿主入口（新建下载 / 任务窗口 / 队列管理…）。
     pub fn set_host_actions(&mut self, host: DownloadHostActions) {
         self.host = host;
+    }
+
+    /// 创建挂到 shell 统一顶栏的下载页插槽（搜索、视图选项、新建）。
+    pub fn new_title_bar(&self, cx: &mut Context<Self>) -> Entity<DownloadTitleBar> {
+        let view = cx.entity();
+        let translator = self.translator.clone();
+        let search_input = self.search_input.clone();
+        let table_state = self.table_state.clone();
+        cx.new(|cx| DownloadTitleBar::new(&view, translator, search_input, table_state, cx))
     }
 
     /// 「新建下载」表单的环境快照：保存目录 / 默认队列 / 线程数初值与队列候选。
@@ -594,9 +603,6 @@ impl DownloadView {
             }
             _ => {}
         }
-        if table_state.update(cx, |table, _| table.delegate_mut().take_sort_changed()) {
-            self.schedule_persist_prefs(cx);
-        }
     }
 
     /// 双击非完成行：打开 / 聚焦停靠详情面板并切换到该任务。
@@ -709,14 +715,6 @@ impl DownloadView {
         .detach();
     }
 
-    /// 供弹出层（列菜单等）触发偏好写回的句柄。
-    pub(crate) fn persist_prefs_handle(&self, cx: &Context<Self>) -> Rc<dyn Fn(&mut App)> {
-        let this = cx.weak_entity();
-        Rc::new(move |cx: &mut App| {
-            let _ = this.update(cx, |this, cx| this.schedule_persist_prefs(cx));
-        })
-    }
-
     pub(crate) fn mutate_prefs(
         &mut self,
         mutate: impl FnOnce(&mut ViewPrefs),
@@ -769,7 +767,7 @@ impl DownloadView {
     }
 
     /// 搜索框内 `escape`：清空查询并把焦点交回下载页根元素。
-    fn on_search_escape(
+    pub(crate) fn on_search_escape(
         &mut self,
         _: &gpui_component::input::Escape,
         window: &mut Window,
@@ -808,6 +806,7 @@ impl DownloadView {
             .map(|row| row.name.clone())
             .unwrap_or_default();
         let title = self.strings.rename_task_title.clone();
+        let field_label = self.strings.col_file_name.clone();
         let placeholder = self.strings.rename_task_placeholder.clone();
         let ok_label = self.strings.confirm.clone();
         let cancel_label = self.strings.cancel.clone();
@@ -818,21 +817,31 @@ impl DownloadView {
         });
         let dialog_input = input.clone();
         let this = cx.weak_entity();
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, _, cx| {
             let content_input = dialog_input.clone();
             let ok_input = dialog_input.clone();
             let this = this.clone();
             let task_id = task_id.clone();
+            let field_label = field_label.clone();
             dialog
-                .title(title.clone())
-                .content(move |content, _, _| {
-                    content.child(Input::new(&content_input).with_size(Size::Medium).w_full())
+                .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
+                .w(px(520.))
+                .content(move |content, _, cx| {
+                    content.child(fluxdown_ui_components::form(cx).child(
+                        fluxdown_ui_components::form_field(
+                            field_label.clone(),
+                            Input::new(&content_input).control(cx).w_full(),
+                            None,
+                            cx,
+                        ),
+                    ))
                 })
-                .button_props(
-                    gpui_component::dialog::DialogButtonProps::default()
-                        .ok_text(ok_label.clone())
-                        .cancel_text(cancel_label.clone()),
-                )
+                .footer(fluxdown_ui_components::dialog_footer(
+                    Some(cancel_label.clone()),
+                    ok_label.clone(),
+                    fluxdown_ui_components::DialogIntent::Confirm,
+                    cx,
+                ))
                 .on_ok(move |_, _, cx| {
                     let file_name = ok_input.read(cx).value().trim().to_owned();
                     if file_name.is_empty() {
@@ -863,17 +872,18 @@ impl DownloadView {
         let ok_label = self.strings.ignore_plugin_retry.clone();
         let cancel_label = self.strings.cancel.clone();
         let this = cx.weak_entity();
-        window.open_alert_dialog(cx, move |dialog, _, _| {
+        window.open_alert_dialog(cx, move |dialog, _, cx| {
             let this = this.clone();
             let task_id = task_id.clone();
             dialog
-                .title(title.clone())
+                .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
                 .description(description.clone())
-                .button_props(
-                    gpui_component::dialog::DialogButtonProps::default()
-                        .ok_text(ok_label.clone())
-                        .cancel_text(cancel_label.clone()),
-                )
+                .footer(fluxdown_ui_components::dialog_footer(
+                    Some(cancel_label.clone()),
+                    ok_label.clone(),
+                    fluxdown_ui_components::DialogIntent::Confirm,
+                    cx,
+                ))
                 .on_ok(move |_, _, cx| {
                     let task_id = task_id.clone();
                     let _ = this.update(cx, |this, cx| {
@@ -984,18 +994,18 @@ impl DownloadView {
         let ok_label = self.strings.delete.clone();
         let cancel_label = self.strings.cancel.clone();
         let this = cx.weak_entity();
-        window.open_alert_dialog(cx, move |dialog, _, _| {
+        window.open_alert_dialog(cx, move |dialog, _, cx| {
             let this = this.clone();
             let group_id = group_id.clone();
             dialog
-                .title(title.clone())
+                .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
                 .description(description.clone())
-                .button_props(
-                    gpui_component::dialog::DialogButtonProps::default()
-                        .ok_text(ok_label.clone())
-                        .ok_variant(gpui_component::button::ButtonVariant::Danger)
-                        .cancel_text(cancel_label.clone()),
-                )
+                .footer(fluxdown_ui_components::dialog_footer(
+                    Some(cancel_label.clone()),
+                    ok_label.clone(),
+                    fluxdown_ui_components::DialogIntent::Destructive,
+                    cx,
+                ))
                 .on_ok(move |_, _, cx| {
                     let group_id = group_id.clone();
                     let _ = this.update(cx, |this, cx| {
@@ -1077,6 +1087,11 @@ impl DownloadView {
     }
 
     fn on_clear_selection(&mut self, _: &ClearSelection, _: &mut Window, cx: &mut Context<Self>) {
+        self.clear_table_selection(cx);
+    }
+
+    /// 清空表格选中（Esc 快捷键与浮动选择条「取消选择」共用）。
+    pub(crate) fn clear_table_selection(&mut self, cx: &mut Context<Self>) {
         self.table_state.update(cx, |table, cx| {
             table.delegate_mut().clear_selection();
             cx.notify();
@@ -1155,18 +1170,18 @@ impl DownloadView {
         let ok_label = self.strings.delete.clone();
         let cancel_label = self.strings.cancel.clone();
         let this = cx.weak_entity();
-        window.open_alert_dialog(cx, move |dialog, _, _| {
+        window.open_alert_dialog(cx, move |dialog, _, cx| {
             let this = this.clone();
             let keys = keys.clone();
             dialog
-                .title(title.clone())
+                .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
                 .description(description.clone())
-                .button_props(
-                    gpui_component::dialog::DialogButtonProps::default()
-                        .ok_text(ok_label.clone())
-                        .ok_variant(gpui_component::button::ButtonVariant::Danger)
-                        .cancel_text(cancel_label.clone()),
-                )
+                .footer(fluxdown_ui_components::dialog_footer(
+                    Some(cancel_label.clone()),
+                    ok_label.clone(),
+                    fluxdown_ui_components::DialogIntent::Destructive,
+                    cx,
+                ))
                 .on_ok(move |_, _, cx| {
                     let commands: Vec<DownloadsCommand> = keys
                         .iter()
@@ -1409,49 +1424,66 @@ impl DownloadView {
         self.execute_commands(commands, cx);
     }
 
-    /// 工具栏右侧插槽：搜索框（P1.5）。
-    pub(crate) fn render_toolbar_trailing(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
-        let tokens = fluxdown_ui_theme::active_theme(cx).tokens();
-        vec![
-            div()
-                .id("download-search-box")
-                .w(px(220.))
-                .on_action(cx.listener(Self::on_search_escape))
-                .child(
-                    Input::new(&self.search_input)
-                        .with_size(Size::Medium)
-                        .cleanable(true)
-                        .prefix(
-                            Icon::new(IconName::Search)
-                                .size(px(13.))
-                                .text_color(tokens.colors.muted_foreground),
-                        ),
-                )
-                .into_any_element(),
-        ]
+    /// 错误 / 断连提示：紧凑的 destructive 文字条，可关闭。
+    fn render_error_strip(&self, error: SharedString, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = fluxdown_ui_theme::active_theme(cx);
+        let tokens = theme.tokens();
+        let spacing = tokens.spacing;
+        let text_size = tokens.typography.xs.size;
+        let line_height = tokens.typography.xs.line_height;
+        let destructive = tokens.colors.destructive;
+        let icon_size = theme.extended().icon.sm;
+        let close_label = SharedString::from(self.translator.read(cx).text("close").to_owned());
+        let dismiss = self.icon_action(
+            "download-error-dismiss",
+            close_label,
+            Icon::new(FluxIcon::X).size(icon_size),
+            false,
+            |this, _, cx| {
+                this.last_error = None;
+                cx.notify();
+            },
+            cx,
+        );
+        h_flex()
+            .w_full()
+            .flex_none()
+            .items_center()
+            .gap(spacing.sm)
+            .pl(spacing.md)
+            .pr(spacing.xs)
+            .text_size(text_size)
+            .line_height(line_height)
+            .text_color(destructive)
+            .child(div().flex_1().min_w_0().truncate().child(error))
+            .child(dismiss)
+            .into_any_element()
     }
 
     pub(crate) fn render_main(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let tokens = fluxdown_ui_theme::active_theme(cx).tokens().clone();
+        let surface = fluxdown_ui_theme::active_theme(cx).tokens().colors.surface;
         let prefs = self.table_state.read(cx).delegate().prefs().clone();
+        let error_strip = self
+            .last_error
+            .clone()
+            .map(|error| self.render_error_strip(error, cx));
+        let table = self.render_table(cx);
+        let selection_bar = self.render_selection_bar(cx);
         let content = v_flex()
             .size_full()
             .min_w_0()
             .min_h_0()
-            .child(self.render_toolbar(cx))
-            .when_some(self.last_error.clone(), |this, error| {
-                this.child(
-                    div()
-                        .w_full()
-                        .px_3()
-                        .py_2()
-                        .border_b_1()
-                        .border_color(tokens.colors.border)
-                        .text_sm()
-                        .child(error),
-                )
-            })
-            .child(self.render_table(cx));
+            .children(error_strip)
+            .child(
+                // 表格区域：浮动选择条相对它底部居中定位。
+                v_flex()
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .child(table)
+                    .children(selection_bar),
+            );
 
         let body: gpui::AnyElement = if prefs.detail_open {
             let panel = self.render_detail_panel(cx);
@@ -1493,26 +1525,70 @@ impl DownloadView {
             content.into_any_element()
         };
 
-        v_flex()
+        // 侧栏 | 内容的结构线由 resizable 把手绘制（主题已映射为 hairline），这里不再画边框。
+        div()
             .size_full()
             .min_w_0()
             .min_h_0()
-            .bg(tokens.colors.surface)
-            .child(div().flex_1().min_h_0().min_w_0().child(body))
-            .child(self.render_status_bar(cx))
+            .bg(surface)
+            .child(body)
             .into_any_element()
     }
 
     fn render_detail_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let tokens = fluxdown_ui_theme::active_theme(cx).tokens().clone();
+        let theme = fluxdown_ui_theme::active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let icon_size = theme.extended().icon.md;
+        let hairline = theme.extended().colors.hairline;
+        let tertiary = theme.extended().colors.text_tertiary;
         let placement = self
             .table_state
             .read(cx)
             .delegate()
             .prefs()
             .detail_placement;
-        let title = self.translator.read(cx).text("detail").to_owned();
-        let hint = self.translator.read(cx).text("selectTaskHint").to_owned();
+        let translator = self.translator.read(cx);
+        let title = translator.text("detail").to_owned();
+        let hint = translator.text("selectTaskHint").to_owned();
+        // 切换按钮指向「切换后」的位置。
+        let (placement_icon, placement_label) = if placement == DetailPlacement::Bottom {
+            (
+                FluxIcon::PanelRight,
+                translator.text("viewDetailRight").to_owned(),
+            )
+        } else {
+            (
+                FluxIcon::PanelBottom,
+                translator.text("viewDetailBottom").to_owned(),
+            )
+        };
+        let close_label = SharedString::from(translator.text("close").to_owned());
+        let pop_out_label = self.strings.open_in_window.clone();
+        let toggle_position = self.icon_action(
+            "detail-panel-toggle-position",
+            SharedString::from(placement_label),
+            Icon::new(placement_icon).size(icon_size),
+            false,
+            |this, _, cx| this.on_toggle_detail_placement(cx),
+            cx,
+        );
+        let pop_out = self.icon_action(
+            "detail-panel-pop-out",
+            pop_out_label,
+            Icon::new(FluxIcon::AppWindow).size(icon_size),
+            false,
+            |this, window, cx| this.on_pop_out_detail(window, cx),
+            cx,
+        );
+        let close = self.icon_action(
+            "detail-panel-close",
+            close_label,
+            Icon::new(FluxIcon::X).size(icon_size),
+            false,
+            |this, _, cx| this.on_close_detail_panel(cx),
+            cx,
+        );
+
         v_flex()
             .size_full()
             .min_h_0()
@@ -1520,58 +1596,27 @@ impl DownloadView {
             .bg(tokens.colors.surface)
             .child(
                 h_flex()
-                    .h(px(36.))
+                    // 面板头：28 的图标按钮上下各留 spacing.xxs。
+                    .h(TOOLBAR_BUTTON_SIZE + tokens.spacing.xs)
                     .flex_none()
                     .items_center()
                     .justify_between()
-                    .px(tokens.spacing.sm)
+                    .pl(tokens.spacing.md)
+                    .pr(tokens.spacing.xxs)
                     .border_b_1()
-                    .border_color(tokens.colors.border)
+                    .border_color(hairline)
                     .child(
                         div()
                             .text_size(tokens.typography.sm.size)
-                            .font_weight(tokens.typography.sm.weight)
+                            .font_weight(FontWeight::MEDIUM)
                             .child(title),
                     )
                     .child(
                         h_flex()
                             .gap(tokens.spacing.xxs)
-                            .child(
-                                Button::new("detail-panel-toggle-position")
-                                    .ghost()
-                                    .xsmall()
-                                    .compact()
-                                    .icon(if placement == DetailPlacement::Bottom {
-                                        IconName::PanelRight
-                                    } else {
-                                        IconName::PanelBottom
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.on_toggle_detail_placement(cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("detail-panel-pop-out")
-                                    .ghost()
-                                    .xsmall()
-                                    .compact()
-                                    .icon(IconName::ExternalLink)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.on_pop_out_detail(window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("detail-panel-close")
-                                    .ghost()
-                                    .xsmall()
-                                    .compact()
-                                    .icon(IconName::Close)
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| {
-                                            this.on_close_detail_panel(cx)
-                                        }),
-                                    ),
-                            ),
+                            .child(toggle_position)
+                            .child(pop_out)
+                            .child(close),
                     ),
             )
             .child(
@@ -1582,14 +1627,19 @@ impl DownloadView {
                     .when_some(self.detail.clone(), |this, detail| this.child(detail))
                     .when(self.detail.is_none(), |this| {
                         this.child(
-                            div()
+                            v_flex()
                                 .size_full()
-                                .flex()
                                 .items_center()
                                 .justify_center()
-                                .text_color(tokens.colors.muted_foreground)
-                                .text_sm()
-                                .child(hint),
+                                .gap(tokens.spacing.sm)
+                                .child(Icon::new(FluxIcon::File).size(px(32.)).text_color(tertiary))
+                                .child(
+                                    div()
+                                        .text_size(tokens.typography.xs.size)
+                                        .line_height(tokens.typography.xs.line_height)
+                                        .text_color(tokens.colors.muted_foreground)
+                                        .child(hint),
+                                ),
                         )
                     }),
             )
@@ -1615,7 +1665,7 @@ impl Render for DownloadView {
             });
         }
         let sidebar_width = self.table_state.read(cx).delegate().prefs().sidebar_width;
-        div()
+        v_flex()
             .key_context(KEY_CONTEXT)
             .size_full()
             .min_w_0()
@@ -1652,26 +1702,29 @@ impl Render for DownloadView {
                 style.bg(tokens.colors.accent.opacity(0.2))
             })
             .child(
-                h_resizable("downloads-content")
-                    .with_state(&self.resizable_state)
-                    .on_resize(cx.listener(|this, state: &Entity<ResizableState>, _, cx| {
-                        state.update(cx, |state, cx| state.reset_panel(1, cx));
-                        if let Some(width) = state.read(cx).sizes().first().copied() {
-                            let width = f32::from(width);
-                            if width > 0. {
-                                this.mutate_prefs(|prefs| prefs.sidebar_width = width, cx);
+                div().flex_1().min_h_0().min_w_0().child(
+                    h_resizable("downloads-content")
+                        .with_state(&self.resizable_state)
+                        .on_resize(cx.listener(|this, state: &Entity<ResizableState>, _, cx| {
+                            state.update(cx, |state, cx| state.reset_panel(1, cx));
+                            if let Some(width) = state.read(cx).sizes().first().copied() {
+                                let width = f32::from(width);
+                                if width > 0. {
+                                    this.mutate_prefs(|prefs| prefs.sidebar_width = width, cx);
+                                }
                             }
-                        }
-                    }))
-                    .child(
-                        resizable_panel()
-                            .size(px(sidebar_width))
-                            .flex_none()
-                            .size_range(px(148.)..px(280.))
-                            .child(self.render_sidebar(window, cx)),
-                    )
-                    .child(resizable_panel().child(self.render_main(cx))),
+                        }))
+                        .child(
+                            resizable_panel()
+                                .size(px(sidebar_width))
+                                .flex_none()
+                                .size_range(px(176.)..px(300.))
+                                .child(self.render_sidebar(window, cx)),
+                        )
+                        .child(resizable_panel().child(self.render_main(cx))),
+                ),
             )
+            .child(self.render_status_bar(cx))
     }
 }
 

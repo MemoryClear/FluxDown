@@ -1,7 +1,7 @@
 //! 通用：启动与托盘、系统集成、侧边栏与活动栏可见性、自定义分类。
 
+use fluxdown_ui_components::FluxIcon;
 use gpui::App;
-use gpui_component::IconName;
 
 use super::{SectionContext, categories};
 use crate::ui::{Control, SettingsPage, SettingsSection};
@@ -16,7 +16,7 @@ pub(crate) fn page(ctx: &SectionContext, cx: &mut App) -> SettingsPage {
         "general",
         ctx.t("settingsCatGeneral"),
         ctx.t("settingsCatGeneralDesc"),
-        IconName::Settings2,
+        FluxIcon::Settings,
     )
     .sections([
         startup_section(ctx, cx),

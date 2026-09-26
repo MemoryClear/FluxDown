@@ -1,21 +1,23 @@
 //! Doctor：环境自检报告与就地修复。检查项 `id`/`hint`/`repair.action` 由 agent 给出。
 
 use fluxdown_protocol::{DiagnosticLevel, DiagnosticRepairParams, method};
-use fluxdown_ui_components::{ButtonVariant, button};
-use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
-use gpui::{App, ClipboardItem, IntoElement as _, ParentElement, SharedString, Styled, div};
-use gpui_component::{IconName, h_flex, v_flex};
+use fluxdown_ui_components::{ButtonVariant, FluxIcon, button};
+use fluxdown_ui_theme::active_theme;
+use gpui::{
+    App, ClipboardItem, FontWeight, IntoElement as _, ParentElement, SharedString, Styled, div, px,
+};
+use gpui_component::{h_flex, v_flex};
 use serde_json::json;
 
 use super::{SectionContext, camel};
-use crate::ui::{SettingsPage, SettingsRow, SettingsSection};
+use crate::ui::{SettingsPage, SettingsRow, SettingsSection, body_text, meta_text, row_button};
 
 pub(crate) fn page(ctx: &SectionContext, _cx: &mut App) -> SettingsPage {
     SettingsPage::new(
         "doctor",
         ctx.t("settingsCatDoctor"),
         ctx.t("settingsCatDoctorDesc"),
-        IconName::Info,
+        FluxIcon::Gauge,
     )
     .sections([SettingsSection::new()
         .title(ctx.t("doctorTitle"))
@@ -61,8 +63,7 @@ fn toolbar_item(ctx: &SectionContext) -> SettingsRow {
             .justify_between()
             .gap(tokens.spacing.md)
             .child(
-                div()
-                    .text_sm()
+                body_text(cx)
                     .text_color(tokens.colors.muted_foreground)
                     .child(SharedString::from(summary)),
             )
@@ -71,7 +72,6 @@ fn toolbar_item(ctx: &SectionContext) -> SettingsRow {
                     .gap(tokens.spacing.sm)
                     .child(
                         button("doctor-copy", copy.clone(), ButtonVariant::Secondary, cx)
-                            .h(CONTROL_HEIGHT)
                             .disabled(disabled || copy_report.is_none())
                             .on_click(move |_, _, cx| {
                                 if let Some(report) = &copy_report {
@@ -88,7 +88,6 @@ fn toolbar_item(ctx: &SectionContext) -> SettingsRow {
                             ButtonVariant::Primary,
                             cx,
                         )
-                        .h(CONTROL_HEIGHT)
                         .disabled(disabled || busy)
                         .on_click(move |_, _, cx| {
                             run_store.update(cx, |store, cx| store.run_diagnostics(cx));
@@ -104,7 +103,9 @@ fn report_item(ctx: &SectionContext) -> SettingsRow {
     let store = ctx.store();
     let translator = ctx.translator.clone();
     SettingsRow::custom(move |disabled, _key, _window, cx: &mut App| {
-        let tokens = active_theme(cx).tokens();
+        let theme = active_theme(cx);
+        let tokens = theme.tokens();
+        let extended = theme.extended().colors;
         let Some(report) = store.read(cx).diagnostics().cloned() else {
             return div().into_any_element();
         };
@@ -124,8 +125,8 @@ fn report_item(ctx: &SectionContext) -> SettingsRow {
                 DiagnosticLevel::Info => "doctorLevelInfo",
             };
             let level_color = match check.level {
-                DiagnosticLevel::Ok => tokens.colors.primary,
-                DiagnosticLevel::Warn => tokens.colors.accent_foreground,
+                DiagnosticLevel::Ok => extended.success,
+                DiagnosticLevel::Warn => extended.warning,
                 DiagnosticLevel::Error => tokens.colors.destructive,
                 DiagnosticLevel::Info => tokens.colors.muted_foreground,
             };
@@ -142,11 +143,12 @@ fn report_item(ctx: &SectionContext) -> SettingsRow {
                 .py(tokens.spacing.xs)
                 .rounded(tokens.radius.md)
                 .border_1()
-                .border_color(tokens.colors.border)
+                .border_color(extended.hairline)
                 .child(
-                    div()
-                        .min_w_16()
-                        .text_xs()
+                    meta_text(cx)
+                        .flex_none()
+                        .w(px(64.))
+                        .font_weight(FontWeight::MEDIUM)
                         .text_color(level_color)
                         .child(SharedString::from(translator.text(level_key).to_owned())),
                 )
@@ -155,17 +157,11 @@ fn report_item(ctx: &SectionContext) -> SettingsRow {
                         .flex_1()
                         .min_w_0()
                         .gap(tokens.spacing.xxs)
-                        .child(div().text_sm().child(SharedString::from(title)))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(tokens.colors.muted_foreground)
-                                .child(SharedString::from(check.detail.clone())),
-                        )
+                        .child(body_text(cx).child(SharedString::from(title)))
+                        .child(meta_text(cx).child(SharedString::from(check.detail.clone())))
                         .children(hint.map(|hint| {
-                            div()
-                                .text_xs()
-                                .text_color(tokens.colors.accent_foreground)
+                            meta_text(cx)
+                                .text_color(tokens.colors.foreground)
                                 .child(SharedString::from(hint))
                         })),
                 );
@@ -175,13 +171,12 @@ fn report_item(ctx: &SectionContext) -> SettingsRow {
                 let repair_store = store.clone();
                 let params = repair.clone();
                 row = row.child(
-                    button(
+                    row_button(
                         SharedString::from(format!("doctor-repair-{}-{}", check.id, check.target)),
                         label,
                         ButtonVariant::Secondary,
                         cx,
                     )
-                    .h(CONTROL_HEIGHT)
                     .disabled(disabled || busy)
                     .on_click(move |_, _, cx| {
                         let params = params.clone();

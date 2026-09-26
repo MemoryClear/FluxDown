@@ -1,7 +1,7 @@
 //! BitTorrent：基础（DHT/UPnP/端口）、Tracker（列表 + 订阅）、做种。
 
+use fluxdown_ui_components::FluxIcon;
 use gpui::{App, SharedString};
-use gpui_component::IconName;
 
 use super::{SectionContext, subscription};
 use crate::ui::{SettingsPage, SettingsSection, SettingsTab};
@@ -11,7 +11,7 @@ pub(crate) fn page(ctx: &SectionContext, cx: &mut App) -> SettingsPage {
         "bt",
         ctx.t("settingsCatBt"),
         ctx.t("settingsCatBtDesc"),
-        IconName::HardDrive,
+        FluxIcon::Magnet,
     )
     .tab(SettingsTab::new("basic", ctx.t("settingsTabGeneral")).section(basic_section(ctx)))
     .tab(SettingsTab::new("tracker", ctx.t("settingsTabTracker")).section(tracker_section(ctx, cx)))

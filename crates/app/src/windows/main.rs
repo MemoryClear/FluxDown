@@ -2,14 +2,15 @@
 
 use std::{rc::Rc, sync::Arc};
 
-use fluxdown_ui_downloads::{DOWNLOAD_ICON_PATH, DownloadHostActions, DownloadView};
+use fluxdown_ui_components::FluxIcon;
+use fluxdown_ui_downloads::{DownloadHostActions, DownloadView};
 use fluxdown_ui_i18n::keys;
-use fluxdown_ui_rss::{RSS_ICON_PATH, RssView};
+use fluxdown_ui_rss::RssView;
 use fluxdown_ui_settings::WebhookView;
 use fluxdown_ui_shell::{RouteId, ShellAction, ShellRoute, ShellView, main_window_options};
 use fluxdown_ui_theme::{active_theme, toggle_theme};
 use gpui::{App, AppContext as _, Window, WindowHandle, px, size};
-use gpui_component::{Icon, IconName, Root};
+use gpui_component::{Icon, Root};
 
 use crate::{
     app::Desktop,
@@ -54,22 +55,25 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
         let rss = cx.new(|cx| RssView::new(translator.clone(), rss_port, window, cx));
         let webhooks =
             cx.new(|cx| WebhookView::new(translator.clone(), settings_store.clone(), cx));
+        let downloads_title_bar = downloads.update(cx, |downloads, cx| downloads.new_title_bar(cx));
 
+        // RSS / Webhook 暂无顶栏插槽：统一顶栏保持空白拖拽区。
         let routes = vec![
             ShellRoute::new(
                 RouteId::new("downloads"),
                 "activity-downloads",
                 "activity-downloads-tooltip",
                 keys::MOBILE_NAV_DOWNLOADS,
-                Icon::empty().path(DOWNLOAD_ICON_PATH),
+                Icon::new(FluxIcon::Download),
                 downloads.clone().into(),
-            ),
+            )
+            .with_title_bar(downloads_title_bar),
             ShellRoute::new(
                 RouteId::new("rss"),
                 "activity-rss",
                 "activity-rss-tooltip",
                 "sidebarRss",
-                Icon::empty().path(RSS_ICON_PATH),
+                Icon::new(FluxIcon::Rss),
                 rss.clone().into(),
             )
             .optional(true),
@@ -78,7 +82,7 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
                 "activity-webhooks",
                 "activity-webhooks-tooltip",
                 "webhookNavTitle",
-                Icon::new(IconName::Bell),
+                Icon::new(FluxIcon::Webhook),
                 webhooks.into(),
             )
             .optional(true),
@@ -90,9 +94,9 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
                 "activityThemeToggle",
                 |cx| {
                     if active_theme(cx).mode().is_dark() {
-                        Icon::new(IconName::Sun)
+                        Icon::new(FluxIcon::Sun)
                     } else {
-                        Icon::new(IconName::Moon)
+                        Icon::new(FluxIcon::Moon)
                     }
                 },
                 toggle_theme,
@@ -102,7 +106,7 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
                 "activity-settings",
                 "activity-settings-tooltip",
                 keys::SETTINGS,
-                Icon::new(IconName::Settings),
+                Icon::new(FluxIcon::Settings),
                 move |_, cx| crate::windows::settings::open(cx),
             ),
         ];

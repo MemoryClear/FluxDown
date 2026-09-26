@@ -57,11 +57,9 @@ pub mod keys {
     pub const STATUS_DOWNLOADING: &str = "statusDownloading";
     pub const STATUS_ERROR: &str = "statusError";
     pub const VIEW_COLUMNS_AT_LEAST_ONE: &str = "viewColumnsAtLeastOne";
-    pub const VIEW_COLUMNS_MENU_TITLE: &str = "viewColumnsMenuTitle";
     pub const VIEW_COLUMNS_RESET_ACTION: &str = "viewColumnsResetAction";
     pub const STATUS_PAUSED: &str = "statusPaused";
     pub const STATUS_SEEDING: &str = "statusSeeding";
-    pub const STOP_ALL: &str = "stopAll";
     pub const TAB_ALL: &str = "tabAll";
     pub const THEME_MODE: &str = "themeMode";
     pub const THEME_MODE_DARK: &str = "themeModeDark";

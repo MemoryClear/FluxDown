@@ -1,7 +1,7 @@
 //! eD2K：基础（Kad/UPnP/端口）、服务器（列表 + server.met 订阅）。
 
+use fluxdown_ui_components::FluxIcon;
 use gpui::App;
-use gpui_component::IconName;
 
 use super::{SectionContext, subscription};
 use crate::ui::{SettingsPage, SettingsSection, SettingsTab};
@@ -11,7 +11,7 @@ pub(crate) fn page(ctx: &SectionContext, cx: &mut App) -> SettingsPage {
         "ed2k",
         ctx.t("settingsCatEd2k"),
         ctx.t("settingsCatEd2kDesc"),
-        IconName::HardDrive,
+        FluxIcon::HardDrive,
     )
     .tab(SettingsTab::new("basic", ctx.t("settingsTabGeneral")).section(basic_section(ctx)))
     .tab(SettingsTab::new("servers", ctx.t("settingsTabServers")).section(servers_section(ctx, cx)))

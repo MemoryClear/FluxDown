@@ -17,15 +17,19 @@ use fluxdown_protocol::{
     AgentEvent, AgentSnapshot, CaptureOverridesDto, CaptureResolveParams, DaemonEvent,
     MAIN_QUEUE_ID, PendingCaptureDto, ServiceEvent,
 };
+use fluxdown_ui_components::{
+    ControlExt as _, FluxIcon, IconControlExt as _, card, field_hint, input_with_action,
+    tabular_numbers,
+};
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
 use gpui::{
     Anchor, App, AppContext as _, ClickEvent, Context, Div, Entity, EventEmitter,
     InteractiveElement as _, IntoElement, KeyBinding, ParentElement, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, Window, actions, div, prelude::FluentBuilder as _, px,
+    StatefulInteractiveElement as _, Styled, Window, actions, div, prelude::FluentBuilder as _,
 };
 use gpui_component::{
-    Disableable as _, Icon, IconName, Sizable as _, Size, StyledExt as _, WindowExt as _,
+    Disableable as _, Icon, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputState},
@@ -326,7 +330,9 @@ impl QuickCaptureView {
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let extended = theme.extended().clone();
         v_flex()
             .flex_shrink_0()
             .gap(tokens.spacing.sm)
@@ -340,15 +346,15 @@ impl QuickCaptureView {
                     .child(
                         div()
                             .flex_none()
-                            .size(px(28.))
+                            .size(CONTROL_HEIGHT)
                             .rounded(tokens.radius.md)
-                            .bg(tokens.colors.primary.opacity(0.12))
+                            .bg(tokens.colors.accent)
                             .flex()
                             .items_center()
                             .justify_center()
                             .child(
-                                Icon::new(IconName::ArrowDown)
-                                    .size(px(15.))
+                                Icon::new(FluxIcon::ArrowDown)
+                                    .size(extended.icon.lg)
                                     .text_color(tokens.colors.primary),
                             ),
                     )
@@ -357,38 +363,36 @@ impl QuickCaptureView {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(tokens.typography.md.size)
-                            .font_weight(tokens.typography.md.weight)
-                            .font_semibold()
+                            .text_size(extended.title.size)
+                            .line_height(extended.title.line_height)
+                            .font_weight(extended.title.weight)
                             .child(self.strings.title.clone()),
                     )
                     .child(self.render_queue_dropdown(cx)),
             )
             .child(
                 h_flex()
-                    .gap(tokens.spacing.xs)
+                    .gap(tokens.spacing.sm)
                     .items_center()
                     .child(
-                        Icon::new(IconName::Folder)
-                            .size(px(13.))
-                            .text_color(tokens.colors.muted_foreground),
+                        Icon::new(FluxIcon::FolderOpen)
+                            .size(extended.icon.md)
+                            .text_color(extended.colors.text_tertiary),
                     )
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(Input::new(&self.save_dir).with_size(Size::Medium)),
-                    )
-                    .child(
-                        Button::new("quick-capture-browse")
-                            .ghost()
-                            .small()
-                            .icon(IconName::FolderOpen)
-                            .tooltip(self.strings.browse.clone())
-                            .disabled(self.picking)
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.pick_save_dir(window, cx);
-                            })),
+                        div().flex_1().min_w_0().child(input_with_action(
+                            Input::new(&self.save_dir).control(cx).w_full(),
+                            Button::new("quick-capture-browse")
+                                .outline()
+                                .icon(FluxIcon::Ellipsis)
+                                .control_icon(cx)
+                                .tooltip(self.strings.browse.clone())
+                                .disabled(self.picking)
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.pick_save_dir(window, cx);
+                                })),
+                            cx,
+                        )),
                     ),
             )
     }
@@ -399,9 +403,8 @@ impl QuickCaptureView {
         let this = cx.weak_entity();
         Button::new("quick-capture-queue")
             .ghost()
-            .small()
-            .h(CONTROL_HEIGHT)
-            .icon(IconName::LayoutDashboard)
+            .control(cx)
+            .icon(FluxIcon::Layers)
             .label(current_label)
             .dropdown_caret(true)
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
@@ -424,44 +427,46 @@ impl QuickCaptureView {
     }
 
     fn render_row(&self, row: &CaptureRow, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let extended = theme.extended().clone();
         let transaction_id = row.dto.transaction_id.clone();
         let transaction_id_for_ignore = transaction_id.clone();
         let url = SharedString::from(row.dto.url.clone());
         let url_for_tooltip = url.clone();
-        v_flex()
+        card(cx)
+            .flex()
+            .flex_col()
             .flex_shrink_0()
             .gap(tokens.spacing.xs)
             .mx(tokens.spacing.md)
             .my(tokens.spacing.xs)
             .p(tokens.spacing.sm)
-            .rounded(tokens.radius.md)
-            .border_1()
-            .border_color(tokens.colors.border)
-            .bg(tokens.colors.surface)
             .child(
                 h_flex()
                     .items_center()
                     .gap(tokens.spacing.sm)
                     .child(
-                        Icon::new(IconName::File)
-                            .size(px(14.))
+                        Icon::new(FluxIcon::File)
+                            .size(extended.icon.lg)
                             .text_color(tokens.colors.muted_foreground),
                     )
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .child(Input::new(&row.file_name).with_size(Size::Medium)),
+                            .child(Input::new(&row.file_name).control(cx).w_full()),
                     )
                     .child(
                         div()
                             .flex_none()
                             .px(tokens.spacing.xs)
-                            .py(px(2.))
+                            .py(tokens.spacing.xxs)
                             .rounded(tokens.radius.sm)
                             .bg(tokens.colors.muted)
                             .text_size(tokens.typography.xs.size)
+                            .line_height(tokens.typography.xs.line_height)
+                            .font_features(tabular_numbers())
                             .text_color(tokens.colors.muted_foreground)
                             .child(row.size_label.clone()),
                     ),
@@ -471,14 +476,11 @@ impl QuickCaptureView {
                     .items_center()
                     .gap(tokens.spacing.sm)
                     .child(
-                        div()
+                        field_hint(url, cx)
                             .id(format!("quick-capture-url-{}", row.dto.transaction_id))
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(tokens.typography.xs.size)
-                            .text_color(tokens.colors.muted_foreground)
-                            .child(url)
                             .tooltip(move |window, cx| {
                                 Tooltip::new(url_for_tooltip.clone()).build(window, cx)
                             }),
@@ -486,8 +488,7 @@ impl QuickCaptureView {
                     .child(
                         Button::new(format!("quick-capture-ignore-{}", row.dto.transaction_id))
                             .ghost()
-                            .small()
-                            .h(CONTROL_HEIGHT)
+                            .control(cx)
                             .label(self.strings.ignore.clone())
                             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                 this.resolve(transaction_id_for_ignore.clone(), false, window, cx);
@@ -496,8 +497,7 @@ impl QuickCaptureView {
                     .child(
                         Button::new(format!("quick-capture-download-{}", row.dto.transaction_id))
                             .primary()
-                            .small()
-                            .h(CONTROL_HEIGHT)
+                            .control(cx)
                             .label(self.strings.download.clone())
                             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                 this.resolve(transaction_id.clone(), true, window, cx);
@@ -507,18 +507,22 @@ impl QuickCaptureView {
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let extended = theme.extended().clone();
         h_flex()
             .flex_shrink_0()
             .items_center()
             .justify_between()
             .px(tokens.spacing.md)
             .py(tokens.spacing.sm)
+            .bg(extended.colors.chrome)
+            .border_t_1()
+            .border_color(extended.colors.hairline)
             .child(
                 Button::new("quick-capture-more")
-                    .link()
-                    .small()
-                    .h(CONTROL_HEIGHT)
+                    .ghost()
+                    .control(cx)
                     .label(self.strings.more_options.clone())
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.open_more_options(window, cx);
@@ -527,12 +531,11 @@ impl QuickCaptureView {
             .when(self.rows.len() > 1, |footer| {
                 footer.child(
                     h_flex()
-                        .gap(tokens.spacing.xs)
+                        .gap(tokens.spacing.sm)
                         .child(
                             Button::new("quick-capture-ignore-all")
                                 .outline()
-                                .small()
-                                .h(CONTROL_HEIGHT)
+                                .control(cx)
                                 .label(self.strings.ignore_all.clone())
                                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                     this.resolve_all(false, window, cx);
@@ -541,8 +544,7 @@ impl QuickCaptureView {
                         .child(
                             Button::new("quick-capture-download-all")
                                 .primary()
-                                .small()
-                                .h(CONTROL_HEIGHT)
+                                .control(cx)
                                 .label(self.strings.download_all.clone())
                                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                     this.resolve_all(true, window, cx);
@@ -553,17 +555,26 @@ impl QuickCaptureView {
     }
 
     // 窗口首选高度最多按四行估算；滚动始终按实际内容溢出启用。
+    // 各段高度与布局一一对应（控件均为统一档 28）：
+    // - 头部：上 12 + 标题行 28 + 间距 8 + 目录行 28 + 下 8；
+    // - 卡片行：外边距 4×2 + 内边距 8×2 + 文件名行 28 + 间距 4 + 操作行 28；
+    // - 列表：上下内边距 4×2；底栏：上下 8×2 + 按钮 28 + 顶部 hairline 1；
+    // - 窗口描边：上下各 1。
     const MAX_VISIBLE_ROWS: usize = 4;
-    const ROW_HEIGHT: f32 = 76.;
-    const HEADER_HEIGHT: f32 = 92.;
-    const FOOTER_HEIGHT: f32 = 44.;
+    const ROW_HEIGHT: f32 = 84.;
+    const HEADER_HEIGHT: f32 = 84.;
+    const LIST_PADDING: f32 = 8.;
+    const FOOTER_HEIGHT: f32 = 45.;
+    const FRAME_BORDER: f32 = 2.;
 
     /// 给定行数的窗口高度：头部 + 卡片行（最多 4 行）+ 底栏。
     #[must_use]
     pub fn preferred_height_for(rows: usize) -> f32 {
         Self::HEADER_HEIGHT
             + Self::ROW_HEIGHT * rows.clamp(1, Self::MAX_VISIBLE_ROWS) as f32
+            + Self::LIST_PADDING
             + Self::FOOTER_HEIGHT
+            + Self::FRAME_BORDER
     }
 
     fn render_rows(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -600,7 +611,7 @@ impl Render for QuickCaptureView {
             .key_context(KEY_CONTEXT)
             .size_full()
             .overflow_hidden()
-            .bg(tokens.colors.background)
+            .bg(tokens.colors.surface)
             .rounded(tokens.radius.lg)
             .border_1()
             .border_color(tokens.colors.border)
@@ -609,13 +620,6 @@ impl Render for QuickCaptureView {
             }))
             .child(self.render_header(cx))
             .child(self.render_rows(cx))
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .h(px(1.))
-                    .w_full()
-                    .bg(tokens.colors.border),
-            )
             .child(self.render_footer(cx))
     }
 }

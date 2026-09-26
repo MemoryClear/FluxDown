@@ -321,16 +321,17 @@ pub fn confirm_active_tasks(
     let ok = translator.text("menuQuit").to_owned();
     let cancel = translator.text("cancel").to_owned();
     let on_ok = Rc::new(on_ok);
-    window.open_alert_dialog(cx, move |dialog, _, _| {
+    window.open_alert_dialog(cx, move |dialog, _, cx| {
         let on_ok = Rc::clone(&on_ok);
         dialog
-            .title(title.clone())
+            .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
             .description(hint.clone())
-            .button_props(
-                gpui_component::dialog::DialogButtonProps::default()
-                    .ok_text(ok.clone())
-                    .cancel_text(cancel.clone()),
-            )
+            .footer(fluxdown_ui_components::dialog_footer(
+                Some(cancel.clone().into()),
+                ok.clone(),
+                fluxdown_ui_components::DialogIntent::Confirm,
+                cx,
+            ))
             .on_ok(move |_, window, cx| {
                 on_ok(window, cx);
                 true

@@ -1,12 +1,12 @@
 //! 已保存的站点 HTTP Basic 凭据管理（只列站点与用户名，可逐条删除或清空）。
 
 use fluxdown_ui_components::{ButtonVariant, button};
-use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
-use gpui::{App, IntoElement as _, ParentElement, SharedString, Styled, div};
+use fluxdown_ui_theme::active_theme;
+use gpui::{App, IntoElement as _, ParentElement, SharedString, Styled};
 use gpui_component::{h_flex, v_flex};
 
 use super::SectionContext;
-use crate::ui::{SettingsRow, SettingsSection};
+use crate::ui::{SettingsRow, SettingsSection, body_text, meta_text, row_danger_button};
 
 pub(crate) fn group(ctx: &SectionContext, cx: &mut App) -> SettingsSection {
     if ctx.store.read(cx).site_auth().is_empty()
@@ -29,18 +29,15 @@ fn list_item(ctx: &SectionContext) -> SettingsRow {
     let delete = ctx.t("settingsSiteAuthDelete");
     let clear_all = ctx.t("settingsSiteAuthClearAll");
     SettingsRow::custom(move |_disabled, _key, _window, cx: &mut App| {
-        let tokens = active_theme(cx).tokens();
+        let theme = active_theme(cx);
+        let tokens = theme.tokens();
+        let extended = theme.extended().colors;
         let entries = store.read(cx).site_auth().to_vec();
         let busy = store.read(cx).is_busy("siteAuth");
         let clear_store = store.clone();
         let mut column = v_flex().w_full().gap(tokens.spacing.xs);
         if entries.is_empty() {
-            column = column.child(
-                div()
-                    .text_sm()
-                    .text_color(tokens.colors.muted_foreground)
-                    .child(empty.clone()),
-            );
+            column = column.child(meta_text(cx).child(empty.clone()));
         }
         for entry in entries {
             let site = entry.site.clone();
@@ -53,30 +50,19 @@ fn list_item(ctx: &SectionContext) -> SettingsRow {
                     .gap(tokens.spacing.md)
                     .py(tokens.spacing.xs)
                     .border_b_1()
-                    .border_color(tokens.colors.border)
+                    .border_color(extended.hairline)
                     .child(
                         v_flex()
                             .gap(tokens.spacing.xxs)
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .child(SharedString::from(entry.site.clone())),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(tokens.colors.muted_foreground)
-                                    .child(SharedString::from(entry.user.clone())),
-                            ),
+                            .child(body_text(cx).child(SharedString::from(entry.site.clone())))
+                            .child(meta_text(cx).child(SharedString::from(entry.user.clone()))),
                     )
                     .child(
-                        button(
+                        row_danger_button(
                             SharedString::from(format!("site-auth-delete-{}", entry.site)),
                             delete.clone(),
-                            ButtonVariant::Destructive,
                             cx,
                         )
-                        .h(CONTROL_HEIGHT)
                         .disabled(busy)
                         .on_click(move |_, _, cx| {
                             let site = site.clone();
@@ -94,7 +80,6 @@ fn list_item(ctx: &SectionContext) -> SettingsRow {
                         ButtonVariant::Secondary,
                         cx,
                     )
-                    .h(CONTROL_HEIGHT)
                     .disabled(busy || store.read(cx).site_auth().is_empty())
                     .on_click(move |_, _, cx| {
                         clear_store.update(cx, |store, cx| store.clear_site_auth(cx));

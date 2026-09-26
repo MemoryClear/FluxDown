@@ -1,7 +1,7 @@
 //! 通知设置仅包含系统通知；Webhook 使用活动栏独立页面。
 
+use fluxdown_ui_components::FluxIcon;
 use gpui::App;
-use gpui_component::IconName;
 
 use super::SectionContext;
 use crate::ui::{SettingsPage, SettingsSection};
@@ -11,7 +11,7 @@ pub(crate) fn page(ctx: &SectionContext, _cx: &mut App) -> SettingsPage {
         "notify",
         ctx.t("settingsCatNotify"),
         ctx.t("notifyGroupSystem"),
-        IconName::Bell,
+        FluxIcon::Bell,
     )
     .sections([SettingsSection::new()
         .title(ctx.t("notifyGroupSystem"))

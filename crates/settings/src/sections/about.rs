@@ -1,14 +1,14 @@
 //! 关于：版本、软件更新、日志导出、浏览器扩展与捐赠链接。
 
 use fluxdown_protocol::method;
-use fluxdown_ui_components::{ButtonVariant, button};
-use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
+use fluxdown_ui_components::{ButtonVariant, FluxIcon, button};
+use fluxdown_ui_theme::active_theme;
 use gpui::{App, IntoElement as _, ParentElement, SharedString, Styled, div};
-use gpui_component::{IconName, h_flex, v_flex};
+use gpui_component::{h_flex, v_flex};
 use serde_json::json;
 
 use super::SectionContext;
-use crate::ui::{Control, SettingsPage, SettingsRow, SettingsSection};
+use crate::ui::{Control, SettingsPage, SettingsRow, SettingsSection, body_text, meta_text};
 
 pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const WEBSITE: &str = "https://fluxdown.zerx.dev";
@@ -22,7 +22,7 @@ pub(crate) fn page(ctx: &SectionContext, _cx: &mut App) -> SettingsPage {
         "about",
         ctx.t("settingsCatAbout"),
         ctx.t("settingsCatAboutDesc"),
-        IconName::Info,
+        FluxIcon::Info,
     )
     .sections([
         version_section(ctx),
@@ -39,7 +39,7 @@ fn version_section(ctx: &SectionContext) -> SettingsSection {
         .row(ctx.item(
             "currentVersion",
             None,
-            Control::custom(move |_, _, _, _| div().text_sm().child(version.clone())),
+            Control::custom(move |_, _, _, cx: &mut App| body_text(cx).child(version.clone())),
         ))
 }
 
@@ -106,12 +106,7 @@ fn check_update_control(ctx: &SectionContext) -> Control {
         h_flex()
             .gap(tokens.spacing.sm)
             .items_center()
-            .children(status.map(|status| {
-                div()
-                    .text_xs()
-                    .text_color(tokens.colors.muted_foreground)
-                    .child(SharedString::from(status))
-            }))
+            .children(status.map(|status| meta_text(cx).child(SharedString::from(status))))
             .children(download_url.map(|url| {
                 button(
                     "about-update-now",
@@ -119,7 +114,6 @@ fn check_update_control(ctx: &SectionContext) -> Control {
                     ButtonVariant::Primary,
                     cx,
                 )
-                .h(CONTROL_HEIGHT)
                 .on_click(move |_, _, cx| cx.open_url(&url))
             }))
             .child(
@@ -129,7 +123,6 @@ fn check_update_control(ctx: &SectionContext) -> Control {
                     ButtonVariant::Secondary,
                     cx,
                 )
-                .h(CONTROL_HEIGHT)
                 .disabled(disabled || busy)
                 .on_click(move |_, _, cx| {
                     click_store.update(cx, |store, cx| {
@@ -157,16 +150,11 @@ fn release_notes_item(ctx: &SectionContext) -> SettingsRow {
             .children(result.notes.into_iter().take(10).map(|note| {
                 v_flex()
                     .gap(tokens.spacing.xxs)
-                    .child(div().text_sm().child(SharedString::from(format!(
+                    .child(body_text(cx).child(SharedString::from(format!(
                         "v{} {}",
                         note.version, note.published_at
                     ))))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(tokens.colors.muted_foreground)
-                            .child(SharedString::from(note.body)),
-                    )
+                    .child(meta_text(cx).child(SharedString::from(note.body)))
             }))
             .into_any_element()
     })
@@ -202,7 +190,6 @@ fn export_control(ctx: &SectionContext) -> Control {
                     ButtonVariant::Secondary,
                     cx,
                 )
-                .h(CONTROL_HEIGHT)
                 .disabled(disabled)
                 .on_click(move |_, _, cx| {
                     open_store.update(cx, |store, cx| {
@@ -238,7 +225,6 @@ fn export_control(ctx: &SectionContext) -> Control {
                     ButtonVariant::Primary,
                     cx,
                 )
-                .h(CONTROL_HEIGHT)
                 .disabled(disabled || busy)
                 .on_click(move |_, _, cx| {
                     let store = export_store.clone();
@@ -304,7 +290,7 @@ fn link_item(
             .items_center()
             .justify_between()
             .gap(tokens.spacing.md)
-            .child(div().text_sm().child(title.clone()))
+            .child(body_text(cx).child(title.clone()))
             .child(
                 h_flex()
                     .gap(tokens.spacing.sm)
@@ -316,7 +302,6 @@ fn link_item(
                             ButtonVariant::Secondary,
                             cx,
                         )
-                        .h(CONTROL_HEIGHT)
                         .on_click(move |_, _, cx| cx.open_url(url))
                     })),
             )

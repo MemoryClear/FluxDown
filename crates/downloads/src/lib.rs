@@ -4,14 +4,13 @@
 //! [`DownloadView`] 并作为路由内容注入 shell。
 
 pub mod actions;
-mod assets;
 mod components;
 mod controller;
 mod model;
 mod pages;
 mod strings;
 
-pub use assets::*;
+pub use components::title_bar::DownloadTitleBar;
 pub use controller::{
     DownloadsCommand, DownloadsController, DownloadsPort, DownloadsResult, LAST_SAVE_DIR_PREF,
     PortFuture, QueueFields, REMEMBER_LAST_SAVE_DIR_PREF, SeedLimits,
