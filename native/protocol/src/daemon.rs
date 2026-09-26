@@ -80,7 +80,7 @@ pub struct DaemonConfigPatch {
 }
 
 /// daemon 运行状态投影。
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct DaemonRuntimeStatsDto {
