@@ -107,7 +107,9 @@ impl GroupDetailView {
         self.table_state.update(cx, |table, cx| {
             let delegate = table.delegate_mut();
             delegate.set_queue_names(queues);
-            if delegate.refresh_view() {
+            delegate.refresh_view();
+            // 行变化只需重绘；列配置未变时不重建 `col_groups`，保住用户拖拽的列宽。
+            if delegate.take_columns_dirty() {
                 table.refresh(cx);
             }
         });

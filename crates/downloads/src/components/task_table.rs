@@ -7,7 +7,7 @@ use fluxdown_ui_components::toolbar_action_button;
 use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, ClickEvent, Context, Div, FocusHandle, FontWeight,
-    InteractiveElement as _, IntoElement, Modifiers, MouseButton, ParentElement, Render,
+    InteractiveElement as _, IntoElement, Modifiers, MouseButton, ParentElement, Pixels, Render,
     SharedString, Stateful, StatefulInteractiveElement as _, Styled, WeakEntity, Window, div,
     prelude::FluentBuilder as _, px, relative,
 };
@@ -36,6 +36,8 @@ use crate::{
 };
 
 const SELECTION_COLUMN_WIDTH: f32 = 36.;
+/// 表头拖拽调宽的上限（下限按列取 [`DownloadColumnKind::min_width`]）。
+const MAX_COLUMN_WIDTH: f32 = 480.;
 const TABLE_HEADER_CROP: f32 = 2.;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,16 +66,6 @@ impl DownloadColumnKind {
         Self::Protocol,
         Self::Source,
         Self::Queue,
-    ];
-
-    /// 宽度不足时的裁列顺序（先裁前者），`FileName` 永不裁。
-    const FIT_DROP_ORDER: [Self; 6] = [
-        Self::Created,
-        Self::Source,
-        Self::Protocol,
-        Self::Queue,
-        Self::Eta,
-        Self::Speed,
     ];
 
     pub(crate) fn key(self) -> &'static str {
@@ -160,10 +152,8 @@ impl DownloadColumnKind {
 pub(crate) struct DownloadColumn {
     pub(crate) kind: DownloadColumnKind,
     pub(crate) width: f32,
-    /// 用户开关。
+    /// 用户开关（右上角列设置）；是否显示只由它决定，超宽走横向滚动。
     pub(crate) visible: bool,
-    /// 宽度不足自动裁掉（用户开关保持）。
-    auto_hidden: bool,
 }
 
 impl DownloadColumn {
@@ -172,12 +162,7 @@ impl DownloadColumn {
             kind,
             width: kind.default_width(),
             visible: kind.default_visible(),
-            auto_hidden: false,
         }
-    }
-
-    fn shown(&self) -> bool {
-        self.visible && !self.auto_hidden
     }
 }
 
@@ -406,6 +391,10 @@ pub(crate) struct DownloadTableDelegate {
     device_aliases: HashMap<String, Vec<String>>,
     /// 排序在未改变的前提下是否在偏好中被列头触发（用于持久化）。
     sort_changed: bool,
+    /// 列配置（宽度 / 可见性 / 顺序 / 排序指示）需要重建表头 `col_groups`。
+    /// 纯行数据变化不置位：`TableState::refresh` 会用代理宽度覆盖表格内部
+    /// 实时宽度，进度节拍若每次都刷新会把用户正在拖拽的列宽弹回去。
+    columns_dirty: bool,
     /// 上级页面弱引用：右键菜单需要参数的命令（移动到队列 / 忽略插件重试 /
     /// 任务组操作）经它回调 `DownloadView` 的方法执行；`None` 时这些项不渲染。
     host: Option<WeakEntity<DownloadView>>,
@@ -436,6 +425,7 @@ impl DownloadTableDelegate {
             group_names: HashMap::new(),
             device_aliases: HashMap::new(),
             sort_changed: false,
+            columns_dirty: false,
             host: None,
             action_context: None,
         }
@@ -510,6 +500,7 @@ impl DownloadTableDelegate {
             return;
         }
         self.apply_column_prefs(&prefs.columns);
+        self.columns_dirty = true;
         self.prefs = prefs;
         self.view_dirty = true;
     }
@@ -522,6 +513,26 @@ impl DownloadTableDelegate {
     /// 列头排序是否改动了偏好（读取后清零）。
     pub(crate) fn take_sort_changed(&mut self) -> bool {
         std::mem::take(&mut self.sort_changed)
+    }
+
+    /// 列配置是否需要 `TableState::refresh`（读取后清零）。
+    pub(crate) fn take_columns_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.columns_dirty)
+    }
+
+    /// 表头拖拽调宽结束后，把表格内部列宽（含首列勾选列）写回代理列配置，
+    /// 作为后续刷新与持久化的事实源。返回是否有变化。
+    pub(crate) fn sync_column_widths(&mut self, widths: &[Pixels]) -> bool {
+        let mut changed = false;
+        let shown = self.columns.iter_mut().filter(|column| column.visible);
+        for (column, width) in shown.zip(widths.iter().skip(1)) {
+            let width = f32::from(*width).clamp(column.kind.min_width(), MAX_COLUMN_WIDTH);
+            if (column.width - width).abs() > f32::EPSILON {
+                column.width = width;
+                changed = true;
+            }
+        }
+        changed
     }
 
     fn apply_column_prefs(&mut self, prefs: &[crate::model::view_prefs::ColumnPref]) {
@@ -561,39 +572,6 @@ impl DownloadTableDelegate {
                 width: column.width,
             })
             .collect()
-    }
-
-    /// 宽度预算：可用宽度不足时按 [`DownloadColumnKind::FIT_DROP_ORDER`] 自动裁列。
-    pub(crate) fn fit_columns_to_width(&mut self, available: f32) -> bool {
-        let mut changed = false;
-        for column in &mut self.columns {
-            if column.auto_hidden {
-                column.auto_hidden = false;
-                changed = true;
-            }
-        }
-        let width_sum = |columns: &[DownloadColumn]| {
-            SELECTION_COLUMN_WIDTH
-                + columns
-                    .iter()
-                    .filter(|column| column.shown())
-                    .map(|column| column.width)
-                    .sum::<f32>()
-        };
-        for kind in DownloadColumnKind::FIT_DROP_ORDER {
-            if width_sum(&self.columns) <= available {
-                break;
-            }
-            if let Some(column) = self
-                .columns
-                .iter_mut()
-                .find(|column| column.kind == kind && column.shown())
-            {
-                column.auto_hidden = true;
-                changed = true;
-            }
-        }
-        changed
     }
 
     /// 存储变化或视图参数变化时重算可见行。返回是否重算。
@@ -840,7 +818,7 @@ impl DownloadTableDelegate {
     }
 
     fn shown_columns_count(&self) -> usize {
-        self.columns.iter().filter(|column| column.shown()).count()
+        self.columns.iter().filter(|column| column.visible).count()
     }
 
     fn shown_column(&self, col_ix: usize) -> Option<&DownloadColumn> {
@@ -849,7 +827,7 @@ impl DownloadTableDelegate {
         }
         self.columns
             .iter()
-            .filter(|column| column.shown())
+            .filter(|column| column.visible)
             .nth(col_ix - 1)
     }
 
@@ -861,7 +839,7 @@ impl DownloadTableDelegate {
             .columns
             .iter()
             .enumerate()
-            .filter_map(|(ix, column)| column.shown().then_some(ix))
+            .filter_map(|(ix, column)| column.visible.then_some(ix))
             .collect();
         let Some(&from_position) = positions.get(from_ix - 1) else {
             return;
@@ -1628,7 +1606,7 @@ impl TableDelegate for DownloadTableDelegate {
         let base = Column::new(column.kind.key(), column.kind.label(&self.strings))
             .width(px(column.width))
             .min_width(px(column.kind.min_width()))
-            .max_width(px(480.));
+            .max_width(px(MAX_COLUMN_WIDTH));
         match column.kind.sort_key() {
             Some(key) if key == self.prefs.sort_key => base.sort(match self.prefs.sort_dir {
                 SortDir::Asc => ColumnSort::Ascending,
@@ -2283,11 +2261,7 @@ impl DownloadView {
             .child(self.render_columns_menu(cx))
     }
 
-    pub(crate) fn render_table(
-        &self,
-        available_width: f32,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
+    pub(crate) fn render_table(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let row_height = self
             .table_state
             .read(cx)
@@ -2296,11 +2270,6 @@ impl DownloadView {
             .density
             .row_height();
         let table_state = self.table_state.clone();
-        self.table_state.update(cx, |table, cx| {
-            if table.delegate_mut().fit_columns_to_width(available_width) {
-                table.refresh(cx);
-            }
-        });
         div()
             .id("download-task-table-container")
             .relative()
@@ -2474,36 +2443,41 @@ mod tests {
     }
 
     #[test]
-    fn fit_columns_drops_lowest_priority_first() -> Result<(), I18nError> {
+    fn sync_column_widths_maps_shown_columns_and_clamps() -> Result<(), I18nError> {
         let mut delegate = delegate(&[1])?;
-        for column in &mut delegate.columns {
-            column.visible = true;
-        }
-        delegate.fit_columns_to_width(750.);
-        let hidden: std::collections::HashSet<&str> = delegate
+        let shown: Vec<DownloadColumnKind> = delegate
             .columns
             .iter()
-            .filter(|column| column.auto_hidden)
-            .map(|column| column.kind.key())
+            .filter(|column| column.visible)
+            .map(|column| column.kind)
             .collect();
+        // 首项是勾选列；速度列拖宽、文件名列拖到下限以下、其余保持。
+        let widths: Vec<gpui::Pixels> = std::iter::once(gpui::px(36.))
+            .chain(shown.iter().map(|kind| match kind {
+                DownloadColumnKind::Speed => gpui::px(180.),
+                DownloadColumnKind::FileName => gpui::px(10.),
+                other => gpui::px(other.default_width()),
+            }))
+            .collect();
+        assert!(delegate.sync_column_widths(&widths));
+        let width_of = |kind| {
+            delegate
+                .columns
+                .iter()
+                .find(|column| column.kind == kind)
+                .map(|column| column.width)
+        };
+        assert_eq!(width_of(DownloadColumnKind::Speed), Some(180.));
         assert_eq!(
-            hidden,
-            std::collections::HashSet::from(["created", "source", "protocol", "queue", "eta"])
+            width_of(DownloadColumnKind::FileName),
+            Some(DownloadColumnKind::FileName.min_width())
         );
-        assert!(
-            delegate
-                .columns
-                .iter()
-                .any(|column| column.kind == DownloadColumnKind::Speed && column.shown())
+        // 隐藏列不参与映射，宽度不变。
+        assert_eq!(
+            width_of(DownloadColumnKind::Queue),
+            Some(DownloadColumnKind::Queue.default_width())
         );
-        assert!(
-            delegate
-                .columns
-                .iter()
-                .any(|column| column.kind == DownloadColumnKind::FileName && column.shown())
-        );
-        delegate.fit_columns_to_width(10_000.);
-        assert!(delegate.columns.iter().all(|column| !column.auto_hidden));
+        assert!(!delegate.sync_column_widths(&widths));
         Ok(())
     }
 }

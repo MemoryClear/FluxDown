@@ -509,7 +509,10 @@ impl DownloadView {
         self.table_state.update(cx, |table, cx| {
             let delegate = table.delegate_mut();
             delegate.set_filter(filter);
-            if delegate.refresh_view() {
+            delegate.refresh_view();
+            // 行变化只需重绘（行数每帧从代理读取）；只有列配置变了才重建
+            // `col_groups`，否则进度节拍会覆盖拖拽中的列宽。
+            if delegate.take_columns_dirty() {
                 table.refresh(cx);
             }
         });
@@ -580,7 +583,13 @@ impl DownloadView {
                     self.open_detail_for(key, window, cx);
                 }
             }
-            TableEvent::ColumnWidthsChanged(_) | TableEvent::MoveColumn(..) => {
+            TableEvent::ColumnWidthsChanged(widths) => {
+                table_state.update(cx, |table, _| {
+                    table.delegate_mut().sync_column_widths(widths);
+                });
+                self.schedule_persist_prefs(cx);
+            }
+            TableEvent::MoveColumn(..) => {
                 self.schedule_persist_prefs(cx);
             }
             _ => {}
@@ -1422,11 +1431,7 @@ impl DownloadView {
         ]
     }
 
-    pub(crate) fn render_main(
-        &self,
-        available_width: f32,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    pub(crate) fn render_main(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let tokens = fluxdown_ui_theme::active_theme(cx).tokens().clone();
         let prefs = self.table_state.read(cx).delegate().prefs().clone();
         let content = v_flex()
@@ -1446,7 +1451,7 @@ impl DownloadView {
                         .child(error),
                 )
             })
-            .child(self.render_table(available_width, cx));
+            .child(self.render_table(cx));
 
         let body: gpui::AnyElement = if prefs.detail_open {
             let panel = self.render_detail_panel(cx);
@@ -1610,11 +1615,6 @@ impl Render for DownloadView {
             });
         }
         let sidebar_width = self.table_state.read(cx).delegate().prefs().sidebar_width;
-        let available_width = sizes.get(1).map_or_else(
-            || f32::from(window.viewport_size().width) - sidebar_width - 46.,
-            |size| f32::from(*size) - 8.,
-        );
-
         div()
             .key_context(KEY_CONTEXT)
             .size_full()
@@ -1670,7 +1670,7 @@ impl Render for DownloadView {
                             .size_range(px(148.)..px(280.))
                             .child(self.render_sidebar(window, cx)),
                     )
-                    .child(resizable_panel().child(self.render_main(available_width, cx))),
+                    .child(resizable_panel().child(self.render_main(cx))),
             )
     }
 }
