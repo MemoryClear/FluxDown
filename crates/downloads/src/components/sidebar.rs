@@ -132,12 +132,12 @@ impl DownloadView {
             })
     }
 
-    /// 队列分区头右侧「+」：打开队列管理窗口。
-    fn queue_add_button(&self, cx: &Context<Self>) -> AnyElement {
+    /// 队列分区头右侧齿轮按钮：打开队列管理窗口。
+    fn queue_manage_button(&self, cx: &Context<Self>) -> AnyElement {
         let tokens = active_theme(cx).tokens();
         let open_queue_manager = self.host.open_queue_manager.clone();
         div()
-            .id("download-queue-add")
+            .id("download-queue-manage")
             .flex()
             .items_center()
             .justify_center()
@@ -152,7 +152,7 @@ impl DownloadView {
                     open(window, cx);
                 }
             })
-            .child(Icon::new(IconName::Plus).size(px(11.)))
+            .child(Icon::new(IconName::Settings).size(px(11.)))
             .into_any_element()
     }
 
@@ -722,7 +722,7 @@ impl DownloadView {
                 self.strings.sidebar_queues.clone(),
                 SidebarSection::Queues,
                 open_amount,
-                Some(self.queue_add_button(cx)),
+                Some(self.queue_manage_button(cx)),
                 cx,
             ))
             .child(
