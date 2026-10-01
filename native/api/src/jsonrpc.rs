@@ -100,7 +100,7 @@ async fn dispatch_rpc_call(
     // 即使 token 缺失/错误也照常返回名单；但 token 前缀（若存在）仍按约定剥离。
     if method == "system.listMethods" || method == "system.listNotifications" {
         let arr = strip_token_prefix(params.as_array().cloned().unwrap_or_default());
-        return dispatch_method(method, &arr, &id, host).await;
+        return dispatch_method(method, &arr, &id, host, config_token.is_empty()).await;
     }
 
     // aria2 行为对齐：`system.multicall` 信封本身不鉴权（token 由每个
@@ -118,7 +118,7 @@ async fn dispatch_rpc_call(
         Some(a) => strip_token_prefix(a.clone()),
         None => return rpc_err(&id, 1, "params must be an array"),
     };
-    dispatch_method(method, &arr, &id, host).await
+    dispatch_method(method, &arr, &id, host, config_token.is_empty()).await
 }
 
 /// 剥离 aria2 约定的 `token:xxx` 前缀参数（若第 0 个元素是这样的字符串）。
@@ -134,7 +134,13 @@ fn strip_token_prefix(mut arr: Vec<Value>) -> Vec<Value> {
 
 /// 派发单个 aria2 方法（不含 `system.multicall`——由 [`dispatch_rpc_call`]
 /// 提前拦截，避免异步递归；也避免嵌套 multicall 误入本函数）。
-async fn dispatch_method(method: &str, arr: &[Value], id: &Value, host: &dyn ApiHost) -> Value {
+async fn dispatch_method(
+    method: &str,
+    arr: &[Value],
+    id: &Value,
+    host: &dyn ApiHost,
+    token_empty: bool,
+) -> Value {
     match method {
         // ---- 真实实现：经 &dyn ApiHost -------------------------------
         "aria2.addUri" => add_uri(arr, id, host).await,
@@ -152,7 +158,7 @@ async fn dispatch_method(method: &str, arr: &[Value], id: &Value, host: &dyn Api
         "aria2.getFiles" => get_files(arr, id, host).await,
         "aria2.getOption" => get_option(arr, id, host).await,
         "aria2.getGlobalOption" => get_global_option(id, host).await,
-        "aria2.changeGlobalOption" => change_global_option(arr, id, host).await,
+        "aria2.changeGlobalOption" => change_global_option(arr, id, host, token_empty).await,
         "aria2.getGlobalStat" => get_global_stat(id, host).await,
         "aria2.purgeDownloadResult" => purge_download_result(id, host).await,
         "aria2.removeDownloadResult" => remove_download_result(arr, id, host).await,
@@ -216,7 +222,14 @@ async fn system_multicall(
             continue;
         }
         let inner_params = strip_token_prefix(inner.as_array().cloned().unwrap_or_default());
-        let resp = dispatch_method(method, &inner_params, &Value::Null, host).await;
+        let resp = dispatch_method(
+            method,
+            &inner_params,
+            &Value::Null,
+            host,
+            config_token.is_empty(),
+        )
+        .await;
         if let Some(result) = resp.get("result") {
             results.push(json!([result]));
         } else {
@@ -475,7 +488,12 @@ async fn get_global_option(id: &Value, host: &dyn ApiHost) -> Value {
 
 /// `aria2.changeGlobalOption`：`params = [options]`。映射表之外的键
 /// 静默忽略；映射结果为空时直接返回 `"OK"`（不打扰宿主）。
-async fn change_global_option(arr: &[Value], id: &Value, host: &dyn ApiHost) -> Value {
+async fn change_global_option(
+    arr: &[Value],
+    id: &Value,
+    host: &dyn ApiHost,
+    token_empty: bool,
+) -> Value {
     let options = match arr.first() {
         None => return rpc_err(id, 1, &aria2::err_missing_param(0)),
         Some(v) => match v.as_object() {
@@ -483,6 +501,10 @@ async fn change_global_option(arr: &[Value], id: &Value, host: &dyn ApiHost) -> 
             None => return rpc_err(id, 1, &aria2::err_wrong_type_param(0)),
         },
     };
+    // 无 token 时任何能触达端口的调用方都可改默认保存目录，等同于任意目录写入入口。
+    if token_empty && options.contains_key("dir") {
+        return rpc_err(id, 1, "changing dir requires an rpc token");
+    }
     let changes = match aria2::map_change_global_options(options) {
         Ok(c) => c,
         Err(e) => return rpc_err(id, 1, &e),
@@ -530,15 +552,28 @@ async fn get_global_stat(id: &Value, host: &dyn ApiHost) -> Value {
 
 /// `aria2.purgeDownloadResult`：无参数，清除全部已停止（complete/error）
 /// 任务的结果记录（`delete_files=false`，语义等价 SQLite 常驻持久化下的
-/// 「清空历史列表项」）。逐条删除尽力而为，恒返回 `"OK"`（对齐 aria2：
-/// 该操作在内存态实现里不会失败）。
+/// 「清空历史列表项」）。逐条删除尽力而为；持久化失败时返回首个错误。
 async fn purge_download_result(id: &Value, host: &dyn ApiHost) -> Value {
-    if let Ok(tasks) = host.list_tasks().await {
-        for t in tasks.iter().filter(|t| aria2::is_stopped_status(t.status)) {
-            let _ = host.delete_task(&t.task_id, false).await;
+    let tasks = match host.list_tasks().await {
+        Ok(tasks) => tasks,
+        Err(error) => return rpc_err(id, 1, &error.to_string()),
+    };
+    let mut first_error = None;
+    for task in tasks
+        .iter()
+        .filter(|task| aria2::is_stopped_status(task.status))
+    {
+        if let Err(error) = host.delete_task(&task.task_id, false).await {
+            tracing::warn!(task_id = %task.task_id, %error, "purging stopped download result failed");
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
         }
     }
-    rpc_ok(id, Value::String("OK".to_string()))
+    match first_error {
+        Some(error) => rpc_err(id, 1, &error.to_string()),
+        None => rpc_ok(id, Value::String("OK".to_string())),
+    }
 }
 
 /// `aria2.removeDownloadResult`：`params = [gid]`，仅允许已停止任务。
@@ -637,6 +672,8 @@ mod tests {
         paused: Mutex<Vec<String>>,
         continued: Mutex<Vec<String>>,
         deleted: Mutex<Vec<(String, bool)>>,
+        delete_errors: HashMap<String, String>,
+        list_error: Option<String>,
     }
 
     impl TestHost {
@@ -666,6 +703,9 @@ mod tests {
     #[async_trait]
     impl ApiHost for TestHost {
         async fn list_tasks(&self) -> Result<Vec<TaskDto>, ApiError> {
+            if let Some(message) = &self.list_error {
+                return Err(ApiError::Internal(message.clone()));
+            }
             Ok(self.tasks.clone())
         }
         async fn get_task(&self, task_id: &str) -> Result<Option<TaskDto>, ApiError> {
@@ -680,6 +720,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((task_id.to_string(), delete_files));
+            if let Some(message) = self.delete_errors.get(task_id) {
+                return Err(ApiError::Internal(message.clone()));
+            }
             Ok(())
         }
         async fn pause_task(&self, task_id: &str) -> Result<(), ApiError> {
@@ -739,6 +782,7 @@ mod tests {
             rss_source_id: String::new(),
             origin_url: String::new(),
             auto_route: String::new(),
+            source_bytes: Default::default(),
             queue_order: 0,
             uploaded_bytes: 0,
             uploaded_at_completion: 0,
@@ -749,6 +793,7 @@ mod tests {
             seed_post_ratio_limit_milli: -2,
             seed_time_limit_minutes: -2,
             seed_inactive_time_limit_minutes: -2,
+            seed_upload_limit_bps: 0,
         }
     }
 
@@ -1076,6 +1121,42 @@ mod tests {
         let resp = call(&host, "aria2.removeDownloadResult", json!(["1a1a"])).await;
         assert_eq!(resp["result"], "OK");
         assert_eq!(host.deleted.lock().unwrap()[0], ("1a1a".to_string(), false));
+    }
+
+    #[tokio::test]
+    async fn purge_download_result_keeps_first_failure_and_cleans_remaining_tasks() {
+        let host = TestHost {
+            tasks: vec![task("a", 3), task("b", 4), task("c", 3)],
+            delete_errors: HashMap::from([
+                ("a".into(), "first persistence failure".into()),
+                ("c".into(), "later failure".into()),
+            ]),
+            ..Default::default()
+        };
+        let response = call(&host, "aria2.purgeDownloadResult", json!([])).await;
+        assert_eq!(response["error"]["message"], "first persistence failure");
+        assert_eq!(response["error"]["code"], 1);
+        assert!(response.get("result").is_none());
+        assert_eq!(
+            *host.deleted.lock().unwrap(),
+            vec![
+                ("a".into(), false),
+                ("b".into(), false),
+                ("c".into(), false)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn purge_download_result_reports_list_failure_without_deleting() {
+        let host = TestHost {
+            list_error: Some("database unavailable".into()),
+            ..Default::default()
+        };
+        let response = call(&host, "aria2.purgeDownloadResult", json!([])).await;
+        assert_eq!(response["error"]["message"], "database unavailable");
+        assert!(response.get("result").is_none());
+        assert!(host.deleted.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

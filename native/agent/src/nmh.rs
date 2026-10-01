@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use fluxdown_api::service::LiveSpeed;
 use fluxdown_protocol::{DownloadRequest, TaskDto};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -13,6 +14,7 @@ use crate::daemon_client::DaemonClient;
 
 const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 const MAX_BATCH_ITEMS: usize = 1000;
+const ACCEPT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
 const MAX_COMPLETED_TASKS: usize = 10;
 
 #[derive(Deserialize)]
@@ -98,16 +100,33 @@ impl PipeResponse {
 pub struct NmhService {
     daemon: Arc<DaemonClient>,
     capture: Arc<CaptureService>,
+    task_events: Option<crate::task_events::TaskEventHub>,
 }
 
 impl NmhService {
     #[must_use]
     pub fn new(daemon: Arc<DaemonClient>, capture: Arc<CaptureService>) -> Self {
-        Self { daemon, capture }
+        Self {
+            daemon,
+            capture,
+            task_events: None,
+        }
     }
 
-    pub async fn run(self, cancel: CancellationToken) -> Result<(), std::io::Error> {
-        run_server(self, cancel).await
+    /// 注入实时速率来源；未注入时 `tasks` 应答的速度恒为 0。
+    #[must_use]
+    pub fn with_task_events(mut self, task_events: crate::task_events::TaskEventHub) -> Self {
+        self.task_events = Some(task_events);
+        self
+    }
+
+    /// `ready` 在 IPC 端点开始监听后触发；端点不可用时随错误一起被丢弃。
+    pub async fn run(
+        self,
+        cancel: CancellationToken,
+        ready: tokio::sync::oneshot::Sender<()>,
+    ) -> Result<(), std::io::Error> {
+        run_server(self, cancel, ready).await
     }
 
     async fn dispatch(&self, message: PipeMessage) -> PipeResponse {
@@ -151,16 +170,14 @@ impl NmhService {
             Err(error) => return PipeResponse::error(msg_id, error.to_string()),
         };
         let count = batch.items.len();
-        for request in batch.items {
-            if let Err(error) = self
-                .capture
-                .submit(request, crate::capture::CaptureOrigin::External)
-                .await
-            {
-                return PipeResponse::error(msg_id, error.to_string());
-            }
+        match self
+            .capture
+            .submit_many(batch.items, crate::capture::CaptureOrigin::External)
+            .await
+        {
+            Ok(_) => PipeResponse::ok(msg_id, format!("batch accepted ({count} items)")),
+            Err(error) => PipeResponse::error(msg_id, error.to_string()),
         }
-        PipeResponse::ok(msg_id, format!("batch accepted ({count} items)"))
     }
 
     async fn task_list(&self, msg_id: u64) -> PipeResponse {
@@ -172,7 +189,12 @@ impl NmhService {
             Ok(tasks) => tasks,
             Err(error) => return PipeResponse::error(msg_id, format!("{:?}", error.code)),
         };
-        PipeResponse::tasks(msg_id, select_task_briefs(tasks))
+        let speeds = self
+            .task_events
+            .as_ref()
+            .map(crate::task_events::TaskEventHub::live_speeds)
+            .unwrap_or_default();
+        PipeResponse::tasks(msg_id, select_task_briefs(tasks, &speeds))
     }
 
     async fn task_operation(&self, msg_id: u64, payload: Value) -> PipeResponse {
@@ -228,7 +250,10 @@ impl NmhService {
     }
 }
 
-fn select_task_briefs(tasks: Vec<TaskDto>) -> Vec<TaskBrief> {
+fn select_task_briefs(
+    tasks: Vec<TaskDto>,
+    speeds: &std::collections::HashMap<String, LiveSpeed>,
+) -> Vec<TaskBrief> {
     let (mut completed, active): (Vec<_>, Vec<_>) =
         tasks.into_iter().partition(|task| task.status == 3);
     completed
@@ -238,12 +263,14 @@ fn select_task_briefs(tasks: Vec<TaskDto>) -> Vec<TaskBrief> {
         .into_iter()
         .chain(completed)
         .map(|task| TaskBrief {
+            speed: speeds
+                .get(&task.task_id)
+                .map_or(0, |speed| speed.download_bps),
             task_id: task.task_id,
             file_name: task.file_name,
             status: task.status,
             downloaded_bytes: task.downloaded_bytes,
             total_bytes: task.total_bytes,
-            speed: 0,
             error_message: task.error_message,
             created_at: task.created_at,
         })
@@ -285,13 +312,24 @@ where
 }
 
 #[cfg(unix)]
-async fn run_server(service: NmhService, cancel: CancellationToken) -> Result<(), std::io::Error> {
-    use std::os::unix::fs::PermissionsExt;
+async fn run_server(
+    service: NmhService,
+    cancel: CancellationToken,
+    ready: tokio::sync::oneshot::Sender<()>,
+) -> Result<(), std::io::Error> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-    let path = unix_socket_path();
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
+    let path = unix_socket_path().ok_or_else(endpoint_unavailable)?;
+    let dir = path.parent().ok_or_else(endpoint_unavailable)?;
+    // 0700 目录：其它用户无法进入、连接或抢占 socket 路径；属主不是当前用户时 chmod 失败，
+    // 端点直接不可用而不是退回共享位置。
+    tokio::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .await?;
+    tokio::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).await?;
+    let owner_uid = tokio::fs::metadata(dir).await?.uid();
     if tokio::fs::try_exists(&path).await? {
         match tokio::net::UnixStream::connect(&path).await {
             Ok(_) => {
@@ -305,15 +343,34 @@ async fn run_server(service: NmhService, cancel: CancellationToken) -> Result<()
     }
     let listener = tokio::net::UnixListener::bind(&path)?;
     tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).await?;
+    if ready.send(()).is_err() {
+        tracing::debug!("NMH startup waiter closed before socket became ready");
+    }
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
                 drop(listener);
-                let _ = tokio::fs::remove_file(&path).await;
-                return Ok(());
+                return match tokio::fs::remove_file(&path).await {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(error),
+                };
             }
             accepted = listener.accept() => {
-                let (stream, _) = accepted?;
+                let stream = match accepted {
+                    Ok((stream, _)) => stream,
+                    Err(error) => {
+                        // 瞬时 accept 错误（如 fd 耗尽）退避重试，不让 NMH 端点连带终止 agent。
+                        tracing::warn!(error = %error, "NMH socket accept failed");
+                        tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
+                        continue;
+                    }
+                };
+                // 0700 目录之外的纵深防御：对端 uid 必须等于 socket 目录属主（本进程用户）。
+                if !stream.peer_cred().is_ok_and(|cred| cred.uid() == owner_uid) {
+                    tracing::warn!("NMH socket rejected a connection from another user");
+                    continue;
+                }
                 let service = service.clone();
                 tokio::spawn(async move {
                     if let Err(error) = handle_stream(stream, service).await {
@@ -325,46 +382,59 @@ async fn run_server(service: NmhService, cancel: CancellationToken) -> Result<()
     }
 }
 
-#[cfg(target_os = "linux")]
-fn unix_socket_path() -> std::path::PathBuf {
-    std::env::var_os("HOME").map_or_else(
-        || std::path::PathBuf::from("/tmp/fluxdown.sock"),
-        |home| std::path::PathBuf::from(home).join(".local/share/fluxdown/fluxdown.sock"),
-    )
+/// Unix IPC socket：`<数据目录>/ipc/fluxdown.sock`，`ipc` 是仅当前用户可进入的 0700 目录。
+/// 数据目录刻意放在 home 下：宿主与 Flatpak/Snap 沙箱都可达（`$XDG_RUNTIME_DIR` 在沙箱内会被
+/// 重映射）。中继（`native/nmh/src/main.rs` 的 `socket_path_under`）独立推导同一路径，
+/// 两侧测试用同一组字面量钉住。
+#[cfg(any(unix, test))]
+fn socket_path_under(home: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(target_os = "macos")]
+    let data_dir = home
+        .join("Library")
+        .join("Application Support")
+        .join("fluxdown");
+    #[cfg(not(target_os = "macos"))]
+    let data_dir = home.join(".local").join("share").join("fluxdown");
+    data_dir.join("ipc").join("fluxdown.sock")
 }
 
-#[cfg(target_os = "macos")]
-fn unix_socket_path() -> std::path::PathBuf {
-    std::env::var_os("HOME").map_or_else(
-        || std::path::PathBuf::from("/tmp/fluxdown.sock"),
-        |home| {
-            std::path::PathBuf::from(home)
-                .join("Library/Application Support/fluxdown/fluxdown.sock")
-        },
-    )
-}
-
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
-fn unix_socket_path() -> std::path::PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR").map_or_else(
-        || std::path::PathBuf::from("/tmp/fluxdown.sock"),
-        |dir| std::path::PathBuf::from(dir).join("fluxdown.sock"),
-    )
+/// 无 home 目录时没有端点（不回退到任何共享目录）。
+#[cfg(unix)]
+fn unix_socket_path() -> Option<std::path::PathBuf> {
+    directories::BaseDirs::new().map(|dirs| socket_path_under(dirs.home_dir()))
 }
 
 #[cfg(windows)]
-async fn run_server(service: NmhService, cancel: CancellationToken) -> Result<(), std::io::Error> {
+async fn run_server(
+    service: NmhService,
+    cancel: CancellationToken,
+    ready: tokio::sync::oneshot::Sender<()>,
+) -> Result<(), std::io::Error> {
     use tokio::net::windows::named_pipe::ServerOptions;
 
+    let pipe_name = pipe_name().ok_or_else(endpoint_unavailable)?;
     let mut first = true;
+    let mut ready = Some(ready);
     loop {
         let server = ServerOptions::new()
             .first_pipe_instance(first)
-            .create(PIPE_NAME)?;
+            .create(&pipe_name)?;
         first = false;
+        if let Some(ready) = ready.take()
+            && ready.send(()).is_err()
+        {
+            tracing::debug!("NMH startup waiter closed before pipe became ready");
+        }
         tokio::select! {
             _ = cancel.cancelled() => return Ok(()),
-            connected = server.connect() => connected?,
+            connected = server.connect() => {
+                if let Err(error) = connected {
+                    // 单个客户端的握手失败不应让整个 NMH 端点（乃至 agent）退出。
+                    tracing::warn!(error = %error, "NMH pipe connect failed");
+                    tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
+                    continue;
+                }
+            }
         }
         let service = service.clone();
         tokio::spawn(async move {
@@ -375,33 +445,72 @@ async fn run_server(service: NmhService, cancel: CancellationToken) -> Result<()
     }
 }
 
-/// 中继拨号的 IPC 端点（unix socket 路径或命名管道名）。
+/// 中继拨号的 IPC 端点（unix socket 路径或命名管道名）；无法确定当前用户时为 `unavailable`。
 #[must_use]
 pub fn ipc_endpoint() -> String {
     #[cfg(unix)]
     {
-        unix_socket_path().display().to_string()
+        unix_socket_path().map_or_else(
+            || "unavailable".to_owned(),
+            |path| path.display().to_string(),
+        )
     }
     #[cfg(windows)]
     {
-        PIPE_NAME.to_owned()
+        pipe_name().unwrap_or_else(|| "unavailable".to_owned())
     }
 }
 
+/// Windows Named Pipe for the current account: `\\.\pipe\fluxdown-<account>`。账户名转小写后，
+/// `[a-z0-9]` 之外的每个字节编码为 `_xx`（下划线本身也编码），不同账户不会落到同一管道。
+/// 中继（`native/nmh/src/main.rs` 的 `pipe_name_for`）独立推导同一名字，两侧测试用同一组字面量钉住。
+#[cfg(any(windows, test))]
+fn pipe_name_for(user: &str) -> Option<String> {
+    if user.is_empty() {
+        return None;
+    }
+    let mut name = String::from(r"\\.\pipe\fluxdown-");
+    for byte in user.to_lowercase().bytes() {
+        if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
+            name.push(char::from(byte));
+        } else {
+            name.push_str(&format!("_{byte:02x}"));
+        }
+    }
+    Some(name)
+}
+
 #[cfg(windows)]
-const PIPE_NAME: &str = r"\\.\pipe\fluxdown";
+fn pipe_name() -> Option<String> {
+    std::env::var("USERNAME")
+        .ok()
+        .and_then(|user| pipe_name_for(&user))
+}
 
 /// 以中继的长度帧协议向本进程 IPC 端点发送 `ping`，成功返回 `pong` 载荷。
 pub async fn probe_ipc(timeout: std::time::Duration) -> Result<String, std::io::Error> {
     tokio::time::timeout(timeout, async {
         #[cfg(unix)]
-        let stream = tokio::net::UnixStream::connect(unix_socket_path()).await?;
+        let stream = {
+            let path = unix_socket_path().ok_or_else(endpoint_unavailable)?;
+            tokio::net::UnixStream::connect(path).await?
+        };
         #[cfg(windows)]
-        let stream = tokio::net::windows::named_pipe::ClientOptions::new().open(PIPE_NAME)?;
+        let stream = {
+            let name = pipe_name().ok_or_else(endpoint_unavailable)?;
+            tokio::net::windows::named_pipe::ClientOptions::new().open(name)?
+        };
         ping_stream(stream).await
     })
     .await
     .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "IPC ping timed out"))?
+}
+
+fn endpoint_unavailable() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "native messaging IPC endpoint is unavailable (no home directory / account name)",
+    )
 }
 
 async fn ping_stream<S>(mut stream: S) -> Result<String, std::io::Error>
@@ -447,8 +556,10 @@ where
 /// 同一台机器可能并存多份 FluxDown（Flutter / GPUI、安装版 / 开发构建），它们共用
 /// 同一个注册入口（类 Unix 的启动脚本、Windows 的 HKCU 键）。启动自愈
 /// [`auto_register`] 按 [`may_take_over`] 的归属规则决定是否改指向本安装，避免两份
-/// 安装每次启动互相覆盖；Doctor 的显式修复 [`register`] 总是指向本安装。
-/// 判定规则与 `native/hub/src/nmh_registry.rs` 逐条一致，改一处必须同步另一处。
+/// 安装每次启动互相覆盖；但另一份安装的中继若实测连不到正在运行的本 agent（端点或帧
+/// 协议不同），保留它只会让扩展显示未连接，此时总是接管。Doctor 的显式修复 [`register`]
+/// 总是指向本安装。按路径判定的归属规则与 `native/hub/src/nmh_registry.rs` 一致，
+/// 改一处必须同步另一处；连通性实测只在 agent 侧。
 pub mod registry {
     use std::io;
     use std::path::{Path, PathBuf};
@@ -529,6 +640,69 @@ pub mod registry {
         pub relay_owner: RelayOwner,
         /// 每个浏览器一条；未找到中继时为空。
         pub targets: Vec<NmhTarget>,
+        /// 类 Unix：属于其他用户（通常是曾以 sudo 运行）的启动脚本 / 清单及其目录；以后的
+        /// 自动注册改不了它们。
+        pub foreign_owned: Vec<String>,
+        /// Windows：限制原生消息主机的组织策略。
+        pub policy_blocks: Vec<PolicyBlock>,
+        /// Windows：Chrome 与 Edge 都开启了 `NativeHostsExecutablesLaunchDirectly`，浏览器直接
+        /// 启动中继、不经 `cmd.exe`。
+        pub direct_launch: bool,
+    }
+
+    /// 让浏览器拉不起 FluxDown 原生消息主机的组织策略（Windows 组策略 / 注册表）。
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum PolicyBlock {
+        /// `NativeMessagingUserLevelHosts = 0`：浏览器忽略 HKCU 下的注册（FluxDown 只注册用户级）。
+        UserLevelHostsDisabled { browser: String },
+        /// `NativeMessagingBlocklist` 命中（`*` 或本主机名）且 `Allowlist` 未放行。
+        Blocklisted { browser: String },
+        /// `DisableCMD = 1`：Chrome / Edge 经 `cmd.exe` 启动原生消息主机，命令提示符被禁用即无法启动。
+        CommandPromptDisabled,
+    }
+
+    /// [`register`] 遇到的写入被拒位置。
+    #[derive(Debug, Default, PartialEq, Eq)]
+    pub struct RegisterIssues {
+        /// 需要还给当前用户的目录（只改目录本身：写入走「临时文件 + rename」，目录可写即可替换
+        /// 其中属于其他用户的旧文件；浏览器清单目录还放着别家原生消息主机的清单，不能递归）。
+        /// 目录不存在时取最近的已存在上级。
+        pub denied: Vec<PathBuf>,
+    }
+
+    impl RegisterIssues {
+        fn deny(&mut self, dir: &Path) {
+            let target = dir
+                .ancestors()
+                .find(|candidate| !candidate.as_os_str().is_empty() && candidate.exists())
+                .unwrap_or(dir)
+                .to_path_buf();
+            if !self.denied.contains(&target) {
+                self.denied.push(target);
+            }
+        }
+    }
+
+    /// 浏览器式拉起中继并经它 `ping` 的失败原因。
+    #[derive(Debug, thiserror::Error)]
+    pub enum RelayLaunchError {
+        /// 无法启动：缺执行权限、noexec 挂载、文件不存在、被安全软件拦截。
+        #[error("cannot start: {0}")]
+        Spawn(#[source] io::Error),
+        /// 进程以失败状态退出且没有回 `pong`（126 = 不可执行、127 = 找不到程序、命令提示符被禁用等）。
+        #[error("exited without replying ({0})")]
+        Exited(String),
+        /// 时限内没有回 `pong`（中继与 agent 端点 / 帧协议不一致，或 agent 端点无应答）。
+        #[error("no reply: {0}")]
+        NoReply(String),
+    }
+
+    impl RelayLaunchError {
+        /// 启动被系统以权限理由拒绝。
+        #[must_use]
+        pub fn permission_denied(&self) -> bool {
+            matches!(self, Self::Spawn(error) if error.kind() == io::ErrorKind::PermissionDenied)
+        }
     }
 
     /// [`auto_register`] 的结果。
@@ -601,6 +775,48 @@ pub mod registry {
             })
     }
 
+    /// 浏览器启动原生消息主机的 `cmd.exe` 参数行（`raw_arg` 原样追加）：外层引号让 `cmd /c`
+    /// 剥掉首尾引号后仍保留中继路径的引号，路径含括号（`Program Files (x86)`）也不被拆开。
+    #[cfg(any(windows, test))]
+    fn cmd_launch_line(relay: &str, origin: &str) -> String {
+        format!("/d /c \"\"{relay}\" {origin}\"")
+    }
+
+    /// 单个 Chromium 系浏览器的原生消息策略评估（Chrome 文档语义：`Allowlist` 可覆盖
+    /// `Blocklist` 的 `*`，但不能恢复被 `NativeMessagingUserLevelHosts = 0` 禁用的用户级注册）。
+    #[cfg(any(windows, test))]
+    fn evaluate_browser_policy(
+        browser: &str,
+        user_level_hosts: Option<u32>,
+        blocklist: &[String],
+        allowlist: &[String],
+    ) -> Vec<PolicyBlock> {
+        let mut blocks = Vec::new();
+        if user_level_hosts == Some(0) {
+            blocks.push(PolicyBlock::UserLevelHostsDisabled {
+                browser: browser.to_owned(),
+            });
+        }
+        let listed = |list: &[String], wildcard: bool| {
+            list.iter()
+                .map(|entry| entry.trim())
+                .any(|entry| entry == NMH_NAME || (wildcard && entry == "*"))
+        };
+        if listed(blocklist, true) && !listed(allowlist, false) {
+            blocks.push(PolicyBlock::Blocklisted {
+                browser: browser.to_owned(),
+            });
+        }
+        blocks
+    }
+
+    /// `DisableCMD = 1` 连同脚本一起禁用命令提示符（`2` 只禁交互式窗口，`cmd /c` 仍可用）；
+    /// 只有仍经 `cmd.exe` 启动主机的浏览器（未开 `NativeHostsExecutablesLaunchDirectly`）受影响。
+    #[cfg(any(windows, test))]
+    fn cmd_blocks_launch(disable_cmd: Option<u32>, launches_directly: &[bool]) -> bool {
+        disable_cmd == Some(1) && launches_directly.iter().any(|direct| !direct)
+    }
+
     /// 开发构建（cargo / Flutter 产物）或临时挂载（AppImage、macOS App Translocation）里的中继。
     fn is_transient_relay(path: &Path) -> bool {
         let normalized = path
@@ -637,59 +853,183 @@ pub mod registry {
         }
     }
 
-    /// 启动自愈能否把注册改指向本安装：未注册、失效或已是本安装时总可以；另一份健康
-    /// 安装只在它是开发构建/临时路径、而本安装不是时才被接管，其余情况保持先到者。
-    fn may_take_over(owner: RelayOwner, registered: &Path, current: &Path) -> bool {
+    /// 启动自愈能否把注册改指向本安装：未注册、失效或已是本安装时总可以。另一份安装的中继
+    /// 实测连不到正在运行的本 agent（`reaches_agent == Some(false)`）时必须接管；能连通或
+    /// 无从实测（`None`）时，只在它是开发构建/临时路径、而本安装不是时才接管，其余保持先到者。
+    fn may_take_over(
+        owner: RelayOwner,
+        registered: &Path,
+        current: &Path,
+        reaches_agent: Option<bool>,
+    ) -> bool {
         match owner {
             RelayOwner::Missing | RelayOwner::Broken | RelayOwner::Current => true,
             RelayOwner::OtherInstall => {
-                is_transient_relay(registered) && !is_transient_relay(current)
+                reaches_agent == Some(false)
+                    || (is_transient_relay(registered) && !is_transient_relay(current))
             }
         }
     }
 
-    /// 查找中继二进制：先看 agent 同级目录（发布形态），再看 cargo workspace `target/`（开发）。
+    /// 中继只认 agent 同级目录里的那一份：它与本 agent 出自同一次构建，端点与帧协议必然一致。
+    /// 不回退到其它构建目录（例如另一 profile 的 `target/`）：那里的中继可能停在旧端点，
+    /// 注册它等于让扩展连不上。
     fn find_nmh_exe() -> Result<PathBuf, io::Error> {
-        if let Ok(exe) = std::env::current_exe() {
-            let canonical = std::fs::canonicalize(&exe).unwrap_or(exe);
-            if let Some(dir) = canonical.parent() {
-                let candidate = dir.join(NMH_EXE_NAME);
-                if candidate.exists() {
-                    return Ok(candidate);
-                }
-            }
-        }
-        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        let exe = std::env::current_exe()?;
+        let canonical = std::fs::canonicalize(&exe).unwrap_or(exe);
+        canonical
             .parent()
-            .and_then(Path::parent);
-        if let Some(workspace) = workspace_root {
-            for profile in ["debug", "release"] {
-                let candidate = workspace.join("target").join(profile).join(NMH_EXE_NAME);
-                if candidate.exists() {
-                    return Ok(candidate);
-                }
-            }
-        }
-        Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("{NMH_EXE_NAME} not found. Build it with: cargo build -p fluxdown_nmh"),
-        ))
+            .map(|dir| dir.join(NMH_EXE_NAME))
+            .filter(|candidate| candidate.is_file())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "{NMH_EXE_NAME} not found next to {}. Build it with: cargo build -p fluxdown_nmh",
+                        canonical.display()
+                    ),
+                )
+            })
     }
 
-    /// 显式修复：把全部注册改指向本安装的中继。
-    pub fn register() -> Result<(), io::Error> {
+    /// 实测中继的上限；免拉起的 `ping` 在本机往返只需毫秒级，余量留给安全软件的首次扫描。
+    const RELAY_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+    /// `ping` 失败后等子进程退出以取得退出码的上限。
+    const RELAY_EXIT_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+    #[cfg(windows)]
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    /// 拉起 `command` 并经其标准输入输出发一条 `ping`：拿到本进程 IPC 端点回的 `pong` 才说明
+    /// 这条拉起路径、中继与正在运行的 agent 端点、帧协议都一致。子进程随句柄丢弃被结束。
+    async fn launch_and_ping(mut command: tokio::process::Command) -> Result<(), RelayLaunchError> {
+        command
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
+        let mut child = command.spawn().map_err(RelayLaunchError::Spawn)?;
+        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+            return Err(RelayLaunchError::NoReply("stdio unavailable".to_owned()));
+        };
+        let reply = tokio::time::timeout(
+            RELAY_PROBE_TIMEOUT,
+            super::ping_stream(tokio::io::join(stdout, stdin)),
+        )
+        .await;
+        let detail = match reply {
+            Ok(Ok(_)) => return Ok(()),
+            Ok(Err(error)) => error.to_string(),
+            Err(_) => format!("timed out after {}s", RELAY_PROBE_TIMEOUT.as_secs()),
+        };
+        // 标准输入已随 ping 流关闭：正常的中继会以 0 退出，失败退出码才说明启动本身出了问题。
+        match tokio::time::timeout(RELAY_EXIT_GRACE, child.wait()).await {
+            Ok(Ok(status)) if !status.success() => {
+                Err(RelayLaunchError::Exited(status.to_string()))
+            }
+            _ => Err(RelayLaunchError::NoReply(detail)),
+        }
+    }
+
+    /// 直接拉起另一份安装的中继（参数为扩展 origin），实测它能否连到本 agent。
+    async fn relay_reaches_agent(relay: &Path) -> bool {
+        let mut command = tokio::process::Command::new(relay);
+        command.arg(CHROME_EXTENSION_ID);
+        launch_and_ping(command).await.is_ok()
+    }
+
+    /// 像浏览器那样拉起当前生效的注册并经它 `ping`：类 Unix 执行清单指向的启动脚本，Windows
+    /// 与 Chrome / Edge 一样经 `cmd.exe /d /c` 启动中继（浏览器都开了
+    /// `NativeHostsExecutablesLaunchDirectly` 时直接启动）。注册缺失 / 失效，或本进程 IPC 端点
+    /// 不在线（由监听检查报告，重新注册修不好）时返回 `None`。
+    pub async fn probe_browser_launch(
+        diagnosis: &NmhDiagnosis,
+    ) -> Option<Result<(), RelayLaunchError>> {
+        if !matches!(
+            diagnosis.relay_owner,
+            RelayOwner::Current | RelayOwner::OtherInstall
+        ) {
+            return None;
+        }
+        super::probe_ipc(RELAY_PROBE_TIMEOUT).await.ok()?;
+        #[cfg(unix)]
+        let command = {
+            let mut command = tokio::process::Command::new(&diagnosis.relay_location);
+            command.arg(CHROME_EXTENSION_ID);
+            command
+        };
+        #[cfg(windows)]
+        let command = if diagnosis.direct_launch {
+            let mut command = tokio::process::Command::new(&diagnosis.registered_relay);
+            command.arg(CHROME_EXTENSION_ID);
+            command
+        } else {
+            let cmd = std::env::var_os("ComSpec")
+                .filter(|value| !value.is_empty())
+                .map_or_else(
+                    || PathBuf::from(r"C:\Windows\System32\cmd.exe"),
+                    PathBuf::from,
+                );
+            let mut command = tokio::process::Command::new(cmd);
+            command.raw_arg(cmd_launch_line(
+                &diagnosis.registered_relay,
+                CHROME_EXTENSION_ID,
+            ));
+            command
+        };
+        Some(launch_and_ping(command).await)
+    }
+
+    /// 显式修复：把全部注册改指向本安装的中继。写入被拒的位置随结果返回，由调用方决定是否
+    /// 请求管理员授权释放后重试；其它错误直接失败。
+    pub fn register() -> Result<RegisterIssues, io::Error> {
         register_with(&find_nmh_exe()?)
     }
 
-    /// 启动自愈：注册缺失、失效或不完整时按归属规则重写，完好时不碰任何文件。
-    pub fn auto_register() -> Result<AutoRegisterOutcome, io::Error> {
-        let diagnosis = diagnose();
+    /// 本安装的中继属于当前用户却缺执行位时补上，返回是否改动；不属于当前用户的不碰
+    /// （安装包内的文件由重装恢复）。
+    #[cfg(unix)]
+    pub fn ensure_relay_executable() -> Result<bool, io::Error> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let relay = find_nmh_exe()?;
+        let metadata = std::fs::metadata(&relay)?;
+        let mode = metadata.permissions().mode() & 0o7777;
+        if mode & 0o111 == 0o111 || metadata.uid() != crate::permission::effective_uid()? {
+            return Ok(false);
+        }
+        std::fs::set_permissions(&relay, std::fs::Permissions::from_mode(mode | 0o511))?;
+        tracing::info!(relay = %relay.display(), "restored execute permission of the NMH relay");
+        Ok(true)
+    }
+
+    /// 启动自愈：注册缺失、失效、不完整，或指向连不到本 agent 的另一份中继时按归属规则重写，
+    /// 完好时不碰任何文件。`endpoint_live` 表示本进程 IPC 端点已在监听：只有这时另一份安装的
+    /// 中继才能实测连通性，否则只按路径规则判定。写入被拒（属于其他用户的旧注册）时报错，
+    /// 由 Doctor 的「重新注册」请求授权修复。
+    pub async fn auto_register(endpoint_live: bool) -> Result<AutoRegisterOutcome, io::Error> {
+        let diagnosis = tokio::task::spawn_blocking(diagnose)
+            .await
+            .map_err(io::Error::other)?;
         if diagnosis.exe_path.is_empty() {
             return Err(io::Error::new(io::ErrorKind::NotFound, diagnosis.exe_error));
         }
         let current = PathBuf::from(&diagnosis.exe_path);
         let registered = PathBuf::from(&diagnosis.registered_relay);
-        let relay = if may_take_over(diagnosis.relay_owner, &registered, &current) {
+        let reaches_agent = if endpoint_live && diagnosis.relay_owner == RelayOwner::OtherInstall {
+            let reachable = relay_reaches_agent(&registered).await;
+            if !reachable {
+                tracing::info!(
+                    relay = %registered.display(),
+                    "registered NMH relay cannot reach this agent; registering this installation's relay"
+                );
+            }
+            Some(reachable)
+        } else {
+            None
+        };
+        let relay = if may_take_over(diagnosis.relay_owner, &registered, &current, reaches_agent) {
             current
         } else {
             registered.clone()
@@ -705,7 +1045,22 @@ pub mod registry {
         if complete {
             return Ok(AutoRegisterOutcome::UpToDate);
         }
-        register_with(&relay)?;
+        let target = relay.clone();
+        let issues = tokio::task::spawn_blocking(move || register_with(&target))
+            .await
+            .map_err(io::Error::other)??;
+        if !issues.denied.is_empty() {
+            let paths = issues
+                .denied
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("NMH registration blocked by permissions: {paths}"),
+            ));
+        }
         Ok(AutoRegisterOutcome::Registered(relay))
     }
 
@@ -722,7 +1077,10 @@ pub mod registry {
     mod tests {
         use std::path::Path;
 
-        use super::{RelayOwner, classify_relay, is_transient_relay, may_take_over};
+        use super::{
+            PolicyBlock, RegisterIssues, RelayOwner, classify_relay, cmd_blocks_launch,
+            cmd_launch_line, evaluate_browser_policy, is_transient_relay, may_take_over,
+        };
 
         const INSTALLED: &str = "/Applications/FluxDown.app/Contents/MacOS/fluxdown_nmh";
         const DEV: &str = "/Users/dev/FluxDown/target/release/fluxdown_nmh";
@@ -748,25 +1106,40 @@ pub mod registry {
         }
 
         #[test]
-        fn healthy_other_install_is_only_taken_over_from_a_dev_build() {
+        fn other_install_is_kept_only_while_it_reaches_this_agent() {
             let other_installed = Path::new("/opt/fluxdown/fluxdown_nmh");
-            assert!(!may_take_over(
-                RelayOwner::OtherInstall,
-                other_installed,
-                Path::new(INSTALLED)
-            ));
-            assert!(!may_take_over(
-                RelayOwner::OtherInstall,
-                other_installed,
-                Path::new(DEV)
-            ));
-            assert!(may_take_over(
-                RelayOwner::OtherInstall,
-                Path::new(DEV),
-                Path::new(INSTALLED)
-            ));
+            // 能连通或无从实测时保持先到者，只有开发构建让位给安装版。
+            for reaches_agent in [Some(true), None] {
+                assert!(!may_take_over(
+                    RelayOwner::OtherInstall,
+                    other_installed,
+                    Path::new(INSTALLED),
+                    reaches_agent
+                ));
+                assert!(!may_take_over(
+                    RelayOwner::OtherInstall,
+                    other_installed,
+                    Path::new(DEV),
+                    reaches_agent
+                ));
+                assert!(may_take_over(
+                    RelayOwner::OtherInstall,
+                    Path::new(DEV),
+                    Path::new(INSTALLED),
+                    reaches_agent
+                ));
+            }
+            // 连不到本 agent 的中继（旧端点 / 旧帧协议）对本次运行无用：开发构建也要接管。
+            for current in [INSTALLED, DEV] {
+                assert!(may_take_over(
+                    RelayOwner::OtherInstall,
+                    other_installed,
+                    Path::new(current),
+                    Some(false)
+                ));
+            }
             for owner in [RelayOwner::Missing, RelayOwner::Broken, RelayOwner::Current] {
-                assert!(may_take_over(owner, other_installed, Path::new(DEV)));
+                assert!(may_take_over(owner, other_installed, Path::new(DEV), None));
             }
         }
 
@@ -777,18 +1150,129 @@ pub mod registry {
                 std::process::id(),
                 uuid::Uuid::new_v4()
             ));
-            std::fs::create_dir_all(&dir).ok();
+            std::fs::create_dir_all(&dir).expect("create relay test directory");
             let current = dir.join("current_nmh");
             let other = dir.join("other_nmh");
-            std::fs::write(&current, b"").ok();
-            std::fs::write(&other, b"").ok();
+            std::fs::write(&current, b"").expect("create current relay");
+            std::fs::write(&other, b"").expect("create other relay");
             assert_eq!(classify_relay(&current, &current), RelayOwner::Current);
             assert_eq!(classify_relay(&other, &current), RelayOwner::OtherInstall);
             assert_eq!(
                 classify_relay(&dir.join("removed_nmh"), &current),
                 RelayOwner::Broken
             );
-            std::fs::remove_dir_all(&dir).ok();
+            if let Err(error) = std::fs::remove_dir_all(&dir) {
+                tracing::warn!(path = %dir.display(), %error, "relay ownership test cleanup failed");
+            }
+        }
+
+        fn list(items: &[&str]) -> Vec<String> {
+            items.iter().map(|item| (*item).to_owned()).collect()
+        }
+
+        #[test]
+        fn browser_policy_follows_chrome_precedence() {
+            assert!(evaluate_browser_policy("Chrome", None, &[], &[]).is_empty());
+            assert!(evaluate_browser_policy("Chrome", Some(1), &list(&["other"]), &[]).is_empty());
+            assert_eq!(
+                evaluate_browser_policy("Edge", None, &list(&["*"]), &[]),
+                [PolicyBlock::Blocklisted {
+                    browser: "Edge".to_owned()
+                }]
+            );
+            assert!(
+                evaluate_browser_policy(
+                    "Edge",
+                    None,
+                    &list(&["*"]),
+                    &list(&[" com.fluxdown.nmh "])
+                )
+                .is_empty()
+            );
+            // `Allowlist` 里的 `*` 不放行具体主机；用户级主机被禁用时 Allowlist 也救不回来。
+            assert_eq!(
+                evaluate_browser_policy(
+                    "Chrome",
+                    Some(0),
+                    &list(&["com.fluxdown.nmh"]),
+                    &list(&["*"])
+                ),
+                [
+                    PolicyBlock::UserLevelHostsDisabled {
+                        browser: "Chrome".to_owned()
+                    },
+                    PolicyBlock::Blocklisted {
+                        browser: "Chrome".to_owned()
+                    }
+                ]
+            );
+            assert!(cmd_blocks_launch(Some(1), &[false, true]));
+            assert!(!cmd_blocks_launch(Some(1), &[true, true]));
+            assert!(!cmd_blocks_launch(Some(2), &[false, false]));
+            assert!(!cmd_blocks_launch(None, &[false]));
+        }
+
+        #[test]
+        fn cmd_launch_line_keeps_relay_quoted_inside_outer_quotes() {
+            assert_eq!(
+                cmd_launch_line(
+                    r"C:\Program Files (x86)\FluxDown\fluxdown_nmh.exe",
+                    "chrome-extension://abc/"
+                ),
+                r#"/d /c ""C:\Program Files (x86)\FluxDown\fluxdown_nmh.exe" chrome-extension://abc/""#
+            );
+        }
+
+        #[test]
+        fn denied_dirs_are_released_alone_and_missing_ones_at_the_parent()
+        -> Result<(), std::io::Error> {
+            let dir = std::env::temp_dir().join(format!(
+                "fluxdown_nmh_deny_{}",
+                uuid::Uuid::new_v4().simple()
+            ));
+            std::fs::create_dir_all(dir.join("existing"))?;
+            let mut issues = RegisterIssues::default();
+            issues.deny(&dir.join("existing"));
+            issues.deny(&dir.join("missing").join("deeper"));
+            issues.deny(&dir.join("existing"));
+            assert_eq!(issues.denied, [dir.join("existing"), dir.clone()]);
+            std::fs::remove_dir_all(&dir)
+        }
+
+        /// 真实拉起：启动失败、失败退出与正常退出但不回 `pong` 三种结果分得开。
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn launch_failures_are_classified() -> Result<(), std::io::Error> {
+            use std::os::unix::fs::PermissionsExt;
+
+            use super::RelayLaunchError;
+
+            let dir = std::env::temp_dir().join(format!(
+                "fluxdown_nmh_launch_{}",
+                uuid::Uuid::new_v4().simple()
+            ));
+            std::fs::create_dir_all(&dir)?;
+            let script = |name: &str, body: &str, mode: u32| -> Result<_, std::io::Error> {
+                let path = dir.join(name);
+                std::fs::write(&path, format!("#!/bin/sh\n{body}\n"))?;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))?;
+                Ok(path)
+            };
+            let launch = |path: std::path::PathBuf| {
+                super::launch_and_ping(tokio::process::Command::new(path))
+            };
+
+            let not_executable = launch(script("plain.sh", "exit 0", 0o644)?).await;
+            assert!(matches!(&not_executable, Err(error) if error.permission_denied()));
+            let missing = launch(dir.join("missing.sh")).await;
+            assert!(matches!(missing, Err(RelayLaunchError::Spawn(_))));
+            let exited = launch(script("fail.sh", "exit 126", 0o755)?).await;
+            assert!(
+                matches!(&exited, Err(RelayLaunchError::Exited(status)) if status.contains("126"))
+            );
+            let silent = launch(script("silent.sh", "exit 0", 0o755)?).await;
+            assert!(matches!(silent, Err(RelayLaunchError::NoReply(_))));
+            std::fs::remove_dir_all(&dir)
         }
     }
 
@@ -803,7 +1287,7 @@ pub mod registry {
 
         use serde_json::Value;
 
-        use super::{NmhDiagnosis, NmhTarget, RelayOwner};
+        use super::{NmhDiagnosis, NmhTarget, RegisterIssues, RelayOwner};
 
         const MANIFEST_FILENAME: &str = "com.fluxdown.nmh.json";
         const NMH_WRAPPER_NAME: &str = "fluxdown_nmh.sh";
@@ -1077,15 +1561,36 @@ pub mod registry {
             (!relay.is_empty()).then(|| PathBuf::from(relay))
         }
 
-        fn write_wrapper_script(relay: &Path) -> Result<PathBuf, io::Error> {
+        /// 同目录写临时文件后原子替换：目标即使属于其他用户（曾以 sudo 运行），只要目录属于
+        /// 当前用户就能换成当前用户的文件；权限位在替换前设置，浏览器不会读到半截内容。
+        fn write_replacing(path: &Path, contents: &str, mode: u32) -> Result<(), io::Error> {
             use std::os::unix::fs::PermissionsExt;
 
-            let Some(wrapper) = wrapper_path() else {
+            let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
                 return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "cannot determine home directory for wrapper script",
+                    io::ErrorKind::InvalidInput,
+                    format!("not a file path: {}", path.display()),
                 ));
             };
+            let staged = dir.join(format!(
+                ".{}.{}.tmp",
+                name.to_string_lossy(),
+                std::process::id()
+            ));
+            // 上次中断留下的同名临时文件（可能属于其他用户，删不掉时下面的写入会如实报错）。
+            crate::permission::remove_file_quietly(&staged);
+            let result = std::fs::write(&staged, contents)
+                .and_then(|()| {
+                    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(mode))
+                })
+                .and_then(|()| std::fs::rename(&staged, path));
+            if result.is_err() {
+                crate::permission::remove_file_quietly(&staged);
+            }
+            result
+        }
+
+        fn write_wrapper_script(wrapper: &Path, relay: &Path) -> Result<(), io::Error> {
             if let Some(parent) = wrapper.parent() {
                 std::fs::create_dir_all(parent)?;
             }
@@ -1093,16 +1598,26 @@ pub mod registry {
                 "#!/bin/sh\nexec {} \"$@\"\n",
                 shell_quote(&relay.to_string_lossy())
             );
-            std::fs::write(&wrapper, script)?;
-            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))?;
-            Ok(wrapper)
+            write_replacing(wrapper, &script, 0o755)
         }
 
         fn write_manifest(dir: &Path, json: &str) -> Result<PathBuf, io::Error> {
             std::fs::create_dir_all(dir)?;
             let path = dir.join(MANIFEST_FILENAME);
-            std::fs::write(&path, json)?;
+            write_replacing(&path, json, 0o644)?;
             Ok(path)
+        }
+
+        /// 已存在却不属于本进程有效用户的注册文件与目录（通常是曾以 sudo 运行 FluxDown 留下的）。
+        fn foreign_owned(paths: impl IntoIterator<Item = PathBuf>) -> Vec<String> {
+            let Ok(uid) = crate::permission::effective_uid() else {
+                return Vec::new();
+            };
+            paths
+                .into_iter()
+                .filter(|path| crate::permission::owner_uid(path).is_some_and(|owner| owner != uid))
+                .map(|path| path.display().to_string())
+                .collect()
         }
 
         /// 启动脚本的归属与其指向的中继；不可执行的脚本浏览器拉不起来，按失效处理。
@@ -1191,63 +1706,83 @@ pub mod registry {
             diagnosis.relay_owner = owner;
             diagnosis.registered_relay = relay;
             diagnosis.relay_location = wrapper_str.clone();
+            let mut owned = vec![wrapper.clone()];
+            owned.extend(wrapper.parent().map(Path::to_path_buf));
             for dir in &chromium_dirs {
-                diagnosis.targets.push(diagnose_dir(
-                    dir,
-                    browser_installed(dir),
-                    &wrapper_str,
-                    true,
-                ));
+                let installed = browser_installed(dir);
+                if installed {
+                    owned.push(dir.clone());
+                    owned.push(dir.join(MANIFEST_FILENAME));
+                }
+                diagnosis
+                    .targets
+                    .push(diagnose_dir(dir, installed, &wrapper_str, true));
             }
             for (dir, installed) in &firefox_dirs {
+                if *installed {
+                    owned.push(dir.clone());
+                    owned.push(dir.join(MANIFEST_FILENAME));
+                }
                 diagnosis
                     .targets
                     .push(diagnose_dir(dir, *installed, &wrapper_str, false));
             }
+            diagnosis.foreign_owned = foreign_owned(owned);
             diagnosis
         }
 
-        /// 启动脚本改指向 `relay`，并为所有已安装浏览器写出清单；未安装的浏览器不凭空创建 profile 目录。
-        pub(super) fn register_with(relay: &Path) -> Result<(), io::Error> {
-            let wrapper = write_wrapper_script(relay)?;
+        /// 启动脚本改指向 `relay`，并为所有已安装浏览器写出清单；未安装的浏览器不凭空创建
+        /// profile 目录。写入被拒的目录记入结果（启动脚本被拒时清单仍照写，二者互不依赖）。
+        pub(super) fn register_with(relay: &Path) -> Result<RegisterIssues, io::Error> {
+            let Some(wrapper) = wrapper_path() else {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "cannot determine home directory for wrapper script",
+                ));
+            };
+            let mut issues = RegisterIssues::default();
+            match write_wrapper_script(&wrapper, relay) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                    tracing::warn!(wrapper = %wrapper.display(), error = %error, "NMH launcher script write denied");
+                    if let Some(parent) = wrapper.parent() {
+                        issues.deny(parent);
+                    }
+                }
+                Err(error) => return Err(error),
+            }
             let wrapper_str = wrapper.display().to_string();
             let chromium = super::chromium_manifest_json(&wrapper_str)?;
             let firefox = super::firefox_manifest_json(&wrapper_str)?;
-            for dir in chromium_nmh_dirs() {
-                if !browser_installed(&dir) {
-                    continue;
-                }
-                match write_manifest(&dir, &chromium) {
-                    Ok(path) => {
-                        tracing::info!(path = %path.display(), "NMH Chromium manifest written")
+            let chromium_targets = chromium_nmh_dirs()
+                .into_iter()
+                .filter(|dir| browser_installed(dir))
+                .map(|dir| (dir, chromium.as_str()));
+            let firefox_targets = firefox_targets()
+                .into_iter()
+                .filter(|(_, installed)| *installed)
+                .map(|(dir, _)| (dir, firefox.as_str()));
+            for (dir, json) in chromium_targets.chain(firefox_targets) {
+                match write_manifest(&dir, json) {
+                    Ok(path) => tracing::info!(path = %path.display(), "NMH manifest written"),
+                    Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                        tracing::warn!(dir = %dir.display(), error = %error, "NMH manifest write denied");
+                        issues.deny(&dir);
                     }
                     Err(error) => {
-                        tracing::warn!(dir = %dir.display(), error = %error, "NMH Chromium manifest write failed")
+                        tracing::warn!(dir = %dir.display(), error = %error, "NMH manifest write failed")
                     }
                 }
             }
-            for (dir, installed) in firefox_targets() {
-                if !installed {
-                    continue;
-                }
-                match write_manifest(&dir, &firefox) {
-                    Ok(path) => {
-                        tracing::info!(path = %path.display(), "NMH Firefox manifest written")
-                    }
-                    Err(error) => {
-                        tracing::warn!(dir = %dir.display(), error = %error, "NMH Firefox manifest write failed")
-                    }
-                }
-            }
-            tracing::info!(relay = %relay.display(), wrapper = %wrapper.display(), "NMH registered");
-            Ok(())
+            tracing::info!(relay = %relay.display(), wrapper = %wrapper.display(), denied = issues.denied.len(), "NMH registered");
+            Ok(issues)
         }
 
         #[cfg(test)]
         mod tests {
             use std::path::Path;
 
-            use super::{parse_wrapper_relay, shell_quote};
+            use super::{parse_wrapper_relay, shell_quote, write_replacing};
 
             #[test]
             fn wrapper_relay_round_trips_through_shell_quoting() {
@@ -1271,6 +1806,40 @@ pub mod registry {
                     None
                 );
             }
+
+            /// 旧文件不可写（模拟曾以 sudo 写出的文件）但目录可写时，原子替换仍成功且权限位正确；
+            /// 目录不可写时报 `PermissionDenied`，不留临时文件。
+            #[test]
+            fn replacing_write_survives_unwritable_files_but_not_unwritable_dirs()
+            -> Result<(), std::io::Error> {
+                use std::os::unix::fs::PermissionsExt;
+
+                let dir = std::env::temp_dir().join(format!(
+                    "fluxdown_nmh_replace_{}",
+                    uuid::Uuid::new_v4().simple()
+                ));
+                std::fs::create_dir_all(&dir)?;
+                let file = dir.join("fluxdown_nmh.sh");
+                std::fs::write(&file, "old")?;
+                std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444))?;
+                write_replacing(&file, "new", 0o755)?;
+                assert_eq!(std::fs::read_to_string(&file)?, "new");
+                assert_eq!(
+                    std::fs::metadata(&file)?.permissions().mode() & 0o777,
+                    0o755
+                );
+
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555))?;
+                let denied = write_replacing(&file, "newer", 0o755);
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))?;
+                // root 无视权限位：此时写入照常成功，无从验证拒绝路径。
+                if let Err(error) = denied {
+                    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+                    assert_eq!(std::fs::read_to_string(&file)?, "new");
+                }
+                assert_eq!(std::fs::read_dir(&dir)?.count(), 1);
+                std::fs::remove_dir_all(&dir)
+            }
         }
     }
 
@@ -1281,11 +1850,92 @@ pub mod registry {
         use std::path::{Path, PathBuf};
 
         use winreg::RegKey;
-        use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
+        use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE};
 
         use serde_json::Value;
 
-        use super::{NMH_NAME, NmhDiagnosis, NmhTarget, RelayOwner};
+        use super::{NMH_NAME, NmhDiagnosis, NmhTarget, PolicyBlock, RegisterIssues, RelayOwner};
+
+        /// Chrome / Edge 的策略根（HKLM 优先于 HKCU）。
+        const BROWSER_POLICY_PATHS: [(&str, &str); 2] = [
+            (r"SOFTWARE\Policies\Google\Chrome", "Chrome"),
+            (r"SOFTWARE\Policies\Microsoft\Edge", "Edge"),
+        ];
+        /// 「阻止访问命令提示符」组策略（`DisableCMD`）。
+        const SYSTEM_POLICY_PATH: &str = r"SOFTWARE\Policies\Microsoft\Windows\System";
+
+        /// 首个存在该 DWORD 值的根（HKLM 优先，与浏览器策略优先级一致）。
+        fn read_dword_policy(path: &str, name: &str) -> Option<u32> {
+            [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER]
+                .into_iter()
+                .find_map(|root| {
+                    RegKey::predef(root)
+                        .open_subkey_with_flags(path, KEY_READ)
+                        .and_then(|key| key.get_value::<u32, _>(name))
+                        .ok()
+                })
+        }
+
+        /// 列表策略存成 `<path>\<name>` 子键下的编号字符串值；HKLM 的列表存在时覆盖 HKCU。
+        fn read_list_policy(path: &str, name: &str) -> Vec<String> {
+            [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER]
+                .into_iter()
+                .find_map(|root| {
+                    RegKey::predef(root)
+                        .open_subkey_with_flags(format!("{path}\\{name}"), KEY_READ)
+                        .ok()
+                })
+                .map(|key| {
+                    key.enum_values()
+                        .filter_map(Result::ok)
+                        .filter_map(|(value_name, _)| key.get_value::<String, _>(&value_name).ok())
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+
+        /// `(策略阻断, Chrome 与 Edge 是否都直接启动主机)`。
+        fn read_policies() -> (Vec<PolicyBlock>, bool) {
+            let mut blocks = Vec::new();
+            let mut launches_directly = Vec::with_capacity(BROWSER_POLICY_PATHS.len());
+            for (path, browser) in BROWSER_POLICY_PATHS {
+                blocks.extend(super::evaluate_browser_policy(
+                    browser,
+                    read_dword_policy(path, "NativeMessagingUserLevelHosts"),
+                    &read_list_policy(path, "NativeMessagingBlocklist"),
+                    &read_list_policy(path, "NativeMessagingAllowlist"),
+                ));
+                launches_directly.push(
+                    read_dword_policy(path, "NativeHostsExecutablesLaunchDirectly") == Some(1),
+                );
+            }
+            if super::cmd_blocks_launch(
+                read_dword_policy(SYSTEM_POLICY_PATH, "DisableCMD"),
+                &launches_directly,
+            ) {
+                blocks.push(PolicyBlock::CommandPromptDisabled);
+            }
+            (blocks, launches_directly.iter().all(|direct| *direct))
+        }
+
+        /// 写清单；旧文件带只读属性时先以普通权限去掉（只读属性不是 ACL，授权解决不了）。
+        #[allow(
+            clippy::permissions_set_readonly_false,
+            reason = "Windows only: clears the read-only attribute, it does not widen any ACL"
+        )]
+        fn write_manifest_file(path: &Path, contents: &str) -> Result<(), io::Error> {
+            if let Ok(metadata) = std::fs::metadata(path) {
+                let mut permissions = metadata.permissions();
+                if permissions.readonly() {
+                    permissions.set_readonly(false);
+                    // 去不掉时随后的写入会如实报错，这里只记日志。
+                    if let Err(error) = std::fs::set_permissions(path, permissions) {
+                        tracing::warn!(path = %path.display(), error = %error, "could not clear the read-only attribute of an NMH manifest");
+                    }
+                }
+            }
+            std::fs::write(path, contents)
+        }
 
         const MANIFEST_FILENAME_CHROMIUM: &str = "com.fluxdown.nmh.json";
         const MANIFEST_FILENAME_FIREFOX: &str = "com.fluxdown.nmh.firefox.json";
@@ -1478,18 +2128,31 @@ pub mod registry {
                     issue,
                 });
             }
+            (diagnosis.policy_blocks, diagnosis.direct_launch) = read_policies();
             diagnosis
         }
 
-        /// 写出指向 `relay` 的两份清单并注册 Chrome / Edge / Firefox 键；幂等。
-        pub(super) fn register_with(relay: &Path) -> Result<(), io::Error> {
+        /// 写出指向 `relay` 的两份清单并注册 Chrome / Edge / Firefox 键；幂等。清单目录写入被拒
+        /// 时记入结果（注册表键照写，指向的清单路径不变）；注册表写入失败直接报错。
+        pub(super) fn register_with(relay: &Path) -> Result<RegisterIssues, io::Error> {
             let nmh_path = strip_unc_prefix(&relay.to_string_lossy());
             let dir = manifest_dir();
-            std::fs::create_dir_all(&dir)?;
             let chromium_path = dir.join(MANIFEST_FILENAME_CHROMIUM);
-            std::fs::write(&chromium_path, super::chromium_manifest_json(&nmh_path)?)?;
             let firefox_path = dir.join(MANIFEST_FILENAME_FIREFOX);
-            std::fs::write(&firefox_path, super::firefox_manifest_json(&nmh_path)?)?;
+            let chromium_json = super::chromium_manifest_json(&nmh_path)?;
+            let firefox_json = super::firefox_manifest_json(&nmh_path)?;
+            let mut issues = RegisterIssues::default();
+            let written = std::fs::create_dir_all(&dir)
+                .and_then(|()| write_manifest_file(&chromium_path, &chromium_json))
+                .and_then(|()| write_manifest_file(&firefox_path, &firefox_json));
+            match written {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                    tracing::warn!(dir = %dir.display(), error = %error, "NMH manifest write denied");
+                    issues.deny(&dir);
+                }
+                Err(error) => return Err(error),
+            }
             let chromium_str = strip_unc_prefix(&chromium_path.to_string_lossy());
             let firefox_str = strip_unc_prefix(&firefox_path.to_string_lossy());
             let hkcu = RegKey::predef(HKEY_CURRENT_USER);
@@ -1501,8 +2164,8 @@ pub mod registry {
             let (key, _) = hkcu
                 .create_subkey_with_flags(format!("{FIREFOX_REG_PATH}\\{NMH_NAME}"), KEY_WRITE)?;
             key.set_value("", &firefox_str)?;
-            tracing::info!(relay = %nmh_path, chromium = %chromium_str, firefox = %firefox_str, "NMH registered");
-            Ok(())
+            tracing::info!(relay = %nmh_path, chromium = %chromium_str, firefox = %firefox_str, denied = issues.denied.len(), "NMH registered");
+            Ok(issues)
         }
     }
 }
@@ -1514,8 +2177,78 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        MAX_BATCH_ITEMS, NmhService, PipeMessage, handle_stream, ping_stream, select_task_briefs,
+        MAX_BATCH_ITEMS, NmhService, PipeMessage, handle_stream, ping_stream, pipe_name_for,
+        select_task_briefs, socket_path_under,
     };
+
+    /// 与 `native/nmh/src/main.rs` 的 `unix_socket_lives_in_a_private_per_user_ipc_dir`
+    /// 使用同一组字面量：agent 与中继各自推导端点，必须算出同一路径。
+    #[test]
+    fn unix_socket_lives_in_a_private_per_user_ipc_dir() {
+        let (home, expected) = if cfg!(target_os = "macos") {
+            (
+                "/Users/alice",
+                "/Users/alice/Library/Application Support/fluxdown/ipc/fluxdown.sock",
+            )
+        } else {
+            (
+                "/home/alice",
+                "/home/alice/.local/share/fluxdown/ipc/fluxdown.sock",
+            )
+        };
+        assert_eq!(
+            socket_path_under(std::path::Path::new(home)),
+            std::path::PathBuf::from(expected)
+        );
+    }
+
+    /// 与 `native/nmh/src/main.rs` 的 `pipe_name_is_per_user_and_injective` 使用同一组字面量。
+    #[test]
+    fn pipe_name_is_per_user_and_injective() {
+        assert_eq!(
+            pipe_name_for("Alice Smith").as_deref(),
+            Some(r"\\.\pipe\fluxdown-alice_20smith")
+        );
+        assert_eq!(
+            pipe_name_for("a_b"),
+            Some(r"\\.\pipe\fluxdown-a_5fb".to_owned())
+        );
+        assert_eq!(
+            pipe_name_for("a b"),
+            Some(r"\\.\pipe\fluxdown-a_20b".to_owned())
+        );
+        assert_eq!(
+            pipe_name_for("张三").as_deref(),
+            Some(r"\\.\pipe\fluxdown-_e5_bc_a0_e4_b8_89")
+        );
+        assert_eq!(pipe_name_for(""), None);
+        assert_ne!(pipe_name_for("alice"), pipe_name_for("bob"));
+        // Windows 账户名不区分大小写。
+        assert_eq!(pipe_name_for("ALICE"), pipe_name_for("alice"));
+    }
+    #[test]
+    fn task_panel_reports_live_download_speed() {
+        let task = |id: &str| -> fluxdown_protocol::TaskDto {
+            serde_json::from_value(json!({
+                "taskId": id, "url": "https://example.com/a", "fileName": "a",
+                "saveDir": "/tmp", "status": 1, "downloadedBytes": 1, "totalBytes": 2,
+                "errorMessage": "", "createdAt": "1", "proxyUrl": "", "queueId": "main",
+                "checksum": ""
+            }))
+            .expect("task")
+        };
+        let mut speeds = std::collections::HashMap::new();
+        speeds.insert(
+            "fast".to_owned(),
+            fluxdown_api::service::LiveSpeed {
+                download_bps: 4096,
+                upload_bps: 1,
+            },
+        );
+        let selected = select_task_briefs(vec![task("fast"), task("idle")], &speeds);
+        assert_eq!(selected[0].speed, 4096);
+        assert_eq!(selected[1].speed, 0);
+    }
 
     #[tokio::test]
     async fn ipc_ping_round_trips_through_frame_protocol() {
@@ -1539,7 +2272,10 @@ mod tests {
         let server_task = tokio::spawn(handle_stream(server, service));
         let reply = ping_stream(client).await.expect("pong");
         assert_eq!(reply, "pong");
-        let _ = server_task.await;
+        server_task
+            .await
+            .expect("join NMH stream handler")
+            .expect("clean client EOF closes NMH stream");
     }
 
     #[test]
@@ -1563,7 +2299,7 @@ mod tests {
                 .expect("task")
             })
             .collect();
-        let selected = select_task_briefs(tasks);
+        let selected = select_task_briefs(tasks, &std::collections::HashMap::new());
         assert_eq!(selected.len(), 11);
         assert_eq!(selected[0].task_id, "task-0");
         assert_eq!(selected[1].task_id, "task-14");

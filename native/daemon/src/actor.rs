@@ -51,6 +51,16 @@ pub enum ActorOperation {
     PauseAll,
     ResumeAll,
     RescanFiles,
+    PauseTasks {
+        task_ids: Vec<String>,
+    },
+    ResumeTasks {
+        task_ids: Vec<String>,
+    },
+    DeleteTasks {
+        task_ids: Vec<String>,
+        delete_files: bool,
+    },
     SetTaskSeedLimits {
         task_id: String,
         ratio_limit_milli: i64,
@@ -182,6 +192,8 @@ pub enum ActorOperation {
         guid: String,
         action: String,
     },
+    /// 订阅列表：重读库（未读计数）并叠加内存运行态（上次检查时间等只在内存前进）。
+    RssListSources,
     RssValidate {
         url: String,
         cookies: String,
@@ -214,6 +226,7 @@ pub enum ActorResult {
     #[cfg(feature = "plugins")]
     ResolvePreview(ResolvePreviewOutcome),
     RssValidation(Box<RssValidateOutcome>),
+    RssSources(Vec<RssSourceInfo>),
     WebhookDeliveries(Vec<fluxdown_engine::webhook::WebhookDelivery>),
     WebhookSimulation(usize),
     WebhookTest(Box<fluxdown_engine::webhook::WebhookDelivery>),
@@ -335,6 +348,7 @@ pub fn spawn_actor(
     let (commands, command_rx) = mpsc::channel(COMMAND_CAPACITY);
     let (maintenance_tx, maintenance_rx) = mpsc::unbounded_channel();
     let handle = DaemonActorHandle { commands };
+    selections.spawn_task_watcher(cancel.clone());
     let task = tokio::spawn(run_actor(
         engine,
         command_rx,
@@ -364,6 +378,10 @@ async fn run_actor(
 ) {
     engine.manager.load_queues().await;
     engine.manager.load_and_send_all_tasks().await;
+    publish_webhook_history(&engine, &events);
+    if let Ok(config) = engine.db.get_all_config().await {
+        apply_log_limit(&config);
+    }
     let mut rss_events = engine.manager.rss.take_event_rx();
 
     let mut file_scan = tokio::time::interval(Duration::from_secs(300));
@@ -394,7 +412,9 @@ async fn run_actor(
                     DaemonCommand::Shutdown { ack } => {
                         selections.resolve_all_defaults();
                         cancel.cancel();
-                        let _ = ack.send(());
+                        if ack.send(()).is_err() {
+                            tracing::debug!("daemon shutdown caller disconnected before acknowledgement");
+                        }
                         break;
                     }
                 }
@@ -420,9 +440,14 @@ async fn run_actor(
             }
             Some(ids) = receivers.missing_cleanup.recv() => {
                 engine.manager.delete_tasks_batch(&ids, false).await;
-                engine.manager.load_and_send_all_tasks().await;
+                engine.manager.send_tasks_snapshot().await;
             }
-            _ = file_scan.tick() => engine.manager.spawn_file_scan(),
+            _ = file_scan.tick() => {
+                // 完全空闲且 idle_file_scan 关闭时跳过，避免周期性唤醒 NAS 硬盘。
+                if engine.manager.should_run_idle_scan() {
+                    engine.manager.spawn_file_scan();
+                }
+            }
             _ = queue_schedule.tick() => engine.manager.tick_queue_schedules().await,
             _ = rss_poll.tick() => engine.manager.tick_rss_sources(),
             event = receive_rss_event(&mut rss_events), if rss_events.is_some() => {
@@ -443,12 +468,19 @@ async fn run_actor(
     while let Some(command) = commands.recv().await {
         match command {
             DaemonCommand::Execute { ack, .. } => {
-                let _ = ack.send(Err(ActorError::Operation(
-                    "daemon is shutting down".to_owned(),
-                )));
+                if ack
+                    .send(Err(ActorError::Operation(
+                        "daemon is shutting down".to_owned(),
+                    )))
+                    .is_err()
+                {
+                    tracing::debug!("daemon caller disconnected during shutdown");
+                }
             }
             DaemonCommand::Shutdown { ack } => {
-                let _ = ack.send(());
+                if ack.send(()).is_err() {
+                    tracing::debug!("daemon shutdown caller disconnected before acknowledgement");
+                }
             }
         }
     }
@@ -484,14 +516,26 @@ async fn dispatch_operation(
                     .map_err(|_| {
                         ActorError::Operation("resolve preview worker dropped".to_owned())
                     });
-                let _ = ack.send(result);
+                if let Err(result) = ack.send(result) {
+                    match result {
+                        Err(ActorError::Operation(error)) => {
+                            tracing::warn!(%error, "resolve preview failed after caller disconnected");
+                        }
+                        _ => tracing::debug!("resolve preview caller disconnected before result"),
+                    }
+                }
             });
         }
         ActorOperation::RefreshTrackerSubscription => {
             let config = match engine.db.get_all_config().await {
                 Ok(config) => config,
                 Err(error) => {
-                    let _ = ack.send(Err(ActorError::Operation(format!("{error:#}"))));
+                    if ack
+                        .send(Err(ActorError::Operation(format!("{error:#}"))))
+                        .is_err()
+                    {
+                        tracing::warn!(%error, "tracker refresh config read failed after caller disconnected");
+                    }
                     return;
                 }
             };
@@ -503,14 +547,25 @@ async fn dispatch_operation(
             tokio::spawn(async move {
                 let outcome =
                     fluxdown_engine::tracker_subscription::fetch_subscriptions(&urls).await;
-                let _ = maintenance_tx.send(MaintenanceEvent::Tracker { outcome, ack });
+                if maintenance_tx
+                    .send(MaintenanceEvent::Tracker { outcome, ack })
+                    .is_err()
+                {
+                    // Actor 已关闭，未提交的结果丢弃并关闭回执，等待者收到 Unavailable。
+                    tracing::debug!("daemon actor closed before tracker refresh commit");
+                }
             });
         }
         ActorOperation::RefreshEd2kServerSubscription => {
             let config = match engine.db.get_all_config().await {
                 Ok(config) => config,
                 Err(error) => {
-                    let _ = ack.send(Err(ActorError::Operation(format!("{error:#}"))));
+                    if ack
+                        .send(Err(ActorError::Operation(format!("{error:#}"))))
+                        .is_err()
+                    {
+                        tracing::warn!(%error, "ED2K refresh config read failed after caller disconnected");
+                    }
                     return;
                 }
             };
@@ -522,25 +577,44 @@ async fn dispatch_operation(
                 let outcome =
                     fluxdown_engine::ed2k::server_subscription::fetch_server_subscriptions(&urls)
                         .await;
-                let _ = maintenance_tx.send(MaintenanceEvent::Ed2k { outcome, ack });
+                if maintenance_tx
+                    .send(MaintenanceEvent::Ed2k { outcome, ack })
+                    .is_err()
+                {
+                    // Actor 已关闭，未提交的结果丢弃并关闭回执，等待者收到 Unavailable。
+                    tracing::debug!("daemon actor closed before ED2K refresh commit");
+                }
             });
         }
         ActorOperation::RefreshEd2kNodes => {
             let url = match engine.db.get_config("ed2k_nodes_dat_url").await {
                 Ok(Some(url)) if !url.trim().is_empty() => url,
                 Ok(_) => {
-                    let _ = ack.send(Ok(ActorResult::Unit));
+                    if ack.send(Ok(ActorResult::Unit)).is_err() {
+                        tracing::debug!("ED2K nodes caller disconnected before acknowledgement");
+                    }
                     return;
                 }
                 Err(error) => {
-                    let _ = ack.send(Err(ActorError::Operation(format!("{error:#}"))));
+                    if ack
+                        .send(Err(ActorError::Operation(format!("{error:#}"))))
+                        .is_err()
+                    {
+                        tracing::warn!(%error, "ED2K nodes config read failed after caller disconnected");
+                    }
                     return;
                 }
             };
             let maintenance_tx = maintenance_tx.clone();
             tokio::spawn(async move {
                 let outcome = fluxdown_engine::ed2k::kad::fetch_nodes_dat(&url).await;
-                let _ = maintenance_tx.send(MaintenanceEvent::Ed2kNodes { outcome, ack });
+                if maintenance_tx
+                    .send(MaintenanceEvent::Ed2kNodes { outcome, ack })
+                    .is_err()
+                {
+                    // Actor 已关闭，未提交的结果丢弃并关闭回执，等待者收到 Unavailable。
+                    tracing::debug!("daemon actor closed before ED2K nodes commit");
+                }
             });
         }
         ActorOperation::RssValidate {
@@ -553,7 +627,41 @@ async fn dispatch_operation(
                 .manager
                 .rss_validate_future(url, cookies, user_agent, proxy_url);
             tokio::spawn(async move {
-                let _ = ack.send(Ok(ActorResult::RssValidation(Box::new(future.await))));
+                if ack
+                    .send(Ok(ActorResult::RssValidation(Box::new(future.await))))
+                    .is_err()
+                {
+                    tracing::debug!("RSS validation caller disconnected before result");
+                }
+            });
+        }
+        ActorOperation::TestProxy {
+            proxy_type,
+            host,
+            port,
+            username,
+            password,
+        } => {
+            // 连通性测试最长数十秒且不依赖引擎状态，不能占用 actor 循环。
+            tokio::spawn(async move {
+                let result = fluxdown_engine::proxy_config::test_proxy_connection(
+                    &proxy_type,
+                    &host,
+                    &port,
+                    &username,
+                    &password,
+                )
+                .await
+                .map(ActorResult::ProxyLatency)
+                .map_err(|error| ActorError::Operation(format!("{error:#}")));
+                if let Err(result) = ack.send(result) {
+                    match result {
+                        Err(ActorError::Operation(error)) => {
+                            tracing::warn!(%error, "proxy test failed after caller disconnected");
+                        }
+                        _ => tracing::debug!("proxy test caller disconnected before result"),
+                    }
+                }
             });
         }
         ActorOperation::WebhookTest { endpoint_json } => {
@@ -568,12 +676,26 @@ async fn dispatch_operation(
                     ))),
                     Err(error) => Err(error),
                 };
-                let _ = ack.send(result);
+                if let Err(result) = ack.send(result) {
+                    match result {
+                        Err(ActorError::Operation(error)) => {
+                            tracing::warn!(%error, "webhook test failed after caller disconnected");
+                        }
+                        _ => tracing::debug!("webhook test caller disconnected before result"),
+                    }
+                }
             });
         }
         operation => {
             let result = execute_operation(operation, engine, events).await;
-            let _ = ack.send(result);
+            if let Err(result) = ack.send(result) {
+                match result {
+                    Err(ActorError::Operation(error)) => {
+                        tracing::warn!(%error, "daemon operation failed after caller disconnected");
+                    }
+                    _ => tracing::debug!("daemon operation caller disconnected before result"),
+                }
+            }
         }
     }
 }
@@ -638,7 +760,7 @@ async fn execute_operation(
                 })
                 .await
                 .ok_or_else(|| ActorError::Operation("failed to persist task".to_owned()))?;
-            engine.manager.load_and_send_all_tasks().await;
+            engine.manager.send_tasks_snapshot().await;
             return Ok(ActorResult::Created(task_id));
         }
         ActorOperation::PauseTask { task_id } => engine.manager.pause_task(&task_id).await,
@@ -658,11 +780,29 @@ async fn execute_operation(
             delete_files,
         } => {
             engine.manager.delete_task(&task_id, delete_files).await;
-            engine.manager.load_and_send_all_tasks().await;
+            engine.manager.send_tasks_snapshot().await;
         }
         ActorOperation::PauseAll => {
             let ids = task_ids_by_status(&engine.db, &[0, 1, 5]).await?;
+            engine.manager.batch_pause_all(&ids).await;
+        }
+        ActorOperation::PauseTasks { task_ids } => {
+            let ids = existing_task_ids(&engine.db, task_ids).await?;
             engine.manager.batch_pause(&ids).await;
+        }
+        ActorOperation::ResumeTasks { task_ids } => {
+            let ids = existing_task_ids(&engine.db, task_ids).await?;
+            engine.manager.batch_resume(&ids).await;
+        }
+        ActorOperation::DeleteTasks {
+            task_ids,
+            delete_files,
+        } => {
+            let ids = existing_task_ids(&engine.db, task_ids).await?;
+            if !ids.is_empty() {
+                engine.manager.delete_tasks_batch(&ids, delete_files).await;
+                engine.manager.send_tasks_snapshot().await;
+            }
         }
         ActorOperation::ResumeAll => {
             engine.manager.resume_all_eligible().await;
@@ -756,19 +896,6 @@ async fn execute_operation(
             engine.manager.move_task_to_queue(task_id, queue_id).await
         }
         ActorOperation::Boost { task_id } => engine.manager.set_priority_task(task_id).await,
-        ActorOperation::TestProxy {
-            proxy_type,
-            host,
-            port,
-            username,
-            password,
-        } => {
-            let latency = engine
-                .test_proxy_connection(&proxy_type, &host, &port, &username, &password)
-                .await
-                .map_err(|error| ActorError::Operation(format!("{error:#}")))?;
-            return Ok(ActorResult::ProxyLatency(latency));
-        }
         ActorOperation::PatchConfig {
             expected_revision,
             values,
@@ -841,10 +968,16 @@ async fn execute_operation(
             delete_files,
         } => {
             engine.manager.delete_group(&group_id, delete_files).await;
-            engine.manager.load_and_send_all_tasks().await;
+            engine.manager.send_tasks_snapshot().await;
         }
         #[cfg(feature = "plugins")]
         ActorOperation::ResolvePreview { .. } => unreachable!("handled off actor"),
+        ActorOperation::RssListSources => {
+            engine.manager.rss.load().await;
+            return Ok(ActorResult::RssSources(
+                engine.manager.rss.sources().to_vec(),
+            ));
+        }
         ActorOperation::RssCreate { source } => {
             let id = engine
                 .manager
@@ -864,9 +997,12 @@ async fn execute_operation(
             ));
         }
         ActorOperation::RssRefresh { source_id } => {
-            return Ok(ActorResult::Boolean(
+            use fluxdown_engine::rss::RssRefreshOutcome;
+            // 已在抓取中同样算成功：结果稍后经 RSS 事件到达，只有订阅不存在才是 NotFound。
+            return Ok(ActorResult::Boolean(!matches!(
                 engine.manager.refresh_rss_source(&source_id),
-            ));
+                RssRefreshOutcome::NotFound
+            )));
         }
         ActorOperation::RssItemAction {
             source_id,
@@ -886,11 +1022,15 @@ async fn execute_operation(
         | ActorOperation::RefreshEd2kServerSubscription
         | ActorOperation::RefreshEd2kNodes
         | ActorOperation::RssValidate { .. }
-        | ActorOperation::WebhookTest { .. } => unreachable!("handled off actor"),
+        | ActorOperation::WebhookTest { .. }
+        | ActorOperation::TestProxy { .. } => unreachable!("handled off actor"),
         ActorOperation::WebhookDeliveries => {
             return Ok(ActorResult::WebhookDeliveries(engine.webhook_deliveries()));
         }
-        ActorOperation::WebhookClear => engine.clear_webhook_deliveries().await,
+        ActorOperation::WebhookClear => {
+            engine.clear_webhook_deliveries().await;
+            events.publish(fluxdown_protocol::DaemonEvent::WebhooksCleared);
+        }
         ActorOperation::WebhookSimulate => {
             return Ok(ActorResult::WebhookSimulation(
                 engine.simulate_webhook_event(),
@@ -995,15 +1135,38 @@ async fn commit_maintenance(event: MaintenanceEvent, engine: &mut Engine) {
     match event {
         MaintenanceEvent::Tracker { outcome, ack } => {
             let result = commit_tracker_refresh(outcome, engine).await;
-            let _ = ack.send(result.map(ActorResult::TrackerRefresh));
+            if let Err(result) = ack.send(result.map(ActorResult::TrackerRefresh)) {
+                match result {
+                    Err(ActorError::Operation(error)) => {
+                        tracing::warn!(%error, "tracker refresh commit failed after caller disconnected");
+                    }
+                    _ => {
+                        tracing::debug!("tracker refresh commit caller disconnected before result")
+                    }
+                }
+            }
         }
         MaintenanceEvent::Ed2kNodes { outcome, ack } => {
             let result = commit_ed2k_nodes(outcome, engine).await;
-            let _ = ack.send(result);
+            if let Err(result) = ack.send(result) {
+                match result {
+                    Err(ActorError::Operation(error)) => {
+                        tracing::warn!(%error, "ED2K nodes commit failed after caller disconnected");
+                    }
+                    _ => tracing::debug!("ED2K nodes commit caller disconnected before result"),
+                }
+            }
         }
         MaintenanceEvent::Ed2k { outcome, ack } => {
             let result = commit_ed2k_refresh(outcome, engine).await;
-            let _ = ack.send(result.map(ActorResult::Ed2kRefresh));
+            if let Err(result) = ack.send(result.map(ActorResult::Ed2kRefresh)) {
+                match result {
+                    Err(ActorError::Operation(error)) => {
+                        tracing::warn!(%error, "ED2K refresh commit failed after caller disconnected");
+                    }
+                    _ => tracing::debug!("ED2K refresh commit caller disconnected before result"),
+                }
+            }
         }
     }
 }
@@ -1131,10 +1294,9 @@ fn now_unix_secs() -> i64 {
 async fn cdn_reports_peek(engine: &mut Engine) -> Result<ActorResult, ActorError> {
     if let Some(raw) = engine
         .db
-        .get_config("cdn_report_lease")
+        .peek_cdn_report_lease()
         .await
         .map_err(|error| ActorError::Operation(format!("{error:#}")))?
-        .filter(|value| !value.trim().is_empty())
     {
         let lease = serde_json::from_str::<fluxdown_protocol::CdnReportLeaseDto>(&raw)
             .map_err(|error| ActorError::Operation(format!("{error:#}")))?;
@@ -1184,6 +1346,20 @@ async fn apply_cdn_config(
             "unsupported CDN config key: {key}"
         )));
     }
+    // 只写与当前值不同的键：未变化时不产生任何 DB 写（避免空闲周期 fsync 唤醒硬盘）。
+    let current = engine
+        .db
+        .get_all_config()
+        .await
+        .map_err(|error| ActorError::Operation(format!("{error:#}")))?;
+    let changed: BTreeMap<String, String> = values
+        .into_iter()
+        .filter(|(key, value)| current.get(key) != Some(value))
+        .collect();
+    if changed.is_empty() {
+        return Ok(());
+    }
+    let values = changed;
     engine
         .db
         .set_config_batch_atomic(&values)
@@ -1217,9 +1393,18 @@ async fn patch_config(
             .iter()
             .map(|(key, value)| (key.clone(), value.clone())),
     );
-    if values.keys().any(|key| key.starts_with("proxy_")) {
+    if values
+        .keys()
+        .any(|key| key.starts_with("proxy_") || key == "global_user_agent")
+    {
+        // 与引擎实际应用时一致地构建 client：非法代理或 UA（HeaderValue 规则）
+        // 必须在提交前被拒绝，否则毒值落库后会导致下次启动失败。
         let proxy = fluxdown_engine::proxy_config::ProxyConfig::from_config_map(&merged);
-        fluxdown_engine::downloader::build_client(&proxy, "")
+        let user_agent = merged
+            .get("global_user_agent")
+            .map(String::as_str)
+            .unwrap_or_default();
+        fluxdown_engine::downloader::build_client(&proxy, user_agent)
             .map_err(|error| ActorError::InvalidArgument(format!("{error:#}")))?;
     }
     let revision = engine
@@ -1232,7 +1417,9 @@ async fn patch_config(
             }
             other => ActorError::Operation(format!("{other:#}")),
         })?;
-    apply_live_config(engine, &merged, values.keys()).await?;
+    // DB 与 revision 已提交：即便在线应用失败，也必须广播已提交快照，
+    // 否则 hub 快照与 DB revision 分叉，后续 patch 会一直冲突。
+    let applied = apply_live_config(engine, &merged, values.keys()).await;
     let snapshot = fluxdown_protocol::DaemonConfigSnapshot {
         revision,
         values: crate::config::public_config_values(&merged),
@@ -1240,6 +1427,7 @@ async fn patch_config(
     events.publish(fluxdown_protocol::DaemonEvent::ConfigChanged(
         snapshot.clone(),
     ));
+    applied?;
     Ok(snapshot)
 }
 
@@ -1487,6 +1675,12 @@ async fn apply_live_config<'a>(
                 .is_some_and(|value| value == "delete"),
         );
     }
+    if keys.contains(&"idle_file_scan") {
+        engine.manager.set_idle_file_scan(
+            all.get("idle_file_scan")
+                .is_some_and(|value| value == "true" || value == "1"),
+        );
+    }
     if keys.contains(&"global_user_agent")
         && let Some(value) = all.get("global_user_agent")
     {
@@ -1528,6 +1722,9 @@ async fn apply_live_config<'a>(
     {
         engine.manager.set_webhook_endpoints(value);
     }
+    if keys.contains(&"log_max_size_mb") {
+        apply_log_limit(all);
+    }
     Ok(())
 }
 
@@ -1538,6 +1735,57 @@ fn decode_torrent_b64(value: Option<&str>) -> Result<Vec<u8>, ActorError> {
             .map_err(|error| ActorError::InvalidArgument(format!("invalid torrentB64: {error}"))),
         _ => Ok(Vec::new()),
     }
+}
+
+/// 把持久化的日志大小上限（MB，缺省 / 非法 = 目录默认值）应用到引擎 logger。
+fn apply_log_limit(config: &HashMap<String, String>) {
+    fluxdown_engine::logger::set_max_total_bytes(log_limit_bytes(config));
+}
+
+fn log_limit_bytes(config: &HashMap<String, String>) -> u64 {
+    const KEY: &str = "log_max_size_mb";
+    let default_mb = fluxdown_protocol::daemon_config_default(KEY)
+        .parse::<u64>()
+        .unwrap_or(10);
+    let mb = config
+        .get(KEY)
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|mb| (1..=1024).contains(mb))
+        .unwrap_or(default_mb);
+    mb * 1024 * 1024
+}
+
+/// 把引擎持久化的投递历史并入 daemon 投影（合并语义，不覆盖启动后已到达的增量）。
+fn publish_webhook_history(engine: &Engine, events: &crate::event_hub::DaemonEventHub) {
+    let history: Vec<_> = engine
+        .webhook_deliveries()
+        .into_iter()
+        .map(fluxdown_engine_protocol::webhook_delivery_to_dto)
+        .collect();
+    if !history.is_empty() {
+        events.publish(fluxdown_protocol::DaemonEvent::WebhooksChanged(history));
+    }
+}
+
+/// 去重并剔除不存在的任务 id（批量接口「未知 id 忽略」）。
+async fn existing_task_ids(
+    db: &fluxdown_engine::db::Db,
+    mut task_ids: Vec<String>,
+) -> Result<Vec<String>, ActorError> {
+    let mut seen = std::collections::HashSet::new();
+    task_ids.retain(|id| seen.insert(id.clone()));
+    if task_ids.is_empty() {
+        return Ok(task_ids);
+    }
+    let known: std::collections::HashSet<String> = db
+        .load_tasks_by_ids(&task_ids)
+        .await
+        .map_err(|error| ActorError::Operation(format!("{error:#}")))?
+        .into_iter()
+        .map(|task| task.task_id)
+        .collect();
+    task_ids.retain(|id| known.contains(id));
+    Ok(task_ids)
 }
 
 async fn task_ids_by_status(
@@ -1630,7 +1878,9 @@ mod tests {
         );
 
         drop(db);
-        let _ = tokio::fs::remove_dir_all(dir).await;
+        if let Err(error) = tokio::fs::remove_dir_all(dir).await {
+            eprintln!("actor test directory removal failed: {error}");
+        }
     }
 
     #[tokio::test]
@@ -1638,14 +1888,14 @@ mod tests {
         let (db, dir) = open_db().await;
         let store = BTreeMap::from([
             (
-                "a.example".to_owned(),
+                "https://a.example".to_owned(),
                 SiteCredential {
                     user: "alice".to_owned(),
                     pass: "s3cret".to_owned(),
                 },
             ),
             (
-                "b.example:8443".to_owned(),
+                "https://b.example:8443".to_owned(),
                 SiteCredential {
                     user: "bob".to_owned(),
                     pass: "hunter2".to_owned(),
@@ -1656,17 +1906,17 @@ mod tests {
             .await
             .expect("seed credentials");
 
-        let after_delete = delete_site_auth(&db, "a.example")
+        let after_delete = delete_site_auth(&db, "https://a.example")
             .await
             .expect("delete known site");
         assert_eq!(after_delete.len(), 1);
-        assert_eq!(after_delete[0].site, "b.example:8443");
+        assert_eq!(after_delete[0].site, "https://b.example:8443");
         assert_eq!(after_delete[0].user, "bob");
         let json = serde_json::to_string(&after_delete).expect("serialize dto");
         assert!(!json.contains("hunter2"), "password must not leak: {json}");
 
         assert!(matches!(
-            delete_site_auth(&db, "a.example").await,
+            delete_site_auth(&db, "https://a.example").await,
             Err(ActorError::NotFound)
         ));
 
@@ -1683,22 +1933,28 @@ mod tests {
         );
 
         drop(db);
-        let _ = tokio::fs::remove_dir_all(dir).await;
+        if let Err(error) = tokio::fs::remove_dir_all(dir).await {
+            eprintln!("actor test directory removal failed: {error}");
+        }
     }
 
     #[test]
     fn normalize_site_accepts_bare_hosts_ports_and_urls_but_rejects_other_schemes() {
         assert_eq!(
             super::normalize_site("Example.COM").as_deref(),
-            Some("example.com")
+            Some("https://example.com")
         );
         assert_eq!(
             super::normalize_site(" example.com:8443 ").as_deref(),
-            Some("example.com:8443")
+            Some("https://example.com:8443")
         );
         assert_eq!(
             super::normalize_site("https://example.com:443/a.bin").as_deref(),
-            Some("example.com")
+            Some("https://example.com")
+        );
+        assert_eq!(
+            super::normalize_site("http://nas.local:8080/a.bin").as_deref(),
+            Some("http://nas.local:8080")
         );
         assert_eq!(super::normalize_site("ftp://example.com/a.bin"), None);
         assert_eq!(super::normalize_site(""), None);
@@ -1714,19 +1970,25 @@ mod tests {
         tokio::fs::create_dir_all(&dir).await.expect("create dir");
         let db = fluxdown_engine::db::Db::open(&dir).await.expect("open db");
 
-        let first = super::upsert_site_auth(&db, "a.example".into(), "alice".into(), "p1".into())
-            .await
-            .expect("insert");
+        let first =
+            super::upsert_site_auth(&db, "https://a.example".into(), "alice".into(), "p1".into())
+                .await
+                .expect("insert");
         assert_eq!(
             (first.site.as_str(), first.user.as_str()),
-            ("a.example", "alice")
+            ("https://a.example", "alice")
         );
-        super::upsert_site_auth(&db, "b.example".into(), "bob".into(), "p2".into())
+        super::upsert_site_auth(&db, "https://b.example".into(), "bob".into(), "p2".into())
             .await
             .expect("insert second");
-        super::upsert_site_auth(&db, "a.example".into(), "alice2".into(), "p3".into())
-            .await
-            .expect("overwrite");
+        super::upsert_site_auth(
+            &db,
+            "https://a.example".into(),
+            "alice2".into(),
+            "p3".into(),
+        )
+        .await
+        .expect("overwrite");
 
         let json = db
             .get_config(SITE_AUTH_CONFIG_KEY)
@@ -1735,11 +1997,59 @@ mod tests {
             .unwrap_or_default();
         let store = fluxdown_engine::site_auth::parse_store(&json);
         assert_eq!(store.len(), 2);
-        assert_eq!(store["a.example"].user, "alice2");
-        assert_eq!(store["a.example"].pass, "p3");
-        assert_eq!(store["b.example"].pass, "p2");
+        assert_eq!(store["https://a.example"].user, "alice2");
+        assert_eq!(store["https://a.example"].pass, "p3");
+        assert_eq!(store["https://b.example"].pass, "p2");
 
         drop(db);
-        let _ = tokio::fs::remove_dir_all(dir).await;
+        if let Err(error) = tokio::fs::remove_dir_all(dir).await {
+            eprintln!("site auth upsert test directory removal failed: {error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_ids_are_deduplicated_and_unknown_ids_dropped() {
+        let (db, dir) = open_db().await;
+        db.init_default_config("/tmp").await.expect("seed config");
+        db.seed_builtin_queues().await.expect("seed queues");
+        for id in ["t1", "t2"] {
+            db.insert_task(id, "https://example.com/a", id, "/tmp", 1, 0, "", "", "", 2)
+                .await
+                .expect("insert task");
+        }
+
+        let ids =
+            super::existing_task_ids(&db, ["t2", "ghost", "t1", "t2"].map(str::to_owned).to_vec())
+                .await
+                .expect("filter ids");
+        assert_eq!(ids, ["t2", "t1"]);
+        assert!(
+            super::existing_task_ids(&db, Vec::new())
+                .await
+                .expect("empty list")
+                .is_empty()
+        );
+
+        drop(db);
+        if let Err(error) = tokio::fs::remove_dir_all(dir).await {
+            eprintln!("actor batch ids test directory removal failed: {error}");
+        }
+    }
+
+    #[test]
+    fn log_limit_falls_back_to_catalog_default_for_missing_or_invalid_values() {
+        let limit = |value: Option<&str>| {
+            let config = value
+                .map(|v| {
+                    std::collections::HashMap::from([("log_max_size_mb".to_owned(), v.to_owned())])
+                })
+                .unwrap_or_default();
+            super::log_limit_bytes(&config)
+        };
+        assert_eq!(limit(Some("64")), 64 * 1024 * 1024);
+        assert_eq!(limit(Some(" 1024 ")), 1024 * 1024 * 1024);
+        for fallback in [None, Some("0"), Some("1025"), Some("abc"), Some("-3")] {
+            assert_eq!(limit(fallback), 10 * 1024 * 1024, "{fallback:?}");
+        }
     }
 }

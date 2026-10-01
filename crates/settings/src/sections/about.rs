@@ -10,7 +10,7 @@ use serde_json::json;
 use super::SectionContext;
 use crate::ui::{Control, SettingsPage, SettingsRow, SettingsSection, body_text, meta_text};
 
-pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub(crate) const APP_VERSION: &str = fluxdown_protocol::APP_VERSION;
 const WEBSITE: &str = "https://fluxdown.zerx.dev";
 const CHROME_STORE: &str = "https://chromewebstore.google.com/search/FluxDown";
 const FIREFOX_STORE: &str = "https://addons.mozilla.org/firefox/addon/fluxdown/";
@@ -34,12 +34,18 @@ pub(crate) fn page(ctx: &SectionContext, _cx: &mut App) -> SettingsPage {
 
 fn version_section(ctx: &SectionContext) -> SettingsSection {
     let version = SharedString::from(format!("v{APP_VERSION}"));
+    let protocol = SharedString::from(fluxdown_protocol::PROTOCOL_VERSION.to_string());
     SettingsSection::new()
         .title(SharedString::from("FluxDown"))
         .row(ctx.item(
             "currentVersion",
             None,
             Control::custom(move |_, _, _, cx: &mut App| body_text(cx).child(version.clone())),
+        ))
+        .row(ctx.item(
+            "protocolVersionLabel",
+            None,
+            Control::custom(move |_, _, _, cx: &mut App| body_text(cx).child(protocol.clone())),
         ))
 }
 
@@ -82,10 +88,7 @@ fn check_update_control(ctx: &SectionContext) -> Control {
         let result = store.read(cx).update_check().cloned();
         let status = result.as_ref().map(|result| {
             if result.has_update {
-                translator.text_with(
-                    "updatePromptBody",
-                    &[("v", &result.latest_version), ("size", "")],
-                )
+                translator.text_with("newVersionFound", &[("v", &result.latest_version)])
             } else {
                 format!("{latest}: v{}", result.latest_version)
             }
@@ -168,7 +171,7 @@ fn logs_section(ctx: &SectionContext) -> SettingsSection {
         .row(ctx.item(
             "logMaxSize",
             Some("logMaxSizeDesc"),
-            ctx.pref_number("log_max_size_mb", 10, 1, 1024).unit("MB"),
+            ctx.daemon_number("log_max_size_mb").unit("MB"),
         ))
         .row(ctx.item("logExportButton", None, export_control(ctx)))
 }

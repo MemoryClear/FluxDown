@@ -5,6 +5,7 @@
 ## Blocker（打断）
 - crate 边界破坏：engine/api/server 引入 rinf 或 Dart 依赖
 - 非测试 Rust 代码出现 unwrap/expect/unsafe/通配导入
+- 任意 Rust 代码出现 `todo!` / `unimplemented!`、静默丢弃 `Result` / `Future`，或通过忽错 lint 的 `allow` / 命令行降低 lint 等级绕过门禁（测试代码同样适用；见 `rule://no-ignored-errors-in-rust`）
 - 手编 `lib/src/bindings/` 生成物
 - SQL 绕过 `db.rs::Db` 或非 `$N` 占位符
 - 未经用户要求的 git commit/push/tag；执行 `flutter run -d windows`
@@ -16,6 +17,7 @@
 - 同步阻塞调用未包 `spawn_blocking`
 - 翻译只改单语（en/zh 基线必须成对补齐；ja 等社区语言不检查，也不该由 AI 补）；UI 里硬编码中文文案未走 i18n 查表；新增依赖未见用户确认
 - 绕过已有 trait/error/日志宏平行造轮子
+- workspace clippy 未排除冻结的 `fluxdown_server` 或遗漏测试目标；正确门禁为 `cargo clippy --workspace --exclude fluxdown_server --all-targets -- -D warnings`（见 `.github/workflows/ci.yml`；`clippy.toml` 仅允许测试 unwrap/expect，其余 lint 一视同仁）
 
 ## Nit（旁注）
 - 导入顺序、日志 `_tag` 缺失、公开 API 缺 doc comment、超长文件/函数未说明

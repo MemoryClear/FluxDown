@@ -5,7 +5,7 @@ use std::sync::Arc;
 use fluxdown_ui_account::AccountView;
 use fluxdown_ui_extensions::ExtensionsView;
 use fluxdown_ui_i18n::keys;
-use fluxdown_ui_settings::{SettingsContentSlots, SettingsView};
+use fluxdown_ui_settings::{SettingsContentSlots, SettingsTarget, SettingsView};
 use fluxdown_ui_shell::{AuxiliaryWindowView, auxiliary_window_options};
 use gpui::{App, AppContext as _, px, size};
 use gpui_component::Root;
@@ -14,7 +14,7 @@ use crate::{
     app::Desktop,
     capability_ports::AgentExtensionsPort,
     session::attach,
-    windows::{WindowKey, WindowRegistry},
+    windows::{RememberedWindow, WindowKey, WindowRegistry},
 };
 
 const SETTINGS_WINDOW_SIZE: gpui::Size<gpui::Pixels> = size(px(1240.), px(760.));
@@ -27,15 +27,14 @@ pub fn open(cx: &mut App) {
     let settings_store = desktop.settings_store.clone();
     let account_host = desktop.account_host.clone();
     let title = translator.read(cx).text(keys::SETTINGS).to_owned();
-    let stored = Desktop::pref(cx, "desktop.window.settings");
     let mut options = auxiliary_window_options(title);
-    options.window_bounds = Some(WindowRegistry::restore_bounds(
-        &WindowKey::Settings,
-        stored.as_ref(),
+    options.window_min_size = Some(size(px(1000.), px(600.)));
+    WindowRegistry::restore_bounds(
+        RememberedWindow::Settings,
+        &mut options,
         SETTINGS_WINDOW_SIZE,
         cx,
-    ));
-    options.window_min_size = Some(size(px(1000.), px(600.)));
+    );
 
     WindowRegistry::open_or_focus(cx, WindowKey::Settings, options, move |window, cx| {
         let extensions_port = Arc::new(AgentExtensionsPort::new(client.clone()));
@@ -60,7 +59,32 @@ pub fn open(cx: &mut App) {
         let window_view =
             cx.new(|cx| AuxiliaryWindowView::new(translator, keys::SETTINGS, settings.into(), cx));
         let root = cx.new(|cx| Root::new(window_view, window, cx));
-        WindowRegistry::persist_bounds(&WindowKey::Settings, client, &root, window, cx);
+        WindowRegistry::persist_bounds(RememberedWindow::Settings, client, &root, window, cx);
         root
+    });
+}
+
+/// 打开（或聚焦）设置窗口并定位到 `target`。
+///
+/// 一律 defer：菜单 / 快捷键 / 命令面板触发时都处于活动窗口的 update 栈内
+/// （`App::dispatch_action` 经活动窗口分发），同步 `handle.update` 会静默失败。
+pub fn reveal(cx: &mut App, target: SettingsTarget) {
+    cx.defer(move |cx| {
+        open(cx);
+        let Some(handle) = WindowRegistry::handle(cx, &WindowKey::Settings) else {
+            return;
+        };
+        let Some(view) = Desktop::global(cx)
+            .settings_view
+            .as_ref()
+            .and_then(gpui::WeakEntity::upgrade)
+        else {
+            return;
+        };
+        if let Err(error) = handle.update(cx, |_, window, cx| {
+            view.update(cx, |view, cx| view.reveal(&target, window, cx));
+        }) {
+            log::debug!("view or window released before lifecycle update: {error:#}");
+        }
     });
 }

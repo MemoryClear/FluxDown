@@ -243,6 +243,9 @@ pub struct PluginManager {
     resolve_budget: ExecutionBudget,
     hook_budget: ExecutionBudget,
     sink: Arc<dyn EventSink>,
+    /// 串行化 `load_all`：扫描 + 整表替换非原子，交错的两次重载会用旧快照
+    /// 覆盖新的启停/熔断状态。
+    load_lock: tokio::sync::Mutex<()>,
 }
 
 impl PluginManager {
@@ -266,6 +269,7 @@ impl PluginManager {
             resolve_budget: DEFAULT_RESOLVE_BUDGET,
             hook_budget: DEFAULT_HOOK_BUDGET,
             sink,
+            load_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -274,8 +278,14 @@ impl PluginManager {
         self.runtime.spawn_handle()
     }
 
+    /// 宿主并发上限变化时同步 resolve 并发容量（见 [`ScriptRuntime::set_resolve_capacity`]）。
+    pub fn set_resolve_capacity(&self, max_concurrent: usize) {
+        self.runtime.set_resolve_capacity(max_concurrent);
+    }
+
     /// 扫描根目录 + `plugin.dev.*` 键，解析并加载全部插件。
     pub async fn load_all(&self) {
+        let _serial = self.load_lock.lock().await;
         let mut loaded: Vec<LoadedPlugin> = Vec::new();
         let mut failed: Vec<FailedPlugin> = Vec::new();
 
@@ -1087,15 +1097,51 @@ impl PluginManager {
         let identity = manifest.identity.clone();
         let abs = std::fs::canonicalize(path)
             .map_err(|e| PluginError::ManifestInvalid(format!("解析路径失败: {e}")))?;
-        self.db
-            .set_config(&format!("plugin.dev.{identity}"), &abs.to_string_lossy())
+        let dev_key = format!("plugin.dev.{identity}");
+        // 失败只回退本次写入的 dev 登记；同 identity 的已安装目录与
+        // `plugin.<id>.*` 设置/KV 不属于这次 dev 安装，绝不能清。
+        let previous = self
+            .db
+            .get_config(&dev_key)
             .await
             .map_err(|e| PluginError::Runtime(e.to_string()))?;
-        if let Err(error) = self.finish_install(&identity).await {
-            let _ = self.purge(&identity).await;
+        self.db
+            .set_config(&dev_key, &abs.to_string_lossy())
+            .await
+            .map_err(|e| PluginError::Runtime(e.to_string()))?;
+        if let Err(error) = self.activate_dev_install(&identity).await {
+            let rollback = match previous {
+                Some(old) => self.db.set_config(&dev_key, &old).await,
+                None => self.db.delete_config(&dev_key).await,
+            };
+            if let Err(rollback_error) = rollback {
+                crate::logger::report_error("plugin", "restore_dev_registration", &rollback_error);
+            }
+            self.load_all().await;
             return Err(error);
         }
         Ok(identity)
+    }
+
+    /// dev 安装的加载 + 校验：dev 副本必须真正加载成功（否则同 identity 的已安装
+    /// 副本会被顶替/保留，而 dev 版未生效却报成功）。
+    async fn activate_dev_install(&self, identity: &str) -> Result<(), PluginError> {
+        self.load_all().await;
+        if let Some(error) = self.dev_load_failure(identity).await {
+            return Err(error);
+        }
+        self.finish_install(identity).await
+    }
+
+    /// 本 identity 的 dev 登记对应的加载失败（忽略被 dev 顶替的已安装副本那条
+    /// identity 重复记录）。
+    async fn dev_load_failure(&self, identity: &str) -> Option<PluginError> {
+        self.failed_plugins
+            .read()
+            .await
+            .iter()
+            .find(|p| p.identity == identity && p.dev_mode)
+            .map(|p| PluginError::LoadFailed(p.error.clone()))
     }
 
     /// 重新加载一个 dev 插件：重读 manifest 与全部入口源码并做与安装相同的
@@ -1117,14 +1163,8 @@ impl PluginManager {
             return Err(PluginError::NotDevPlugin(identity.to_string()));
         }
         self.load_all().await;
-        if let Some(failed) = self
-            .failed_plugins
-            .read()
-            .await
-            .iter()
-            .find(|p| p.identity == identity)
-        {
-            return Err(PluginError::LoadFailed(failed.error.clone()));
+        if let Some(error) = self.dev_load_failure(identity).await {
+            return Err(error);
         }
         self.validate_loaded(identity).await
     }
@@ -1135,16 +1175,18 @@ impl PluginManager {
     ) -> Result<String, PluginError> {
         let identity = outcome.identity().to_string();
         if let Err(error) = self.finish_install(&identity).await {
-            if outcome.has_backup() {
-                let _ = super::install::rollback_install(&outcome);
-                self.load_all().await;
-            } else {
-                let _ = self.purge(&identity).await;
+            // 升级失败恢复旧目录；新装失败只删本次新建的目录。设置/KV 与同 identity
+            // 的 dev 登记不是这次安装写的，绝不能清。
+            if let Err(rollback_error) = super::install::rollback_install(&outcome) {
+                crate::logger::report_error("plugin", "rollback_install", &rollback_error);
             }
+            self.load_all().await;
             return Err(error);
         }
         if let Err(error) = super::install::commit_install(&outcome) {
-            let _ = super::install::rollback_install(&outcome);
+            if let Err(rollback_error) = super::install::rollback_install(&outcome) {
+                crate::logger::report_error("plugin", "rollback_install", &rollback_error);
+            }
             self.load_all().await;
             return Err(error);
         }
@@ -1158,8 +1200,7 @@ impl PluginManager {
             .db
             .get_config(&format!("plugin.{identity}.disabled_reason"))
             .await
-            .ok()
-            .flatten()
+            .map_err(|e| PluginError::Runtime(e.to_string()))?
             .as_deref()
             .map(DisabledReason::parse)
             .unwrap_or(DisabledReason::None);
@@ -1167,8 +1208,7 @@ impl PluginManager {
             .db
             .get_config(&format!("plugin.{identity}.enabled"))
             .await
-            .ok()
-            .flatten()
+            .map_err(|e| PluginError::Runtime(e.to_string()))?
             .is_some();
 
         // compile / pattern 校验各 entry：先临时重载以拿到源码，再校验。
@@ -1182,7 +1222,7 @@ impl PluginManager {
         // - Manual → 维持 disabled 不动（不覆盖用户主动关闭）
         if !has_enabled_key || reason == DisabledReason::CircuitBreaker {
             self.write_enabled(identity, true, DisabledReason::None)
-                .await;
+                .await?;
         }
         // 最终重载让内存态与 config 一致。
         self.load_all().await;
@@ -1225,13 +1265,16 @@ impl PluginManager {
     ///
     /// 清绑定 = 对受影响任务批量应用「忽略插件、按原始链接重跑」逃生舱；不清则
     /// 留下 orphaned 绑定，resume 走 fail-closed 报错（见 [`Self::resolve`]）。
-    /// 凭据清理只挂在这里（用户主动卸载），不挂在 [`Self::purge`] 本身
-    /// （M-4）：`purge` 也是安装失败的回滚路径（`install_dev`/
-    /// `finish_install_outcome` 失败时复用），回滚不该连带删掉一个已经登录
-    /// 成功、只是这次升级/覆盖安装失败的插件的凭据。
+    /// 凭据清理只挂在这里（用户主动卸载），不挂在 [`Self::purge`] 本身（M-4）。
+    /// 安装失败的回滚不走 purge（只回退本次写入的目录/dev 登记），避免误删同
+    /// identity 已有插件的目录、设置与凭据。
     pub async fn uninstall(&self, identity: &str) -> Result<(), PluginError> {
-        let _ = self.db.clear_tasks_resolver(identity).await;
+        self.db
+            .clear_tasks_resolver(identity)
+            .await
+            .map_err(|e| PluginError::Runtime(e.to_string()))?;
         self.purge(identity).await?;
+        self.bridge.remove_plugin_workspace(identity).await;
         if let Err(e) = crate::auth::remove_plugin(&self.db, identity).await {
             // 只记日志不 `?`：目录/配置键已经清干净，卸载本身已经完成；凭据
             // 清理失败（如旧版整表损坏——已由 auth::read_legacy_table 兜底，
@@ -1241,9 +1284,8 @@ impl PluginManager {
         Ok(())
     }
 
-    /// 删目录 + 清 `plugin.<identity>.` 前缀全部 config 键 + 重载。
-    /// 安装回滚复用（与 [`Self::uninstall`] 的差别：**不**清任务绑定、**不**清
-    /// 认证凭据）。
+    /// 删目录 + 清 `plugin.<identity>.` 前缀全部 config 键 + 重载。仅供
+    /// [`Self::uninstall`] 使用。
     async fn purge(&self, identity: &str) -> Result<(), PluginError> {
         // 删安装目录（dev 不删源，仅删配置键）。
         let failed_plugin = self
@@ -1251,8 +1293,8 @@ impl PluginManager {
             .read()
             .await
             .iter()
-            .find(|plugin| plugin.identity == identity)
-            .map(|plugin| (plugin.dev_mode, plugin.dir.to_path_buf()));
+            .find(|plugin| plugin.identity == identity && !plugin.dev_mode)
+            .map(|plugin| (false, plugin.dir.to_path_buf()));
         let dir = match &failed_plugin {
             Some((true, _)) => None,
             Some((false, dir)) => Some(dir.clone()),
@@ -1265,9 +1307,21 @@ impl PluginManager {
         };
         if let Some(dir) = dir
             && dir.exists()
+            && let Err(error) = tokio::fs::remove_dir_all(&dir).await
+            && error.kind() != std::io::ErrorKind::NotFound
         {
-            let _ = tokio::fs::remove_dir_all(&dir).await;
+            // 删除目录可能已部分成功，返回原错误前重建可执行快照。
+            self.load_all().await;
+            return Err(PluginError::Runtime(format!("删除插件目录失败: {error}")));
         }
+        let result = self.purge_config(identity).await;
+        // 配置枚举/删除失败也必须重载：安装目录已删除，不能继续消费旧 JS 缓存。
+        // 重载只负责收尾，卸载仍返回配置清理的原始错误。
+        self.load_all().await;
+        result
+    }
+
+    async fn purge_config(&self, identity: &str) -> Result<(), PluginError> {
         // config 键清理：identity 不合法时禁止前缀扫描（671#1）。失败插件的
         // identity 可能来自未通过 validate() 的 manifest，或干脆是扫到的目录
         // 名（见 `failure_identity`/`FailedPlugin::identity` 文档）——例如插件
@@ -1284,20 +1338,31 @@ impl PluginManager {
                 format!("plugin.{identity}."),
                 format!("plugin.dev.{identity}"),
             ] {
-                if let Ok(entries) = self.db.list_config_with_prefix(&prefix).await {
-                    for (k, _) in entries {
-                        // 认证凭据（`plugin.<id>.auth.<site>`）虽然共享这个前缀
-                        // 命名空间，但只能由用户主动 uninstall 清（M-4）——
-                        // purge 是安装回滚复用路径，不该连带删掉已登录成功的
-                        // 凭据。
-                        if crate::auth::is_sensitive_config_key(&k) {
-                            continue;
-                        }
-                        let _ = self.db.delete_config(&k).await;
+                let entries = self
+                    .db
+                    .list_config_with_prefix(&prefix)
+                    .await
+                    .map_err(|e| PluginError::Runtime(e.to_string()))?;
+
+                for (k, _) in entries {
+                    // 认证凭据（`plugin.<id>.auth.<site>`）虽然共享这个前缀
+                    // 命名空间，但只能由用户主动 uninstall 清（M-4）——
+                    // purge 是安装回滚复用路径，不该连带删掉已登录成功的
+                    // 凭据。
+                    if crate::auth::is_sensitive_config_key(&k) {
+                        continue;
                     }
+                    self.db
+                        .delete_config(&k)
+                        .await
+                        .map_err(|e| PluginError::Runtime(e.to_string()))?;
                 }
+
                 // plugin.dev.<id> 是精确键（无尾点），单独删。
-                let _ = self.db.delete_config(&prefix).await;
+                self.db
+                    .delete_config(&prefix)
+                    .await
+                    .map_err(|e| PluginError::Runtime(e.to_string()))?;
             }
         } else {
             for key in [
@@ -1305,10 +1370,12 @@ impl PluginManager {
                 format!("plugin.{identity}.disabled_reason"),
                 format!("plugin.dev.{identity}"),
             ] {
-                let _ = self.db.delete_config(&key).await;
+                self.db
+                    .delete_config(&key)
+                    .await
+                    .map_err(|e| PluginError::Runtime(e.to_string()))?;
             }
         }
-        self.load_all().await;
         Ok(())
     }
 
@@ -1319,32 +1386,39 @@ impl PluginManager {
         } else {
             DisabledReason::Manual
         };
-        self.write_enabled(identity, enabled, reason).await;
+        self.write_enabled(identity, enabled, reason).await?;
         self.load_all().await;
         Ok(())
     }
 
-    async fn write_enabled(&self, identity: &str, enabled: bool, reason: DisabledReason) {
-        let _ = self
-            .db
-            .set_config(
-                &format!("plugin.{identity}.enabled"),
-                if enabled { "true" } else { "false" },
-            )
-            .await;
-        let _ = self
-            .db
-            .set_config(
-                &format!("plugin.{identity}.disabled_reason"),
-                reason.as_str(),
-            )
-            .await;
+    async fn write_enabled(
+        &self,
+        identity: &str,
+        enabled: bool,
+        reason: DisabledReason,
+    ) -> Result<(), PluginError> {
+        let values = std::collections::BTreeMap::from([
+            (format!("plugin.{identity}.enabled"), enabled.to_string()),
+            (
+                format!("plugin.{identity}.disabled_reason"),
+                reason.as_str().to_string(),
+            ),
+        ]);
+        self.db
+            .set_config_batch_atomic(&values)
+            .await
+            .map_err(|e| PluginError::Runtime(e.to_string()))
     }
 
     /// 熔断：自动禁用 + emit 事件。
     async fn trip_circuit_breaker(&self, identity: &str) {
-        self.write_enabled(identity, false, DisabledReason::CircuitBreaker)
-            .await;
+        if let Err(error) = self
+            .write_enabled(identity, false, DisabledReason::CircuitBreaker)
+            .await
+        {
+            crate::logger::report_error("plugin", "persist_circuit_breaker", &error);
+            return;
+        }
         self.load_all().await;
         self.sink.emit(EngineEvent::PluginAutoDisabled {
             identity: identity.to_string(),
@@ -1373,23 +1447,32 @@ impl PluginManager {
         for (key, value) in entries {
             let field = manifest.settings.iter().find(|f| &f.key == key);
             let Some(field) = field else {
-                return Err(PluginError::InvalidOutput(format!("未知设置项 '{key}'")));
+                return Err(PluginError::InvalidSetting {
+                    key: key.clone(),
+                    message: format!("未知设置项 '{key}'"),
+                });
             };
             self.validate_value(field, value)?;
         }
-        // 全通过再逐个写。
-        for (key, value) in entries {
-            let _ = self
-                .db
-                .set_config(&format!("plugin.{identity}.setting.{key}"), value)
-                .await;
-        }
+        let values = entries
+            .iter()
+            .map(|(key, value)| (format!("plugin.{identity}.setting.{key}"), value.clone()))
+            .collect();
+        self.db
+            .set_config_batch_atomic(&values)
+            .await
+            .map_err(|e| PluginError::Runtime(e.to_string()))?;
         Ok(())
     }
 
     /// 单设置项校验（类型/required/pattern/min-max/select/toggle）。
     fn validate_value(&self, field: &SettingField, value: &str) -> Result<(), PluginError> {
-        let bad = |m: String| Err(PluginError::InvalidOutput(m));
+        let bad = |m: String| {
+            Err(PluginError::InvalidSetting {
+                key: field.key.clone(),
+                message: m,
+            })
+        };
         match field.ty {
             SettingType::Boolean => {
                 if value != "true" && value != "false" {
@@ -1401,8 +1484,9 @@ impl PluginManager {
                     .parse::<f64>()
                     .ok()
                     .filter(|v| v.is_finite())
-                    .ok_or_else(|| {
-                        PluginError::InvalidOutput(format!("'{}' 不是有效数字", field.key))
+                    .ok_or_else(|| PluginError::InvalidSetting {
+                        key: field.key.clone(),
+                        message: format!("'{}' 不是有效数字", field.key),
                     })?;
                 if let Some(lo) = field.min
                     && v < lo
@@ -1562,8 +1646,11 @@ impl PluginManager {
     }
 
     /// 逃生舱窄接口：清该任务 resolver_plugin_id（不改插件全局状态）。
-    pub async fn clear_task_resolver(&self, task_id: &str) {
-        let _ = self.db.set_task_resolver(task_id, "").await;
+    pub async fn clear_task_resolver(&self, task_id: &str) -> Result<(), PluginError> {
+        self.db
+            .set_task_resolver(task_id, "")
+            .await
+            .map_err(|e| PluginError::Runtime(e.to_string()))
     }
 
     /// 读取某插件的设置值（config `plugin.<id>.setting.*`）。
@@ -1801,6 +1888,7 @@ fn validate_subscription_item(item: SubscriptionOutputItem) -> Result<ParsedItem
         title: item.title,
         link: item.link,
         enclosure_url: item.enclosure_url,
+        enclosure_type: String::new(),
         resolver_item: item.resolver_item,
         enclosure_length: item.enclosure_length,
         pub_date: item.pub_date,

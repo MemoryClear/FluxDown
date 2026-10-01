@@ -59,6 +59,7 @@ fn ftp_runtime(
                 active: s.active,
             })
             .collect(),
+        source_bytes: None,
     }
 }
 
@@ -83,12 +84,16 @@ pub fn parse_ftp_url(url: &str) -> Result<FtpUrl, DownloadError> {
         return Err(DownloadError::Other("not an FTP URL".to_string()));
     };
 
-    // Use rfind to handle passwords containing literal '@' characters.
-    // E.g. ftp://user:p@ss@host/file → userinfo="user:p@ss", hostpath="host/file"
-    let (userinfo, hostpath) = if let Some(at_pos) = stripped.rfind('@') {
-        (&stripped[..at_pos], &stripped[at_pos + 1..])
+    // authority 以第一个 '/' 为界：路径/文件名里的 '@'（如 icon@2x.png）不属于 userinfo。
+    // authority 内用 rfind 兼容密码里的裸 '@'（ftp://user:p@ss@host/file）。
+    let (authority, path_part) = match stripped.find('/') {
+        Some(slash) => (&stripped[..slash], &stripped[slash..]),
+        None => (stripped, "/"),
+    };
+    let (userinfo, hostport) = if let Some(at_pos) = authority.rfind('@') {
+        (&authority[..at_pos], &authority[at_pos + 1..])
     } else {
-        ("", stripped)
+        ("", authority)
     };
 
     let (username, password) = if userinfo.is_empty() {
@@ -101,12 +106,17 @@ pub fn parse_ftp_url(url: &str) -> Result<FtpUrl, DownloadError> {
     } else {
         (url_decode(userinfo), String::new())
     };
+    let path = url_decode(path_part);
 
-    let (hostport, path) = if let Some(slash) = hostpath.find('/') {
-        (&hostpath[..slash], &hostpath[slash..])
-    } else {
-        (hostpath, "/")
-    };
+    // 解码结果会原样拼进 FTP 命令行；CR/LF/NUL 会切断命令边界，一律拒绝。
+    if [&username, &password, &path]
+        .iter()
+        .any(|s| s.contains(['\r', '\n', '\0']))
+    {
+        return Err(DownloadError::Other(
+            "FTP URL contains control characters".to_string(),
+        ));
+    }
 
     let (host, port) = if let Some(colon) = hostport.rfind(':') {
         let port_str = &hostport[colon + 1..];
@@ -127,8 +137,24 @@ pub fn parse_ftp_url(url: &str) -> Result<FtpUrl, DownloadError> {
         port,
         username,
         password,
-        path: url_decode(path),
+        path,
     })
+}
+
+/// 日志用：去掉 FTP URL 的 userinfo（含密码）。
+fn redact_ftp_url(url: &str) -> String {
+    let Some(rest) = url
+        .get(..6)
+        .filter(|p| p.eq_ignore_ascii_case("ftp://"))
+        .map(|_| &url[6..])
+    else {
+        return url.to_string();
+    };
+    let auth_end = rest.find('/').unwrap_or(rest.len());
+    match rest[..auth_end].rfind('@') {
+        Some(at) => format!("{}{}", &url[..6], &rest[at + 1..]),
+        None => url.to_string(),
+    }
 }
 
 /// 将单个十六进制字符（ASCII）转换为 0..=15 的 nibble 值。
@@ -190,6 +216,62 @@ const FTP_DATA_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// 无限挂起。
 const FTP_CONTROL_READ_TIMEOUT: Duration = Duration::from_secs(60);
 
+fn set_control_timeouts(tcp: &std::net::TcpStream) -> std::io::Result<()> {
+    tcp.set_read_timeout(Some(FTP_CONTROL_READ_TIMEOUT))?;
+    tcp.set_write_timeout(Some(FTP_CONTROL_READ_TIMEOUT))?;
+    Ok(())
+}
+
+/// no_proxy 匹配（逗号/分号分隔）：`*`、精确主机、域后缀（`.x` / `*.x` / `x`）、
+/// 精确 IP 与 CIDR，语义对齐 reqwest::NoProxy。
+fn host_matches_no_proxy(host: &str, list: &str) -> bool {
+    use std::net::IpAddr;
+    let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    let host_ip = host.parse::<IpAddr>().ok();
+    for raw in list.split([',', ';']) {
+        let entry = raw.trim().to_ascii_lowercase();
+        if entry.is_empty() {
+            continue;
+        }
+        if entry == "*" {
+            return true;
+        }
+        if let Some((net, bits)) = entry.split_once('/')
+            && let (Ok(net), Ok(bits), Some(ip)) =
+                (net.parse::<IpAddr>(), bits.parse::<u32>(), host_ip)
+        {
+            let in_net = match (net, ip) {
+                (IpAddr::V4(n), IpAddr::V4(h)) if bits <= 32 => {
+                    let mask = if bits == 0 {
+                        0
+                    } else {
+                        u32::MAX << (32 - bits)
+                    };
+                    u32::from(n) & mask == u32::from(h) & mask
+                }
+                (IpAddr::V6(n), IpAddr::V6(h)) if bits <= 128 => {
+                    let mask = if bits == 0 {
+                        0
+                    } else {
+                        u128::MAX << (128 - bits)
+                    };
+                    u128::from(n) & mask == u128::from(h) & mask
+                }
+                _ => false,
+            };
+            if in_net {
+                return true;
+            }
+            continue;
+        }
+        let suffix = entry.trim_start_matches("*.").trim_start_matches('.');
+        if host == suffix || host.ends_with(&format!(".{suffix}")) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Connect to an FTP server, optionally through a proxy.
 ///
 /// Proxy modes:
@@ -202,11 +284,32 @@ fn ftp_connect_sync_with_proxy(
     ftp_url: &FtpUrl,
     proxy: Option<&ProxyConfig>,
 ) -> Result<FtpStream, DownloadError> {
+    ftp_connect_sync(ftp_url, proxy, false)
+}
+
+/// 本次连接是否经代理隧道（命中 no_proxy 的主机直连，不算）。
+fn connects_via_proxy(ftp_url: &FtpUrl, proxy: Option<&ProxyConfig>) -> bool {
+    proxy
+        .map(|p| {
+            p.is_active()
+                && !p.host.is_empty()
+                && p.port > 0
+                && !host_matches_no_proxy(&ftp_url.host, &p.no_proxy_list)
+        })
+        .unwrap_or(false)
+}
+
+/// [`ftp_connect_sync_with_proxy`] 的完整版：`prefer_epsv` 让直连的数据通道从
+/// 一开始就走 EPSV（IPv6 控制连接本就强制 EPSV；代理路径不受影响）。
+fn ftp_connect_sync(
+    ftp_url: &FtpUrl,
+    proxy: Option<&ProxyConfig>,
+    prefer_epsv: bool,
+) -> Result<FtpStream, DownloadError> {
     let timeout = Duration::from_secs(30);
 
-    let should_proxy = proxy
-        .map(|p| p.is_active() && !p.host.is_empty() && p.port > 0)
-        .unwrap_or(false);
+    // 与 HTTP 路径一致：命中 no_proxy 的主机直连。
+    let should_proxy = connects_via_proxy(ftp_url, proxy);
 
     let default_proxy = ProxyConfig::default();
     let mut stream = if should_proxy {
@@ -222,6 +325,8 @@ fn ftp_connect_sync_with_proxy(
 
         // Establish a TCP connection through the proxy
         let tcp = proxy_config::proxy_connect_sync(proxy, &ftp_url.host, ftp_url.port, timeout)?;
+        // 代理握手完成后超时会被清除，这里重新设置，保证欢迎语/登录可超时。
+        set_control_timeouts(&tcp)?;
 
         // Build FtpStream from the pre-established (proxied) TCP connection
         let mut ftp = FtpStream::connect_with_stream(tcp)
@@ -252,23 +357,62 @@ fn ftp_connect_sync_with_proxy(
         ftp
     } else {
         // Direct connection (no proxy)
-        let addr = format!("{}:{}", ftp_url.host, ftp_url.port);
-
-        let sock_addr: std::net::SocketAddr = addr.parse().or_else(|_| {
+        // 依次尝试所有解析出的地址（双栈下首选地址不通时回落到另一族），并在读
+        // 220 欢迎语之前就设好控制连接超时，避免静默服务器无限阻塞登录/探测。
+        let addrs: Vec<std::net::SocketAddr> = {
             use std::net::ToSocketAddrs;
-            addr.to_socket_addrs()
+            (ftp_url.host.as_str(), ftp_url.port)
+                .to_socket_addrs()
                 .map_err(|e| DownloadError::Other(format!("DNS resolve error: {}", e)))?
-                .next()
-                .ok_or_else(|| DownloadError::Other("DNS returned no addresses".to_string()))
+                .collect()
+        };
+        if addrs.is_empty() {
+            return Err(DownloadError::Other(
+                "DNS returned no addresses".to_string(),
+            ));
+        }
+        let mut last_err = None;
+        let mut tcp = None;
+        for sock_addr in addrs {
+            match std::net::TcpStream::connect_timeout(&sock_addr, timeout) {
+                Ok(s) => {
+                    tcp = Some(s);
+                    break;
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        let tcp = tcp.ok_or_else(|| {
+            DownloadError::Other(format!(
+                "FTP connect error: {}",
+                last_err.map(|e| e.to_string()).unwrap_or_default()
+            ))
         })?;
-
-        let mut ftp = FtpStream::connect_timeout(sock_addr, timeout)
+        set_control_timeouts(&tcp)?;
+        let mut ftp = FtpStream::connect_with_stream(tcp)
             .map_err(|e| DownloadError::Other(format!("FTP connect error: {}", e)))?;
+        // IPv6 控制连接上 PASV 只能返回 IPv4 地址，服务器通常直接拒绝；RFC 2428 的
+        // EPSV 只返回端口，与下面的 NAT 容忍（复用控制主机）天然契合。
+        if prefer_epsv
+            || ftp
+                .get_ref()
+                .peer_addr()
+                .map(|a| a.is_ipv6())
+                .unwrap_or(false)
+        {
+            ftp.set_mode(suppaftp::Mode::ExtendedPassive);
+        }
         // NAT 容忍：很多 NAT 后的 FTP 服务器在 PASV 227 响应里报告私网/不可路由
         // IP（如 192.168.x.x）。开启该开关后 suppaftp 忽略 PASV 自报 IP，复用控制
         // 连接的主机 + PASV 端口建立数据连接，对齐标准客户端行为（代理路径已在
         // 上面的 passive_stream_builder 中做了等价处理；此处覆盖直连路径）。
         ftp.set_passive_nat_workaround(true);
+        // 默认 builder 用无超时的 TcpStream::connect；换成带连接超时的版本，防止数据
+        // 连接被防火墙静默丢包时线程长时间卡在 connect。
+        ftp = ftp.passive_stream_builder(move |data_addr: std::net::SocketAddr| {
+            std::net::TcpStream::connect_timeout(&data_addr, timeout)
+                .map_err(suppaftp::FtpError::ConnectionError)
+        });
         ftp
     };
 
@@ -280,6 +424,64 @@ fn ftp_connect_sync_with_proxy(
         .transfer_type(FileType::Binary)
         .map_err(|e| DownloadError::Other(format!("FTP set binary mode error: {}", e)))?;
 
+    Ok(stream)
+}
+
+/// 被动模式建立阶段的失败（PASV 应答错误 / 数据连接建立失败），而非 RETR 本身被拒
+/// （450/550 等）。只有前者值得换 EPSV 再试。
+fn is_passive_setup_failure(e: &suppaftp::FtpError) -> bool {
+    match e {
+        suppaftp::FtpError::ConnectionError(_) | suppaftp::FtpError::BadResponse => true,
+        suppaftp::FtpError::UnexpectedResponse(r) => {
+            matches!(r.status.code(), 425 | 500..=504 | 522)
+        }
+        _ => false,
+    }
+}
+
+/// 打开一条数据通道（`open` 通常是 `retr_as_stream`）。
+///
+/// IPv4 控制连接上的 PASV 路径失败（应答错误或数据连接建立失败）时，丢弃这条
+/// 控制连接（数据命令可能已发出，应答流已不同步），重连后改用 EPSV 再试一次，
+/// 成功则 `ftp` 替换为新连接。`rest_offset` 在新连接上重新发 REST。
+///
+/// 代理路径保持原样不回退：数据连接经代理隧道由 `passive_stream_builder` 建立，
+/// EPSV 只换应答格式，解决不了隧道本身的可达性。IPv6 控制连接本就强制 EPSV。
+fn open_data_with_epsv_fallback<R>(
+    ftp: &mut FtpStream,
+    ftp_url: &FtpUrl,
+    proxy: Option<&ProxyConfig>,
+    rest_offset: Option<usize>,
+    open: impl Fn(&mut FtpStream) -> suppaftp::FtpResult<R>,
+) -> suppaftp::FtpResult<R> {
+    let first = match open(ftp) {
+        Ok(stream) => return Ok(stream),
+        Err(e) => e,
+    };
+    let ipv4_control = ftp
+        .get_ref()
+        .peer_addr()
+        .map(|a| a.is_ipv4())
+        .unwrap_or(false);
+    if connects_via_proxy(ftp_url, proxy) || !ipv4_control || !is_passive_setup_failure(&first) {
+        return Err(first);
+    }
+    log_info!(
+        "[ftp-connect] PASV data channel failed ({}), retrying with EPSV on a fresh control connection",
+        first
+    );
+    let mut fresh = match ftp_connect_sync(ftp_url, proxy, true) {
+        Ok(f) => f,
+        Err(e) => {
+            log_info!("[ftp-connect] EPSV reconnect failed: {}", e);
+            return Err(first);
+        }
+    };
+    if let Some(offset) = rest_offset {
+        fresh.resume_transfer(offset)?;
+    }
+    let stream = open(&mut fresh)?;
+    *ftp = fresh;
     Ok(stream)
 }
 
@@ -347,7 +549,9 @@ fn resolve_ftp_info_sync(ftp_url: &FtpUrl, proxy: &ProxyConfig) -> Result<FileIn
 
     let supports_range = total_bytes > 0;
 
-    let _ = ftp.quit();
+    if let Err(error) = ftp.quit() {
+        tracing::debug!(%error, "FTP session shutdown did not receive QUIT acknowledgement");
+    }
 
     log_info!(
         "[ftp-resolve] path={}, name={}, size={}, range={}",
@@ -407,24 +611,35 @@ pub async fn probe_ftp_bandwidth(
         };
         let mut ftp = match ftp_connect_sync_with_proxy(&ftp_url, proxy_opt) {
             Ok(f) => f,
-            Err(_) => return None,
-        };
-
-        let start = std::time::Instant::now();
-
-        let mut data_stream = match ftp.retr_as_stream(&ftp_url.path) {
-            Ok(s) => s,
-            Err(_) => {
-                let _ = ftp.quit();
+            Err(error) => {
+                crate::logger::report_warning("ftp-probe", "connect for bandwidth sample", &error);
                 return None;
             }
         };
 
+        let start = std::time::Instant::now();
+
+        let mut data_stream =
+            match open_data_with_epsv_fallback(&mut ftp, &ftp_url, proxy_opt, None, |f| {
+                f.retr_as_stream(&ftp_url.path)
+            }) {
+                Ok(s) => s,
+                Err(error) => {
+                    crate::logger::report_warning("ftp-probe", "open bandwidth data connection", &error);
+                    if let Err(error) = ftp.quit() {
+                        tracing::debug!(%error, "FTP session shutdown did not receive QUIT acknowledgement");
+                    }
+                    return None;
+                }
+            };
+
         // Set read timeout on data connection to prevent indefinite blocking.
-        data_stream
+        if let Err(error) = data_stream
             .get_ref()
-            .set_read_timeout(Some(FTP_DATA_READ_TIMEOUT))
-            .ok();
+            .set_read_timeout(Some(FTP_DATA_READ_TIMEOUT)) {
+            crate::logger::report_warning("ftp-probe", "set data read timeout", &error);
+            return None;
+        }
 
         let mut buf = vec![0u8; 64 * 1024];
         let mut total: u64 = 0;
@@ -441,7 +656,10 @@ pub async fn probe_ftp_bandwidth(
                         break;
                     }
                 }
-                Err(_) => break,
+                Err(error) => {
+                    tracing::debug!(%error, "FTP bandwidth sample ended after read error");
+                    break;
+                }
             }
         }
 
@@ -450,10 +668,16 @@ pub async fn probe_ftp_bandwidth(
         // waiting for a 226 response that never comes if we aborted early.
         if cancelled_clone.load(Ordering::SeqCst) {
             drop(data_stream);
-            let _ = ftp.quit();
+            if let Err(error) = ftp.quit() {
+                tracing::debug!(%error, "FTP session shutdown did not receive QUIT acknowledgement");
+            }
         } else {
-            let _ = ftp.finalize_retr_stream(data_stream);
-            let _ = ftp.quit();
+            if let Err(error) = ftp.finalize_retr_stream(data_stream) {
+                crate::logger::report_warning("ftp-download", "finalize known-size transfer", &error);
+            }
+            if let Err(error) = ftp.quit() {
+                tracing::debug!(%error, "FTP session shutdown did not receive QUIT acknowledgement");
+            }
         }
 
         let elapsed = start.elapsed();
@@ -464,9 +688,18 @@ pub async fn probe_ftp_bandwidth(
         Some(total as f64 / elapsed.as_secs_f64())
     })
     .await
-    .unwrap_or(None);
+    .unwrap_or_else(|error| {
+        if error.is_cancelled() { tracing::debug!("FTP bandwidth reader cancelled"); }
+        else { crate::logger::report_warning("ftp-probe", "join bandwidth reader", &error); }
+        None
+    });
 
     cancel_watcher.abort();
+    if let Err(error) = cancel_watcher.await
+        && !error.is_cancelled()
+    {
+        crate::logger::report_warning("ftp-probe", "join bandwidth cancellation watcher", &error);
+    }
     result
 }
 
@@ -506,27 +739,58 @@ fn verify_ftp_rest_honoured_sync(
     }
     let probe_offset = (total_bytes - 1) as usize;
 
-    let mut ftp = ftp_connect_sync_with_proxy(ftp_url, proxy).ok()?;
-
-    if ftp.resume_transfer(probe_offset).is_err() {
-        // 服务器对 REST 直接报错：不确定（可能是瞬时故障，也可能真的不支持 REST，
-        // 但此处不据此降级，交由实际下载阶段的重试/完整性核对兜底）。
-        let _ = ftp.quit();
-        return None;
-    }
-
-    let mut data_stream = match ftp.retr_as_stream(&ftp_url.path) {
-        Ok(s) => s,
-        Err(_) => {
-            let _ = ftp.quit();
+    let mut ftp = match ftp_connect_sync_with_proxy(ftp_url, proxy) {
+        Ok(ftp) => ftp,
+        Err(error) => {
+            crate::logger::report_warning("ftp-probe", "connect for REST verification", &error);
             return None;
         }
     };
 
-    data_stream
+    if let Err(e) = ftp.resume_transfer(probe_offset) {
+        if let Err(error) = ftp.quit() {
+            tracing::debug!(%error, "FTP session shutdown did not receive QUIT acknowledgement");
+        }
+        // 500–504（命令未实现/参数错误）是服务器对 REST 的确定性拒绝：多段每段都要
+        // REST，必败，降级单流。其它错误（网络、421 等）可能是瞬时故障，不确定。
+        return match e {
+            suppaftp::FtpError::UnexpectedResponse(ref r)
+                if (500..=504).contains(&r.status.code()) =>
+            {
+                Some(false)
+            }
+            _ => None,
+        };
+    }
+
+    let mut data_stream = match open_data_with_epsv_fallback(
+        &mut ftp,
+        ftp_url,
+        proxy,
+        Some(probe_offset),
+        |f| f.retr_as_stream(&ftp_url.path),
+    ) {
+        Ok(s) => s,
+        Err(error) => {
+            crate::logger::report_warning(
+                "ftp-probe",
+                "open REST verification data connection",
+                &error,
+            );
+            if let Err(error) = ftp.quit() {
+                tracing::debug!(%error, "FTP session shutdown did not receive QUIT acknowledgement");
+            }
+            return None;
+        }
+    };
+
+    if let Err(error) = data_stream
         .get_ref()
         .set_read_timeout(Some(FTP_DATA_READ_TIMEOUT))
-        .ok();
+    {
+        crate::logger::report_warning("ftp-probe", "set data read timeout", &error);
+        return None;
+    }
 
     // 读取至多 2 字节即可判别：合规服务器只会送 1 字节。
     let mut buf = [0u8; 2];
@@ -541,9 +805,12 @@ fn verify_ftp_rest_honoured_sync(
                 }
             }
             // 读错误（含超时）：不确定，不降级。
-            Err(_) => {
+            Err(error) => {
+                tracing::debug!(%error, "FTP REST verification inconclusive after read error");
                 drop(data_stream);
-                let _ = ftp.quit();
+                if let Err(error) = ftp.quit() {
+                    tracing::debug!(%error, "FTP session shutdown did not receive QUIT acknowledgement");
+                }
                 return None;
             }
         }
@@ -551,7 +818,9 @@ fn verify_ftp_rest_honoured_sync(
 
     // 提前中止传输：直接关闭数据连接，不调用 finalize_retr_stream（会阻塞等 226）。
     drop(data_stream);
-    let _ = ftp.quit();
+    if let Err(error) = ftp.quit() {
+        tracing::debug!(%error, "FTP session shutdown did not receive QUIT acknowledgement");
+    }
     Some(honoured)
 }
 
@@ -563,13 +832,22 @@ async fn verify_ftp_rest_honoured(
 ) -> Option<bool> {
     let fu = ftp_url.clone();
     let px = proxy.clone();
-    tokio::task::spawn_blocking(move || {
+    match tokio::task::spawn_blocking(move || {
         let proxy_opt = if px.is_active() { Some(&px) } else { None };
         verify_ftp_rest_honoured_sync(&fu, proxy_opt, total_bytes)
     })
     .await
-    .ok()
-    .flatten()
+    {
+        Ok(result) => result,
+        Err(error) if error.is_cancelled() => {
+            tracing::debug!("FTP REST verification reader cancelled");
+            None
+        }
+        Err(error) => {
+            crate::logger::report_warning("ftp-probe", "join REST verification reader", &error);
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -578,7 +856,15 @@ async fn verify_ftp_rest_honoured(
 
 pub async fn run_ftp_download(params: DownloadParams) {
     let task_id_log = params.task_id.clone();
-    let result = run_ftp_download_inner(&params).await;
+    let result = match run_ftp_download_inner(&params).await {
+        Ok(total) => params
+            .db
+            .update_task_status(&params.task_id, 3, "")
+            .await
+            .map(|()| total)
+            .map_err(DownloadError::Db),
+        Err(error) => Err(error),
+    };
 
     match result {
         Ok(total) => {
@@ -587,10 +873,7 @@ pub async fn run_ftp_download(params: DownloadParams) {
                 task_id_log,
                 total
             );
-            if let Err(db_error) = params.db.update_task_status(&params.task_id, 3, "").await {
-                crate::logger::report_error("ftp-download", "persist completion status", &db_error);
-            }
-            let _ = params
+            if params
                 .progress_tx
                 .send(ProgressUpdate {
                     task_id: params.task_id,
@@ -602,7 +885,11 @@ pub async fn run_ftp_download(params: DownloadParams) {
                     segment_details: None,
                     ..Default::default()
                 })
-                .await;
+                .await
+                .is_err()
+            {
+                tracing::debug!("FTP progress receiver closed");
+            }
         }
         Err(DownloadError::Cancelled) => {
             log_info!("[ftp-download] task {} cancelled", task_id_log);
@@ -630,7 +917,7 @@ pub async fn run_ftp_download(params: DownloadParams) {
                     (0, 0)
                 }
             };
-            let _ = params
+            if params
                 .progress_tx
                 .send(ProgressUpdate {
                     task_id: params.task_id,
@@ -642,7 +929,11 @@ pub async fn run_ftp_download(params: DownloadParams) {
                     segment_details: None,
                     ..Default::default()
                 })
-                .await;
+                .await
+                .is_err()
+            {
+                tracing::debug!("FTP progress receiver closed");
+            }
         }
     }
 }
@@ -700,12 +991,15 @@ async fn compute_ftp_segments(p: &DownloadParams, info: &FileInfo) -> i32 {
 }
 
 async fn run_ftp_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
-    log_info!("[ftp-download] task {} starting, url={}", p.task_id, p.url);
+    log_info!(
+        "[ftp-download] task {} starting, url={}",
+        p.task_id,
+        redact_ftp_url(&p.url)
+    );
 
     // Transition to status=5 (preparing) — probing FTP server, resolving file info
-    let _ = p.db.update_task_status(&p.task_id, 5, "").await;
-    let _ = p
-        .progress_tx
+    p.db.update_task_status(&p.task_id, 5, "").await?;
+    if p.progress_tx
         .send(ProgressUpdate {
             task_id: p.task_id.clone(),
             downloaded_bytes: 0,
@@ -716,9 +1010,17 @@ async fn run_ftp_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
             segment_details: None,
             ..Default::default()
         })
-        .await;
+        .await
+        .is_err()
+    {
+        tracing::debug!("FTP progress receiver closed");
+    }
 
-    let info = resolve_ftp_file_info(&p.url, &p.proxy_config).await?;
+    // 探测期间的暂停/删除要立即生效，不能等阻塞线程里的握手超时。
+    let info = tokio::select! {
+        _ = p.cancel_token.cancelled() => return Err(DownloadError::Cancelled),
+        r = resolve_ftp_file_info(&p.url, &p.proxy_config) => r?,
+    };
     log_info!(
         "[ftp-download] task {} resolved: name={}, size={}, range={}",
         p.task_id,
@@ -727,10 +1029,12 @@ async fn run_ftp_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
         info.supports_range
     );
 
+    // p.file_name 来自外部（aria2 out、云端下发、接管请求等），与 HTTP/HLS 一致地清洗，
+    // 否则 save_dir.join 可被 `..`/绝对路径带出保存目录。
     let auto_name = if p.file_name.is_empty() {
         info.file_name.clone()
     } else {
-        p.file_name.clone()
+        sanitize_filename(&p.file_name)
     };
 
     let save_dir = PathBuf::from(&p.save_dir);
@@ -748,23 +1052,20 @@ async fn run_ftp_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
         return Err(DownloadError::Cancelled);
     }
 
-    let _ = p.db.update_task_status(&p.task_id, 1, "").await;
+    p.db.update_task_status(&p.task_id, 1, "").await?;
 
     // For resume tasks, send persisted downloaded bytes as baseline so speed
     // smoothing won't misinterpret resumed bytes as fresh transfer rate.
     let initial_downloaded = if p.is_resume {
         p.db.load_task_by_id(&p.task_id)
-            .await
-            .ok()
-            .flatten()
+            .await?
             .map(|t| t.downloaded_bytes.max(0))
             .unwrap_or(0)
     } else {
         0
     };
 
-    let _ = p
-        .progress_tx
+    if p.progress_tx
         .send(ProgressUpdate {
             task_id: p.task_id.clone(),
             downloaded_bytes: initial_downloaded,
@@ -775,7 +1076,11 @@ async fn run_ftp_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
             segment_details: None,
             ..Default::default()
         })
-        .await;
+        .await
+        .is_err()
+    {
+        tracing::debug!("FTP progress receiver closed");
+    }
 
     let dest_path = save_dir.join(&actual_name);
     let temp_path = PathBuf::from(format!("{}{}", dest_path.display(), TEMP_EXT));
@@ -783,7 +1088,7 @@ async fn run_ftp_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
     // Dynamic segment calculation
     let segments = if p.segment_count <= 0 {
         if p.is_resume {
-            let existing = p.db.load_segments(&p.task_id).await.unwrap_or_default();
+            let existing = p.db.load_segments(&p.task_id).await?;
             if !existing.is_empty() {
                 existing.len() as i32
             } else {
@@ -818,7 +1123,7 @@ async fn run_ftp_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
                 // 降级单流时清除可能残留的旧多段记录,维持"不使用分段则 DB 无段行"
                 // 的不变式;否则下次续传 load_segments 命中残留行会误入多段,而这些段
                 // 的内容实际由单流写入,造成内容空洞(与 HTTP RangeNotSupported 回退一致)。
-                let _ = p.db.delete_segments(&p.task_id).await;
+                p.db.delete_segments(&p.task_id).await?;
             }
             Some(true) => {
                 log_info!("[ftp-download] task {} REST offset verified", p.task_id);
@@ -969,7 +1274,15 @@ async fn run_ftp_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
                         disk_len,
                         info.total_bytes
                     );
-                    let _ = tokio::fs::remove_file(&temp_path).await;
+                    if let Err(error) = tokio::fs::remove_file(&temp_path).await
+                        && error.kind() != std::io::ErrorKind::NotFound
+                    {
+                        crate::logger::report_warning(
+                            "ftp-download",
+                            "remove invalid partial file",
+                            &error,
+                        );
+                    }
                 }
                 return Err(DownloadError::Other(format!(
                     "FTP size mismatch: expected {} bytes, got {} bytes",
@@ -1017,6 +1330,8 @@ async fn run_ftp_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
 
 const MAX_RETRIES: u32 = 3;
 const RETRY_BASE_DELAY: Duration = Duration::from_secs(2);
+/// 服务器明确拒绝 REST 时 reader 返回的错误前缀，写端据此清空临时文件从头重下。
+const REST_REJECTED_MSG: &str = "FTP REST rejected by server";
 
 /// Maximum consecutive read timeouts before aborting the FTP reader.
 /// Prevents infinite retry loops when set_read_timeout silently fails
@@ -1030,6 +1345,18 @@ const MAX_CONCURRENT_FTP_CONNECTIONS: usize = 4;
 
 /// Single-thread FTP download using sync FTP in a blocking task.
 /// Progress is reported back to the async world via mpsc channel.
+async fn persist_ftp_single_progress(
+    file: &mut tokio::io::BufWriter<File>,
+    db: &Db,
+    task_id: &str,
+    downloaded: i64,
+) -> Result<(), DownloadError> {
+    file.flush().await?;
+    file.get_ref().sync_data().await?;
+    db.update_task_progress(task_id, downloaded).await?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn ftp_download_single(
     task_id: &str,
@@ -1048,7 +1375,8 @@ async fn ftp_download_single(
 
     let existing_len = match tokio::fs::metadata(dest).await {
         Ok(m) => m.len() as i64,
-        Err(_) => 0,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(error.into()),
     };
 
     let resume =
@@ -1058,8 +1386,8 @@ async fn ftp_download_single(
     if !resume {
         // 单流新起时一并清除可能残留的多段记录(上次多段失败/降级遗留),保证
         // "不使用分段则 DB 无段行"不变式,防止后续续传被 load_segments 误判为多段。
-        let _ = db.delete_segments(task_id).await;
-        let _ = db.update_task_progress(task_id, 0).await;
+        db.delete_segments(task_id).await?;
+        db.update_task_progress(task_id, 0).await?;
     }
 
     let ftp_url = ftp_url.clone();
@@ -1094,6 +1422,7 @@ async fn ftp_download_single(
         let resume_offset = if resume { existing_len } else { 0 };
         let proxy = proxy_config.clone();
         let tracker_reader = tracker.clone();
+        let size_known = total_bytes > 0;
 
         tokio::task::spawn_blocking(move || -> Result<(), DownloadError> {
             let proxy_opt = if proxy.is_active() {
@@ -1104,21 +1433,30 @@ async fn ftp_download_single(
             let mut ftp = ftp_connect_sync_with_proxy(&ftp_url, proxy_opt)?;
 
             if resume_offset > 0 {
-                ftp.resume_transfer(resume_offset as usize)
-                    .map_err(|e| DownloadError::Other(format!("FTP REST error: {}", e)))?;
+                ftp.resume_transfer(resume_offset as usize).map_err(|e| {
+                    if let suppaftp::FtpError::UnexpectedResponse(r) = &e
+                        && (500..=504).contains(&r.status.code())
+                    {
+                        DownloadError::Other(format!("{REST_REJECTED_MSG}: {e}"))
+                    } else {
+                        DownloadError::Other(format!("FTP REST error: {}", e))
+                    }
+                })?;
             }
 
-            let mut data_stream = ftp
-                .retr_as_stream(&ftp_url.path)
-                .map_err(|e| DownloadError::Other(format!("FTP RETR error: {}", e)))?;
+            let mut data_stream = open_data_with_epsv_fallback(
+                &mut ftp,
+                &ftp_url,
+                proxy_opt,
+                (resume_offset > 0).then_some(resume_offset as usize),
+                |f| f.retr_as_stream(&ftp_url.path),
+            )
+            .map_err(|e| DownloadError::Other(format!("FTP RETR error: {}", e)))?;
 
             // Set read timeout so cancellation eventually unblocks this thread.
-            if let Err(e) = data_stream
+            data_stream
                 .get_ref()
-                .set_read_timeout(Some(FTP_DATA_READ_TIMEOUT))
-            {
-                log_info!("[ftp-single] set_read_timeout failed: {}", e);
-            }
+                .set_read_timeout(Some(FTP_DATA_READ_TIMEOUT))?;
 
             let mut buf = vec![0u8; 64 * 1024];
             let mut consecutive_timeouts: u32 = 0;
@@ -1149,7 +1487,9 @@ async fn ftp_download_single(
                         {
                             if consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS {
                                 drop(data_stream);
-                                let _ = ftp.quit();
+                                if let Err(error) = ftp.quit() {
+                                    tracing::debug!(%error, "FTP session shutdown did not receive QUIT acknowledgement");
+                                }
                                 return Err(DownloadError::Other(format!(
                                     "FTP read timed out {} consecutive times",
                                     consecutive_timeouts
@@ -1161,7 +1501,9 @@ async fn ftp_download_single(
                     }
                     Err(e) => {
                         drop(data_stream);
-                        let _ = ftp.quit();
+                        if let Err(error) = ftp.quit() {
+                            tracing::debug!(%error, "FTP session shutdown did not receive QUIT acknowledgement");
+                        }
                         return Err(DownloadError::Io(e));
                     }
                 }
@@ -1173,139 +1515,164 @@ async fn ftp_download_single(
             } else {
                 // BUG-FTP-CONTROL-IDLE-421 修复：读取 226 前给控制连接设超时，
                 // 防止服务器 421 断开后 finalize_retr_stream 无限阻塞。
-                // 设超时失败时记日志（与数据连接 set_read_timeout 一致），否则
-                // 控制连接无超时仍可能挂起，且静默无诊断线索。
-                if let Err(e) = ftp
-                    .get_ref()
-                    .set_read_timeout(Some(FTP_CONTROL_READ_TIMEOUT))
-                {
-                    log_info!("[ftp] 控制连接 set_read_timeout 失败: {}", e);
+                // 无法设置超时就停止本次传输，不能让 blocking reader 无界挂起。
+                set_control_timeouts(ftp.get_ref())?;
+                match ftp.finalize_retr_stream(data_stream) {
+                    Ok(()) => {}
+                    // 大小未知时没有任何其它完整性核对手段，收尾应答异常（426/451、
+                    // 超时等）意味着传输可能被截断，必须作为失败重试。
+                    Err(e) if !size_known => {
+                        if let Err(error) = ftp.quit() {
+                            tracing::debug!(%error, "FTP session shutdown did not receive QUIT acknowledgement");
+                        }
+                        return Err(DownloadError::Other(format!(
+                            "FTP transfer did not complete cleanly: {e}"
+                        )));
+                    }
+                    Err(error) => {
+                        crate::logger::report_warning(
+                            "ftp-download",
+                            "finalize known-size transfer",
+                            &error,
+                        );
+                    }
                 }
-                let _ = ftp.finalize_retr_stream(data_stream);
             }
-            let _ = ftp.quit();
+            if let Err(error) = ftp.quit() {
+                tracing::debug!(%error, "FTP session shutdown did not receive QUIT acknowledgement");
+            }
             Ok(())
         })
     };
 
-    // Async writer: receives chunks and writes to file with speed limiting
-    let mut downloaded: i64 = if resume { existing_len } else { 0 };
-    let mut file = if resume {
-        let f = OpenOptions::new().write(true).open(&dest).await?;
-        let mut f = tokio::io::BufWriter::with_capacity(BUF_WRITER_CAPACITY, f);
-        f.seek(std::io::SeekFrom::End(0)).await?;
-        f
-    } else {
-        tokio::io::BufWriter::with_capacity(BUF_WRITER_CAPACITY, File::create(&dest).await?)
-    };
-
-    let mut last_report = std::time::Instant::now();
-    let mut last_db_save = std::time::Instant::now();
-
-    loop {
-        tokio::select! {
-            _ = cancel_token.cancelled() => {
-                cancelled_writer.store(true, Ordering::SeqCst);
-                // flush 用 best-effort: 即便失败也要继续落库进度并清理 reader,否则 ?
-                // 会以 Io 错误绕过这些清理,且重试包装器会因非 Cancelled 而错误重试。
-                let _ = file.flush().await;
-                let _ = db.update_task_progress(&task_id, downloaded).await;
-                cancel_watcher.abort();
-                // close() 唤醒可能因 channel 满而阻塞在 blocking_send 的 reader,
-                // 避免下面 ftp_reader.await 死锁(与写错误分支一致)。
-                chunk_rx.close();
-                // Wait for blocking thread to finish
-                let _ = ftp_reader.await;
-                return Err(DownloadError::Cancelled);
-            }
-            chunk = chunk_rx.recv() => {
-                match chunk {
-                    Some(bytes) => {
-                        let n = bytes.len();
-                        // Speed limiter
-                        let mut offset = 0usize;
-                        let mut write_err: Option<std::io::Error> = None;
-                        while offset < n {
-                            let remaining = (n - offset) as u64;
-                            let allowed = speed_limiter.consume(remaining).await;
-                            let end = offset + allowed as usize;
-                            if let Err(e) = file.write_all(&bytes[offset..end]).await {
-                                write_err = Some(e);
-                                break;
-                            }
-                            offset = end;
-                        }
-
-                        // BUG-FTP-SINGLE-WRITEERR-LEAK 修复：镜像多段写错误处理，
-                        // 捕获写错误后先持久化进度，再设取消标志、关闭 channel、
-                        // 等待 reader 结束，最后返回错误，防止 cancel_watcher 泄漏
-                        // 且避免 ftp_reader 阻塞 blocking 线程的 chunk_tx 死锁。
-                        if let Some(e) = write_err {
-                            let _ = db.update_task_progress(&task_id, downloaded).await;
-                            cancelled_writer.store(true, Ordering::SeqCst);
-                            cancel_watcher.abort();
-                            chunk_rx.close();
-                            let _ = ftp_reader.await;
-                            return Err(DownloadError::Io(e));
-                        }
-
-                        downloaded += n as i64;
-
-                        if last_report.elapsed().as_millis() >= 200 {
-                            let segment = SegmentProgressInfo {
-                                index: 0, start_byte: 0,
-                                end_byte: if total_bytes > 0 { total_bytes - 1 } else { 0 },
-                                downloaded_bytes: downloaded, active: Some(tracker.is_active(0)),
-                            };
-                            let runtime = ftp_runtime(&task_id, total_bytes, 1, &tracker, std::slice::from_ref(&segment), crate::transfer_activity::next_sample_sequence());
-                            let _ = progress_tx
-                                .send(ProgressUpdate {
-                                    task_id: task_id.clone(),
-                                    downloaded_bytes: downloaded,
-                                    total_bytes,
-                                    status: 1,
-                                    error_message: String::new(),
-                                    file_name: String::new(),
-                                    segment_details: Some(vec![segment]),
-                                    runtime: Some(runtime),
-                                    ..Default::default()
-                                })
-                                .await;
-                            last_report = std::time::Instant::now();
-                        }
-
-                        if last_db_save.elapsed().as_secs() >= DB_SAVE_INTERVAL_SECS {
-                            // 与多段路径（ftp_do_segment）保持一致：落库前先 flush+sync，
-                            // 使 DB 偏移不超过已持久化字节。单流续传虽以磁盘文件大小为准
-                            // （非 DB 值），此处主要为不变式一致性；sync 失败则跳过本次落库。
-                            let durable =
-                                file.flush().await.is_ok() && file.get_ref().sync_data().await.is_ok();
-                            if durable {
-                                let _ = db.update_task_progress(&task_id, downloaded).await;
-                            }
-                            last_db_save = std::time::Instant::now();
-                        }
-                    }
-                    None => break, // channel closed — FTP reader done
+    // Every writer exit closes the channel and joins the blocking reader below.
+    let writer_result = async {
+        let mut downloaded = if resume { existing_len } else { 0 };
+        let mut file = if resume {
+            let f = OpenOptions::new().write(true).open(&dest).await?;
+            let mut f = tokio::io::BufWriter::with_capacity(BUF_WRITER_CAPACITY, f);
+            f.seek(std::io::SeekFrom::End(0)).await?;
+            f
+        } else {
+            tokio::io::BufWriter::with_capacity(BUF_WRITER_CAPACITY, File::create(&dest).await?)
+        };
+        let mut last_report = std::time::Instant::now();
+        let mut last_db_save = std::time::Instant::now();
+        loop {
+            let bytes = tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    persist_ftp_single_progress(&mut file, &db, &task_id, downloaded).await?;
+                    return Err(DownloadError::Cancelled);
                 }
+                chunk = chunk_rx.recv() => match chunk { Some(bytes) => bytes, None => break },
+            };
+            let mut offset = 0;
+            while offset < bytes.len() {
+                let allowed = tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        persist_ftp_single_progress(&mut file, &db, &task_id, downloaded).await?;
+                        return Err(DownloadError::Cancelled);
+                    }
+                    allowed = speed_limiter.consume((bytes.len() - offset) as u64) => allowed,
+                };
+                let end = offset + allowed as usize;
+                file.write_all(&bytes[offset..end]).await?;
+                downloaded += (end - offset) as i64;
+                offset = end;
+            }
+            if last_report.elapsed().as_millis() >= 200 && !progress_tx.is_closed() {
+                let segment = SegmentProgressInfo {
+                    index: 0,
+                    start_byte: 0,
+                    end_byte: if total_bytes > 0 { total_bytes - 1 } else { 0 },
+                    downloaded_bytes: downloaded,
+                    active: Some(tracker.is_active(0)),
+                };
+                let runtime = ftp_runtime(
+                    &task_id,
+                    total_bytes,
+                    1,
+                    &tracker,
+                    std::slice::from_ref(&segment),
+                    crate::transfer_activity::next_sample_sequence(),
+                );
+                if progress_tx
+                    .send(ProgressUpdate {
+                        task_id: task_id.clone(),
+                        downloaded_bytes: downloaded,
+                        total_bytes,
+                        status: 1,
+                        segment_details: Some(vec![segment]),
+                        runtime: Some(runtime),
+                        ..Default::default()
+                    })
+                    .await
+                    .is_err()
+                {
+                    tracing::debug!("FTP progress receiver closed");
+                }
+                last_report = std::time::Instant::now();
+            }
+            if last_db_save.elapsed().as_secs() >= DB_SAVE_INTERVAL_SECS {
+                persist_ftp_single_progress(&mut file, &db, &task_id, downloaded).await?;
+                last_db_save = std::time::Instant::now();
             }
         }
+        persist_ftp_single_progress(&mut file, &db, &task_id, downloaded).await
     }
-
-    file.flush().await?;
-    // 与周期保存 / ftp_do_segment 保持一致：最终落库前 fdatasync，确保完成时
-    // 磁盘数据持久（best-effort，失败不掩盖后续 reader 结果判定）。
-    let _ = file.get_ref().sync_data().await;
-    let _ = db.update_task_progress(&task_id, downloaded).await;
+    .await;
+    if writer_result.is_err() {
+        cancelled_writer.store(true, Ordering::SeqCst);
+    }
+    chunk_rx.close();
     cancel_watcher.abort();
-
-    // Check reader result
+    let watcher_error = match cancel_watcher.await {
+        Ok(()) => None,
+        Err(error) if error.is_cancelled() => None,
+        Err(error) => Some(DownloadError::Other(format!(
+            "FTP cancellation watcher join failed: {error}"
+        ))),
+    };
     let reader_result = ftp_reader
         .await
-        .map_err(|e| DownloadError::Other(format!("FTP reader join error: {}", e)))?;
-    reader_result?;
-
-    Ok(())
+        .map_err(|e| DownloadError::Other(format!("FTP reader join error: {e}")))
+        .and_then(|result| result);
+    if let Err(error) = writer_result {
+        if let Some(watcher_error) = watcher_error {
+            crate::logger::report_warning(
+                "ftp-download",
+                "stop cancellation watcher after writer failure",
+                &watcher_error,
+            );
+        }
+        if let Err(reader_error) = reader_result {
+            crate::logger::report_warning(
+                "ftp-download",
+                "stop reader after writer failure",
+                &reader_error,
+            );
+        }
+        return Err(error);
+    }
+    if let Some(error) = watcher_error {
+        if let Err(reader_error) = reader_result {
+            crate::logger::report_warning(
+                "ftp-download",
+                "stop reader after watcher failure",
+                &reader_error,
+            );
+        }
+        return Err(error);
+    }
+    match reader_result {
+        Err(DownloadError::Other(m)) if m.starts_with(REST_REJECTED_MSG) => {
+            // A rejected REST cannot resume; reset only after the reader has exited.
+            File::create(&dest).await?;
+            db.update_task_progress(&task_id, 0).await?;
+            Err(DownloadError::Other(m))
+        }
+        other => other,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1330,16 +1697,8 @@ async fn ftp_download_multi_segment(
 ) -> Result<(), DownloadError> {
     output::ensure_parent(dest).await?;
 
-    // 夺取段行布局属主权：先于 load_segments/建行（顺序即正确性，见
-    // db::set_segments_epoch 文档）。旧 spawn 迟到的段进度写从此全类失效。
-    if let Err(e) = db.set_segments_epoch(task_id, spawn_gen).await {
-        log_info!(
-            "[ftp-download] task {} set_segments_epoch({}) failed: {}（迟到写防护降级）",
-            task_id,
-            spawn_gen,
-            e
-        );
-    }
+    // Claim the layout epoch before loading rows or launching any writer.
+    db.set_segments_epoch(task_id, spawn_gen).await?;
 
     // Load or create segment definitions
     let mut existing_segments = db.load_segments(task_id).await?;
@@ -1348,7 +1707,8 @@ async fn ftp_download_multi_segment(
         let db_downloaded: i64 = existing_segments.iter().map(|s| s.downloaded_bytes).sum();
         let file_len = match tokio::fs::metadata(dest).await {
             Ok(m) => m.len() as i64,
-            Err(_) => 0,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error.into()),
         };
 
         // 注意（best-effort）：本检查只能检测“临时文件被删除/整体截断”
@@ -1465,11 +1825,17 @@ async fn ftp_download_multi_segment(
         let sink = sink.clone();
 
         let handle = tokio::spawn(async move {
-            // Acquire permit before opening FTP connection
-            let _permit = match sem.acquire().await {
-                Ok(p) => p,
-                Err(_) => return Err(DownloadError::Cancelled),
+            // 排队中的段遇到取消要立即退出，否则每个排队段都会先完整握手再发现已取消。
+            let _permit = tokio::select! {
+                _ = cancel.cancelled() => return Err(DownloadError::Cancelled),
+                p = sem.acquire() => match p {
+                    Ok(p) => p,
+                    Err(_) => return Err(DownloadError::Cancelled),
+                },
             };
+            if cancel.is_cancelled() {
+                return Err(DownloadError::Cancelled);
+            }
             ftp_do_segment_with_retry(
                 &task_id,
                 seg_idx,
@@ -1497,24 +1863,31 @@ async fn ftp_download_multi_segment(
 
     let mut final_error = None;
     for handle in handles {
-        match handle.await {
-            Ok(Ok(())) => {}
-            Ok(Err(DownloadError::Cancelled)) => {
-                if final_error.is_none() {
-                    final_error = Some(DownloadError::Cancelled);
-                }
+        let result = match handle.await {
+            Ok(result) => result,
+            Err(error) if error.is_cancelled() => {
+                tracing::debug!("FTP worker task cancelled");
+                Err(DownloadError::Cancelled)
             }
-            Ok(Err(e)) => {
-                if final_error.is_none() {
-                    cancel_token.cancel();
-                    final_error = Some(e);
-                }
+            Err(error) => Err(DownloadError::Other(format!(
+                "FTP worker join failed: {error}"
+            ))),
+        };
+        if let Err(error) = result {
+            if !matches!(error, DownloadError::Cancelled) {
+                cancel_token.cancel();
             }
-            Err(e) => {
-                if final_error.is_none() {
-                    cancel_token.cancel();
-                    final_error = Some(DownloadError::Other(e.to_string()));
-                }
+            if final_error.is_none()
+                || matches!(final_error, Some(DownloadError::Cancelled))
+                    && !matches!(error, DownloadError::Cancelled)
+            {
+                final_error = Some(error);
+            } else if !matches!(error, DownloadError::Cancelled) {
+                crate::logger::report_warning(
+                    "ftp-download",
+                    "stop another segment after failure",
+                    &error,
+                );
             }
         }
     }
@@ -1578,13 +1951,15 @@ async fn ftp_do_segment_with_retry(
             Ok(()) => return Ok(()),
             Err(DownloadError::Cancelled) => return Err(DownloadError::Cancelled),
             Err(e) => {
+                if cancel.is_cancelled() {
+                    return Err(e);
+                }
                 attempts += 1;
                 if attempts >= MAX_RETRIES {
                     return Err(e);
                 }
-                if let Ok(segs) = db.load_segments(task_id).await
-                    && let Some(seg) = segs.iter().find(|s| s.index == seg_idx)
-                {
+                let segs = db.load_segments(task_id).await?;
+                if let Some(seg) = segs.iter().find(|s| s.index == seg_idx) {
                     actual_start = seg_start + seg.downloaded_bytes;
                     if actual_start > seg_end {
                         return Ok(());
@@ -1641,7 +2016,9 @@ async fn ftp_do_segment(
     spawn_gen: i64,
 ) -> Result<(), DownloadError> {
     let bytes_needed = (seg_end - actual_start + 1) as u64;
-
+    if cancel.is_cancelled() {
+        return Err(DownloadError::Cancelled);
+    }
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancelled_writer = cancelled.clone();
 
@@ -1677,17 +2054,21 @@ async fn ftp_do_segment(
                 DownloadError::Other(format!("FTP REST error (seg {}): {}", seg_idx, e))
             })?;
 
-            let mut data_stream = ftp.retr_as_stream(&ftp_url.path).map_err(|e| {
+            let mut data_stream = open_data_with_epsv_fallback(
+                &mut ftp,
+                &ftp_url,
+                proxy_opt,
+                Some(actual_start as usize),
+                |f| f.retr_as_stream(&ftp_url.path),
+            )
+            .map_err(|e| {
                 DownloadError::Other(format!("FTP RETR error (seg {}): {}", seg_idx, e))
             })?;
 
             // Set read timeout so cancellation eventually unblocks this thread.
-            if let Err(e) = data_stream
+            data_stream
                 .get_ref()
-                .set_read_timeout(Some(FTP_DATA_READ_TIMEOUT))
-            {
-                log_info!("[ftp-seg {}] set_read_timeout failed: {}", seg_idx, e);
-            }
+                .set_read_timeout(Some(FTP_DATA_READ_TIMEOUT))?;
 
             let mut buf = vec![0u8; 64 * 1024];
             let mut bytes_read: u64 = 0;
@@ -1726,7 +2107,9 @@ async fn ftp_do_segment(
                         {
                             if consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS {
                                 drop(data_stream);
-                                let _ = ftp.quit();
+                                if let Err(error) = ftp.quit() {
+                                    tracing::debug!(%error, "FTP session shutdown did not receive QUIT acknowledgement");
+                                }
                                 return Err(DownloadError::Other(format!(
                                     "FTP segment {} read timed out {} consecutive times",
                                     seg_idx, consecutive_timeouts
@@ -1738,7 +2121,9 @@ async fn ftp_do_segment(
                     }
                     Err(e) => {
                         drop(data_stream);
-                        let _ = ftp.quit();
+                        if let Err(error) = ftp.quit() {
+                            tracing::debug!(%error, "FTP session shutdown did not receive QUIT acknowledgement");
+                        }
                         return Err(DownloadError::Io(e));
                     }
                 }
@@ -1757,7 +2142,9 @@ async fn ftp_do_segment(
             // 本段，而不是让整任务失败。
             if !cancelled.load(Ordering::SeqCst) && bytes_read < seg_bytes_needed {
                 drop(data_stream);
-                let _ = ftp.quit();
+                if let Err(error) = ftp.quit() {
+                    tracing::debug!(%error, "FTP session shutdown did not receive QUIT acknowledgement");
+                }
                 return Err(DownloadError::Other(format!(
                     "FTP segment {} closed early: got {}/{} bytes",
                     seg_idx, bytes_read, seg_bytes_needed
@@ -1770,177 +2157,142 @@ async fn ftp_do_segment(
             } else {
                 // BUG-FTP-CONTROL-IDLE-421 修复：读取 226 前给控制连接设超时，
                 // 防止服务器 421 断开后 finalize_retr_stream 无限阻塞。
-                // 设超时失败时记日志（与数据连接 set_read_timeout 一致），否则
-                // 控制连接无超时仍可能挂起，且静默无诊断线索。
-                if let Err(e) = ftp
-                    .get_ref()
-                    .set_read_timeout(Some(FTP_CONTROL_READ_TIMEOUT))
-                {
-                    log_info!("[ftp] 控制连接 set_read_timeout 失败: {}", e);
+                // 无法设置超时就停止本次传输，不能让 blocking reader 无界挂起。
+                set_control_timeouts(ftp.get_ref())?;
+                if let Err(error) = ftp.finalize_retr_stream(data_stream) {
+                    crate::logger::report_warning(
+                        "ftp-download",
+                        "finalize known-size transfer",
+                        &error,
+                    );
                 }
-                let _ = ftp.finalize_retr_stream(data_stream);
             }
-            let _ = ftp.quit();
+            if let Err(error) = ftp.quit() {
+                tracing::debug!(%error, "FTP session shutdown did not receive QUIT acknowledgement");
+            }
             Ok(())
         })
     };
 
-    // Async writer: write to pre-allocated file at correct offset.
-    let raw_file = OpenOptions::new().write(true).open(dest).await?;
-    let mut file = tokio::io::BufWriter::with_capacity(BUF_WRITER_CAPACITY, raw_file);
-    file.seek(std::io::SeekFrom::Start(actual_start as u64))
-        .await?;
-
     let mut seg_downloaded = actual_start - seg_start;
-    let mut last_report = std::time::Instant::now();
-    let mut last_db_save = std::time::Instant::now();
-
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                cancelled_writer.store(true, Ordering::SeqCst);
-                // flush 用 best-effort: 即便失败也要继续落库段进度并清理 reader,否则 ?
-                // 会以 Io 错误绕过这些清理,且重试包装器会因非 Cancelled 而错误重试。
-                let _ = file.flush().await;
-                if let Ok(mut states) = seg_states.lock()
-                    && let Some(s) = states.iter_mut().find(|s| s.index == seg_idx) {
-                        s.downloaded_bytes = seg_downloaded;
-                    }
-                let _ = db
-                    .update_segment_progress_bounded(
-                        task_id, seg_idx, seg_downloaded, seg_start, spawn_gen,
-                    )
-                    .await;
-                cancel_watcher.abort();
-                // close() 唤醒可能因 channel 满而阻塞在 blocking_send 的 reader,
-                // 避免 ftp_reader.await 死锁(与写错误分支一致)。
-                chunk_rx.close();
-                let _ = ftp_reader.await;
-                return Err(DownloadError::Cancelled);
-            }
-            chunk = chunk_rx.recv() => {
-                match chunk {
-                    Some(bytes) => {
-                        let n = bytes.len();
-                        // Speed limiter
-                        let mut offset = 0usize;
-                        let mut write_err: Option<std::io::Error> = None;
-                        while offset < n {
-                            let rem = (n - offset) as u64;
-                            let allowed = speed_limiter.consume(rem).await;
-                            let end = offset + allowed as usize;
-                            if let Err(e) = file.write_all(&bytes[offset..end]).await {
-                                write_err = Some(e);
-                                break;
-                            }
-                            offset = end;
-                        }
-
-                        // 写失败时，先持久化已完整记账的 seg_downloaded（不含本段
-                        // 部分写入字节），再向上传播错误。否则错误会直接经 `?`
-                        // 冒泡，跳过函数末尾的 update_segment_progress，使 DB 偏移
-                        // 落后于真实进度；重试时按陈旧偏移续传虽因字节相同不致损坏，
-                        // 但会让 DB 求和完整性核对出现不一致。这里不 flush 本段
-                        // 部分写入字节，避免磁盘超前于 DB；下次以 DB 偏移 REST 续传
-                        // 时会重新 seek 到 actual_start 覆盖写，幂等且安全。
-                        if let Some(e) = write_err {
-                            if let Ok(mut states) = seg_states.lock()
-                                && let Some(s) = states.iter_mut().find(|s| s.index == seg_idx) {
-                                    s.downloaded_bytes = seg_downloaded;
-                                }
-                            let _ = db
-                                .update_segment_progress_bounded(
-                                    task_id, seg_idx, seg_downloaded, seg_start, spawn_gen,
-                                )
-                                .await;
-                            cancelled_writer.store(true, Ordering::SeqCst);
-                            cancel_watcher.abort();
-                            // 关闭 receiver，保证阻塞 reader 即便正卡在
-                            // blocking_send（通道满）也会立刻得到 Err 而退出，避免
-                            // ftp_reader.await 死锁。close() 只需 &mut self，不会与
-                            // select! 宏对 chunk_rx 的可变借用冲突。
-                            chunk_rx.close();
-                            let _ = ftp_reader.await;
-                            return Err(DownloadError::Io(e));
-                        }
-
-                        let len = n as i64;
-                        seg_downloaded += len;
-                        total_downloaded.fetch_add(len, Ordering::Relaxed);
-
-                        if let Ok(mut states) = seg_states.lock()
-                            && let Some(s) = states.iter_mut().find(|s| s.index == seg_idx) {
-                                s.downloaded_bytes = seg_downloaded;
-                            }
-
-                        if last_report.elapsed().as_millis() >= 200 {
-                            let (mut snapshot, sample_sequence) = {
-                                let states = seg_states.lock().unwrap_or_else(|e| e.into_inner());
-                                (states.clone(), crate::transfer_activity::next_sample_sequence())
-                            };
-                            let current_total: i64 = snapshot.iter().map(|s| s.downloaded_bytes).sum();
-                            for segment in &mut snapshot {
-                                segment.active = Some(tracker.is_active(segment.index));
-                            }
-                            let runtime = ftp_runtime(task_id, total_bytes, MAX_CONCURRENT_FTP_CONNECTIONS as u32, tracker, &snapshot, sample_sequence);
-                            let _ = progress_tx
-                                .send(ProgressUpdate {
-                                    task_id: task_id.to_string(),
-                                    downloaded_bytes: current_total,
-                                    total_bytes,
-                                    status: 1,
-                                    error_message: String::new(),
-                                    file_name: String::new(),
-                                    segment_details: Some(snapshot),
-                                    runtime: Some(runtime),
-                                    ..Default::default()
-                                })
-                                .await;
-                            last_report = std::time::Instant::now();
-                        }
-
-                        if last_db_save.elapsed().as_secs() >= DB_SAVE_INTERVAL_SECS {
-                            // BUG-FTP-HOLE-PERIODIC-SAVE 修复：周期落库前先将
-                            // BufWriter 内核缓冲与页缓存刷到磁盘，保证 DB 中记录
-                            // 的 seg_downloaded 不超过已持久化的字节数。若 flush
-                            // 或 sync_data 失败，则跳过本次落库并重置计时器；
-                            // 下次触发时再尝试，不因周期保存失败而中断下载。
-                            let sync_ok = file.flush().await.is_ok()
-                                && file.get_ref().sync_data().await.is_ok();
-                            if sync_ok {
-                                let _ = db
-                                    .update_segment_progress_bounded(
-                                        task_id, seg_idx, seg_downloaded, seg_start, spawn_gen,
-                                    )
-                                    .await;
-                            }
-                            last_db_save = std::time::Instant::now();
-                        }
-                    }
-                    None => break,
+    let mut durable_downloaded = seg_downloaded;
+    let writer_result = async {
+        let raw_file = OpenOptions::new().write(true).open(dest).await?;
+        let mut file = tokio::io::BufWriter::with_capacity(BUF_WRITER_CAPACITY, raw_file);
+        file.seek(std::io::SeekFrom::Start(actual_start as u64)).await?;
+        let mut last_report = std::time::Instant::now();
+        let mut last_db_save = std::time::Instant::now();
+        loop {
+            let bytes = tokio::select! {
+                _ = cancel.cancelled() => {
+                    file.flush().await?;
+                    file.get_ref().sync_data().await?;
+                    durable_downloaded = seg_downloaded;
+                    db.update_segment_progress_bounded(task_id, seg_idx, durable_downloaded, seg_start, spawn_gen).await?;
+                    return Err(DownloadError::Cancelled);
                 }
+                chunk = chunk_rx.recv() => match chunk { Some(bytes) => bytes, None => break },
+            };
+            let mut offset = 0;
+            while offset < bytes.len() {
+                let allowed = tokio::select! {
+                    _ = cancel.cancelled() => {
+                        file.flush().await?;
+                        file.get_ref().sync_data().await?;
+                        durable_downloaded = seg_downloaded;
+                        db.update_segment_progress_bounded(task_id, seg_idx, durable_downloaded, seg_start, spawn_gen).await?;
+                        return Err(DownloadError::Cancelled);
+                    }
+                    allowed = speed_limiter.consume((bytes.len() - offset) as u64) => allowed,
+                };
+                let end = offset + allowed as usize;
+                file.write_all(&bytes[offset..end]).await?;
+                let written = (end - offset) as i64;
+                seg_downloaded += written;
+                total_downloaded.fetch_add(written, Ordering::Relaxed);
+                offset = end;
+            }
+            if let Ok(mut states) = seg_states.lock()
+                && let Some(s) = states.iter_mut().find(|s| s.index == seg_idx)
+            { s.downloaded_bytes = seg_downloaded; }
+            if last_report.elapsed().as_millis() >= 200 && !progress_tx.is_closed() {
+                let (mut snapshot, sample_sequence) = {
+                    let states = seg_states.lock().unwrap_or_else(|e| e.into_inner());
+                    (states.clone(), crate::transfer_activity::next_sample_sequence())
+                };
+                let current_total = snapshot.iter().map(|s| s.downloaded_bytes).sum();
+                for segment in &mut snapshot { segment.active = Some(tracker.is_active(segment.index)); }
+                let runtime = ftp_runtime(task_id, total_bytes, MAX_CONCURRENT_FTP_CONNECTIONS as u32, tracker, &snapshot, sample_sequence);
+                if progress_tx.send(ProgressUpdate {
+                    task_id: task_id.to_owned(), downloaded_bytes: current_total, total_bytes,
+                    status: 1, segment_details: Some(snapshot), runtime: Some(runtime),
+                    ..Default::default()
+                }).await.is_err() { tracing::debug!("FTP progress receiver closed"); }
+                last_report = std::time::Instant::now();
+            }
+            if last_db_save.elapsed().as_secs() >= DB_SAVE_INTERVAL_SECS {
+                file.flush().await?;
+                file.get_ref().sync_data().await?;
+                durable_downloaded = seg_downloaded;
+                db.update_segment_progress_bounded(task_id, seg_idx, durable_downloaded, seg_start, spawn_gen).await?;
+                last_db_save = std::time::Instant::now();
             }
         }
-    }
-
-    file.flush().await?;
-    file.get_ref().sync_data().await?;
+        file.flush().await?;
+        file.get_ref().sync_data().await?;
+        durable_downloaded = seg_downloaded;
+        db.update_segment_progress_bounded(task_id, seg_idx, durable_downloaded, seg_start, spawn_gen).await?;
+        Ok::<(), DownloadError>(())
+    }.await;
     if let Ok(mut states) = seg_states.lock()
         && let Some(s) = states.iter_mut().find(|s| s.index == seg_idx)
     {
-        s.downloaded_bytes = seg_downloaded;
+        s.downloaded_bytes = durable_downloaded;
     }
-    let _ = db
-        .update_segment_progress_bounded(task_id, seg_idx, seg_downloaded, seg_start, spawn_gen)
-        .await;
+    if writer_result.is_err() {
+        cancelled_writer.store(true, Ordering::SeqCst);
+    }
+    chunk_rx.close();
     cancel_watcher.abort();
-
+    let watcher_error = match cancel_watcher.await {
+        Ok(()) => None,
+        Err(error) if error.is_cancelled() => None,
+        Err(error) => Some(DownloadError::Other(format!(
+            "FTP cancellation watcher join failed: {error}"
+        ))),
+    };
     let reader_result = ftp_reader
         .await
-        .map_err(|e| DownloadError::Other(format!("FTP segment reader join error: {}", e)))?;
-    reader_result?;
-
-    Ok(())
+        .map_err(|e| DownloadError::Other(format!("FTP segment reader join error: {e}")))
+        .and_then(|result| result);
+    if let Err(error) = writer_result {
+        if let Some(watcher_error) = watcher_error {
+            crate::logger::report_warning(
+                "ftp-download",
+                "stop cancellation watcher after writer failure",
+                &watcher_error,
+            );
+        }
+        if let Err(reader_error) = reader_result {
+            crate::logger::report_warning(
+                "ftp-download",
+                "stop segment reader after writer failure",
+                &reader_error,
+            );
+        }
+        return Err(error);
+    }
+    if let Some(error) = watcher_error {
+        if let Err(reader_error) = reader_result {
+            crate::logger::report_warning(
+                "ftp-download",
+                "stop reader after watcher failure",
+                &reader_error,
+            );
+        }
+        return Err(error);
+    }
+    reader_result
 }
 
 // ---------------------------------------------------------------------------
@@ -1949,17 +2301,11 @@ async fn ftp_do_segment(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        FTP_DATA_READ_TIMEOUT, PROBE_MAX_RETRIES, PROBE_RETRY_BASE_DELAY, hex_nibble,
-        parse_ftp_url, url_decode,
-    };
-    use crate::downloader::sanitize_filename;
-    use crate::speed_limiter::SpeedLimiter;
+    use super::{hex_nibble, parse_ftp_url, url_decode};
     use std::io::Read;
+
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
-    use tokio::sync::mpsc;
+    use std::sync::atomic::Ordering;
 
     // -----------------------------------------------------------------------
     // Bug #9: url_decode — custom implementation unsafe on invalid sequences
@@ -2132,288 +2478,448 @@ mod tests {
         assert_eq!(u.path, "/文件.txt");
     }
 
-    // -----------------------------------------------------------------------
-    // Bug #12: FTP filename extraction when path ends in '/' or is empty
-    // (resolve_ftp_info_sync uses rsplit('/').next().filter(|s| !s.is_empty()))
-    // -----------------------------------------------------------------------
-
     #[test]
-    fn ftp_filename_from_path_trailing_slash() {
-        // Simulates the logic in resolve_ftp_info_sync
-        let path = "/pub/";
-        let file_name = path
-            .rsplit('/')
-            .next()
-            .filter(|s| !s.is_empty())
-            .map(sanitize_filename)
-            .or_else(|| crate::downloader::extract_from_url(&format!("ftp://host{}", path)))
-            .unwrap_or_else(|| "download".to_string());
-        // trailing slash → empty segment → should fallback to "download"
-        assert_eq!(file_name, "download");
+    fn parse_ftp_url_at_in_path_is_not_userinfo() {
+        let u = parse_ftp_url("ftp://ftp.example.com/pub/icon@2x.png")
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(u.host, "ftp.example.com");
+        assert_eq!(u.username, "anonymous");
+        assert_eq!(u.path, "/pub/icon@2x.png");
+
+        let u =
+            parse_ftp_url("ftp://u:p@ss@host:2121/dir/a@b.txt").unwrap_or_else(|_| unreachable!());
+        assert_eq!(u.host, "host");
+        assert_eq!(u.port, 2121);
+        assert_eq!(u.username, "u");
+        assert_eq!(u.password, "p@ss");
+        assert_eq!(u.path, "/dir/a@b.txt");
     }
 
     #[test]
-    fn ftp_filename_from_normal_path() {
-        let path = "/pub/linux-6.1.tar.gz";
-        let file_name = path
-            .rsplit('/')
-            .next()
-            .filter(|s| !s.is_empty())
-            .map(sanitize_filename)
-            .unwrap_or_else(|| "download".to_string());
-        assert_eq!(file_name, "linux-6.1.tar.gz");
+    fn parse_ftp_url_rejects_control_chars() {
+        assert!(parse_ftp_url("ftp://h/%0D%0ADELE%20x").is_err());
+        assert!(parse_ftp_url("ftp://h/a%00b").is_err());
+        assert!(parse_ftp_url("ftp://u%0D%0ASITE:p@h/f").is_err());
+        assert!(parse_ftp_url("ftp://u:p%0Aq@h/f").is_err());
+        assert!(parse_ftp_url("ftp://u:p@h/f%20g").is_ok());
     }
 
     #[test]
-    fn ftp_filename_with_special_chars() {
-        let path = "/pub/my:file<2>.txt";
-        let file_name = path
-            .rsplit('/')
-            .next()
-            .filter(|s| !s.is_empty())
-            .map(sanitize_filename)
-            .unwrap_or_else(|| "download".to_string());
-        // colons, angle brackets should be replaced
-        assert_eq!(file_name, "my_file_2_.txt");
-    }
-
-    // -----------------------------------------------------------------------
-    // Bug #4/#11: probe timeout and retry config — assert current (problematic)
-    // values so tests fail after the fix reminds us to update expectations
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn probe_config_timeout_is_reasonable() {
-        // FTP data read timeout reduced to 30s (from 60s).
-        assert_eq!(FTP_DATA_READ_TIMEOUT, Duration::from_secs(30));
-    }
-
-    #[test]
-    fn probe_retry_uses_exponential_backoff() {
-        // Fixed: retries now use exponential backoff with base delay of 1s.
-        assert_eq!(PROBE_RETRY_BASE_DELAY, Duration::from_secs(1));
-        assert_eq!(PROBE_MAX_RETRIES, 2);
-        // Worst-case: 2 attempts × 30s timeout + 1s delay = 61s (acceptable)
-        let worst_case = FTP_DATA_READ_TIMEOUT * PROBE_MAX_RETRIES + PROBE_RETRY_BASE_DELAY;
-        assert!(
-            worst_case <= Duration::from_secs(90),
-            "worst-case probe time {worst_case:?} should be <= 90s after fix"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // Bug #10: i64 → usize truncation on resume_transfer
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn i64_to_usize_truncation_safe_on_64bit() {
-        // On 64-bit platforms usize::MAX >= i64::MAX, so no truncation.
-        // This test verifies the assumption holds for the build target.
-        #[cfg(target_pointer_width = "64")]
-        {
-            let large_offset: i64 = 5_000_000_000; // 5 GB
-            let as_usize = large_offset as usize;
-            assert_eq!(as_usize, 5_000_000_000usize);
-        }
-    }
-
-    #[test]
-    fn i64_to_usize_truncation_would_fail_on_32bit() {
-        // Demonstrates the bug on a 32-bit platform (simulated).
-        // i64 value > u32::MAX would silently wrap.
-        let large_offset: i64 = 5_000_000_000; // 5 GB
-        let as_u32 = large_offset as u32; // simulates 32-bit usize
-        assert_ne!(
-            as_u32 as i64, large_offset,
-            "truncation silently corrupts the offset"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // Bug #1/#14: FTP read timeout retry — simulates the infinite loop risk
-    // -----------------------------------------------------------------------
-
-    /// Simulates the FTP reader loop pattern to demonstrate the infinite loop
-    /// when set_read_timeout silently fails and reads continuously timeout.
-    #[test]
-    fn ftp_read_timeout_loop_should_have_retry_limit() {
-        // Simulate: create a reader that always returns TimedOut
-        struct AlwaysTimedOutReader;
-        impl Read for AlwaysTimedOutReader {
-            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "simulated timeout",
-                ))
-            }
-        }
-
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let mut reader = AlwaysTimedOutReader;
-        let mut buf = vec![0u8; 1024];
-        let mut timeout_count = 0u32;
-        let max_iterations = 1000; // Safety limit for the test itself
-
-        // Replicate the current buggy loop pattern from ftp_downloader.rs:689-713
-        let mut iterations = 0;
-        loop {
-            iterations += 1;
-            if iterations > max_iterations {
-                break; // Test safety valve
-            }
-            if cancelled.load(Ordering::SeqCst) {
-                break;
-            }
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(_n) => { /* normal */ }
-                Err(e)
-                    if e.kind() == std::io::ErrorKind::TimedOut
-                        || e.kind() == std::io::ErrorKind::WouldBlock =>
-                {
-                    timeout_count += 1;
-                    // BUG: current code just does `continue` with no limit
-                    if cancelled.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    continue; // This is the bug — infinite loop
-                }
-                Err(_) => break,
-            }
-        }
-
-        // The loop hit our safety valve, proving the infinite loop bug:
-        // without cancellation, timeouts cause unlimited retries.
+    fn redact_ftp_url_strips_userinfo_only() {
         assert_eq!(
-            iterations,
-            max_iterations + 1,
-            "BUG: timeout loop ran {iterations} times without bound — \
-             needs a retry limit"
+            super::redact_ftp_url("ftp://user:p@ss@host:21/dir/a@b.txt"),
+            "ftp://host:21/dir/a@b.txt"
         );
         assert_eq!(
-            timeout_count, max_iterations,
-            "all iterations were timeouts, confirming infinite retry"
+            super::redact_ftp_url("ftp://host/icon@2x.png"),
+            "ftp://host/icon@2x.png"
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Bug #3: Speed limiter + bounded channel backpressure / potential deadlock
-    // -----------------------------------------------------------------------
+    #[test]
+    fn no_proxy_matching() {
+        use super::host_matches_no_proxy as m;
+        assert!(m("nas.local", "*.local"));
+        assert!(m("nas.local", ".local, other"));
+        assert!(m("192.168.1.5", "192.168.0.0/16"));
+        assert!(m("localhost", "localhost;x"));
+        assert!(m("anything", "*"));
+        assert!(!m("example.com", "*.local,192.168.0.0/16"));
+        assert!(!m("notlocal", ".local"));
+        assert!(!m("10.0.0.1", "192.168.0.0/16"));
+    }
 
-    /// Simulates the FTP architecture: blocking producer → bounded channel →
-    /// async consumer with speed limiter. Demonstrates backpressure risk.
-    #[tokio::test]
-    async fn speed_limiter_with_bounded_channel_backpressure() {
-        let limiter = SpeedLimiter::new(1024); // 1 KB/s — very slow
-        limiter.spawn_refill_task();
+    #[test]
+    fn passive_setup_failures_are_distinguished_from_rejected_retr() {
+        use suppaftp::{FtpError, Status, types::Response};
+        let reply =
+            |code: u32| FtpError::UnexpectedResponse(Response::new(Status::from(code), vec![]));
+        assert!(super::is_passive_setup_failure(&reply(502)));
+        assert!(super::is_passive_setup_failure(&reply(500)));
+        assert!(super::is_passive_setup_failure(&reply(425)));
+        assert!(super::is_passive_setup_failure(&FtpError::ConnectionError(
+            std::io::Error::from(std::io::ErrorKind::TimedOut)
+        )));
+        assert!(super::is_passive_setup_failure(&FtpError::BadResponse));
+        // RETR 本身被拒（文件不存在/无权限）换 EPSV 也无济于事。
+        assert!(!super::is_passive_setup_failure(&reply(550)));
+        assert!(!super::is_passive_setup_failure(&reply(450)));
+    }
 
-        // Small bounded channel (same as ftp_downloader multi-segment: capacity 16)
-        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(16);
-        let produced = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let consumed = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    #[test]
+    fn no_proxy_hit_counts_as_direct_connection() {
+        use crate::proxy_config::{ProxyConfig, ProxyMode, ProxyType};
+        let url = super::FtpUrl {
+            host: "nas.local".to_string(),
+            port: 21,
+            username: String::new(),
+            password: String::new(),
+            path: "/f".to_string(),
+        };
+        let proxy = ProxyConfig {
+            mode: ProxyMode::Manual,
+            proxy_type: ProxyType::Socks5,
+            host: "127.0.0.1".to_string(),
+            port: 1080,
+            username: String::new(),
+            password: String::new(),
+            no_proxy_list: "*.local".to_string(),
+        };
+        assert!(!super::connects_via_proxy(&url, Some(&proxy)));
+        let remote = super::FtpUrl {
+            host: "ftp.example.com".to_string(),
+            ..url
+        };
+        assert!(super::connects_via_proxy(&remote, Some(&proxy)));
+        assert!(!super::connects_via_proxy(&remote, None));
+    }
 
-        let produced_clone = produced.clone();
-        // Blocking producer: simulates FTP reader pushing 64KB chunks
-        let producer = tokio::task::spawn_blocking(move || {
-            let chunk = vec![0u8; 64 * 1024]; // 64 KB per chunk
-            for _ in 0..20 {
-                // This will block when channel is full
-                match tx.blocking_send(chunk.clone()) {
-                    Ok(()) => {
-                        produced_clone.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+    /// 最小 FTP 服务器:`refuse_pasv` 时 PASV 回 502(只支持 EPSV);`reject_retr` 时
+    /// RETR 回 550。返回 `(控制端口, 控制连接数, 收到的命令)`。
+    #[allow(clippy::type_complexity)]
+    fn spawn_fake_ftp(
+        refuse_pasv: bool,
+        reject_retr: bool,
+        payload: &'static [u8],
+    ) -> std::io::Result<(
+        u16,
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<std::sync::Mutex<Vec<String>>>,
+    )> {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let port = listener.local_addr()?.port();
+        let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let commands = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (conn_count, seen) = (Arc::clone(&connections), Arc::clone(&commands));
+        std::thread::spawn(move || {
+            for control in listener.incoming() {
+                let Ok(control) = control else { return };
+                conn_count.fetch_add(1, Ordering::SeqCst);
+                let seen = Arc::clone(&seen);
+                std::thread::spawn(move || {
+                    let Ok(reader_half) = control.try_clone() else {
+                        return;
+                    };
+                    let mut reader = BufReader::new(reader_half);
+                    let mut control = control;
+                    let mut data_listener: Option<TcpListener> = None;
+                    if let Err(error) = control.write_all(b"220 ready\r\n") {
+                        tracing::debug!(%error, "test FTP client closed connection");
+                        return;
                     }
-                    Err(_) => break,
-                }
-            }
-        });
-
-        let consumed_clone = consumed.clone();
-        let limiter_clone = limiter.clone();
-        // Async consumer with speed limiter
-        let consumer = tokio::spawn(async move {
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-            loop {
-                tokio::select! {
-                    _ = tokio::time::sleep_until(deadline) => break,
-                    chunk = rx.recv() => {
-                        match chunk {
-                            Some(bytes) => {
-                                let n = bytes.len();
-                                let mut offset = 0;
-                                while offset < n {
-                                    let rem = (n - offset) as u64;
-                                    let allowed = limiter_clone.consume(rem).await;
-                                    offset += allowed as usize;
-                                }
-                                consumed_clone.fetch_add(n as u64, Ordering::Relaxed);
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        match reader.read_line(&mut line) {
+                            Ok(0) => return,
+                            Ok(_) => {}
+                            Err(error) => {
+                                tracing::debug!(%error, "test FTP control connection closed");
+                                return;
                             }
-                            None => break,
+                        }
+                        let command = line.trim().to_string();
+                        if let Ok(mut seen) = seen.lock() {
+                            seen.push(command.clone());
+                        }
+                        let verb = command.split_whitespace().next().unwrap_or("");
+                        let reply: String = match verb {
+                            "USER" => "331 need password\r\n".to_string(),
+                            "PASS" => "230 logged in\r\n".to_string(),
+                            "TYPE" => "200 binary\r\n".to_string(),
+                            "SIZE" => format!("213 {}\r\n", payload.len()),
+                            "REST" => "350 restarting\r\n".to_string(),
+                            "PASV" if refuse_pasv => "502 PASV not implemented\r\n".to_string(),
+                            "PASV" | "EPSV" => {
+                                let Ok(data) = TcpListener::bind(("127.0.0.1", 0)) else {
+                                    return;
+                                };
+                                let data_port =
+                                    data.local_addr().map(|a| a.port()).unwrap_or_default();
+                                data_listener = Some(data);
+                                if verb == "PASV" {
+                                    format!(
+                                        "227 Entering Passive Mode (127,0,0,1,{},{})\r\n",
+                                        data_port >> 8,
+                                        data_port & 0xff
+                                    )
+                                } else {
+                                    format!(
+                                        "229 Entering Extended Passive Mode (|||{data_port}|)\r\n"
+                                    )
+                                }
+                            }
+                            "RETR" if reject_retr => "550 no such file\r\n".to_string(),
+                            "RETR" => {
+                                if let Err(error) =
+                                    control.write_all(b"150 opening data connection\r\n")
+                                {
+                                    tracing::debug!(%error, "test FTP client closed connection");
+                                    return;
+                                }
+                                if let Some(data) = data_listener.take()
+                                    && let Ok((mut stream, _)) = data.accept()
+                                    && let Err(error) = stream.write_all(payload)
+                                {
+                                    tracing::debug!(%error, "test FTP client closed connection");
+                                    return;
+                                }
+                                "226 transfer complete\r\n".to_string()
+                            }
+                            "QUIT" => {
+                                if let Err(error) = control.write_all(b"221 bye\r\n") {
+                                    tracing::debug!(%error, "test FTP client closed connection");
+                                    return;
+                                }
+                                return;
+                            }
+                            _ => "502 not implemented\r\n".to_string(),
+                        };
+                        if let Err(error) = control.write_all(reply.as_bytes()) {
+                            tracing::debug!(%error, "test FTP client closed connection");
+                            return;
                         }
                     }
-                }
+                });
             }
         });
-
-        let _ = tokio::time::timeout(Duration::from_secs(5), producer).await;
-        consumer.abort();
-
-        let total_produced = produced.load(Ordering::Relaxed);
-        let total_consumed = consumed.load(Ordering::Relaxed);
-
-        // With 1KB/s limit and 3s consumer runtime, at most ~3KB consumed.
-        // But producer generates 20 × 64KB = 1.28MB of data.
-        // The bounded channel (capacity 16) fills up quickly → producer blocks.
-        // This demonstrates the backpressure: producer is WAY ahead of consumer.
-        assert!(
-            total_produced > total_consumed,
-            "producer ({total_produced}) should be ahead of consumer ({total_consumed}) \
-             due to speed limiter backpressure"
-        );
-
-        // Consumer should only process ~3KB in 3 seconds at 1KB/s limit
-        assert!(
-            total_consumed < 20_000,
-            "consumer processed {total_consumed} bytes in 3s at 1KB/s limit — \
-             expected < 20KB (with overhead)"
-        );
-
-        // The key insight: producer is stuck because channel is full, and consumer
-        // is stuck in speed_limiter.consume(). In a real FTP download with the
-        // current code, if the consumer async task is waiting on the speed limiter
-        // and the channel backs up, the blocking thread cannot send new data.
-        // This is the documented backpressure problem (Bug #3).
+        Ok((port, connections, commands))
     }
 
-    // -----------------------------------------------------------------------
-    // Bug #13: multi-segment integrity check only checks DB, not disk
-    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn completion_persistence_failure_publishes_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = std::env::temp_dir().join(format!(
+            "fluxdown_ftp_completion_failure_{}",
+            uuid::Uuid::new_v4()
+        ));
+        tokio::fs::create_dir_all(&dir).await?;
+        let db_url = format!("sqlite://{}?mode=rwc", dir.join("completion.db").display());
+        let (port, _, _) = spawn_fake_ftp(false, false, b"completed-file")?;
+        let mut engine = crate::Engine::new(
+            crate::EngineConfig {
+                max_concurrent: 1,
+                speed_limit_bps: 0,
+                upload_limit_bps: 0,
+                default_save_dir: dir.to_string_lossy().into_owned(),
+                app_data_dir: dir.to_string_lossy().into_owned(),
+                bt_config: crate::bt_downloader::BtConfig::default(),
+                proxy_config: crate::proxy_config::ProxyConfig::default(),
+                user_agent: String::new(),
+                data_dir_override: Some(dir.clone()),
+                database_url: Some(db_url.clone()),
+            },
+            Arc::new(crate::NoopSink),
+            Arc::new(crate::NoopSelection),
+        )
+        .await?;
+        let injector = sqlx::AnyPool::connect(&db_url).await?;
+        sqlx::query("CREATE TRIGGER reject_completion BEFORE UPDATE OF status ON tasks WHEN NEW.status = 3 BEGIN SELECT RAISE(FAIL, 'completion write rejected'); END")
+            .execute(&injector).await?;
+        let mut done_rx = engine.manager.take_done_rx().expect("done receiver");
+        let mut progress_rx = engine
+            .manager
+            .take_progress_rx()
+            .expect("progress receiver");
+        let id = engine
+            .manager
+            .create_task(crate::download_manager::NewTaskSpec {
+                url: format!("ftp://u:p@127.0.0.1:{port}/file.bin"),
+                save_dir: dir.to_string_lossy().into_owned(),
+                file_name: "file.bin".to_owned(),
+                segments: 1,
+                ..Default::default()
+            })
+            .await
+            .expect("create FTP task");
+        let done = tokio::time::timeout(std::time::Duration::from_secs(10), done_rx.recv())
+            .await?
+            .expect("worker reports completion");
+        assert_eq!(done.task_id, id);
+        engine.manager.on_task_done(&done).await;
+        let task = engine.db.load_task_by_id(&id).await?.expect("task remains");
+        assert_eq!(task.status, 4, "worker exit must not leave a running row");
+        assert!(task.error_message.contains("completion write rejected"));
+        assert_eq!(
+            tokio::fs::read(dir.join("file.bin")).await?,
+            b"completed-file"
+        );
+        let mut terminal_error = None;
+        while let Ok(progress) = progress_rx.try_recv() {
+            assert_ne!(
+                progress.status, 3,
+                "failed persistence must not publish success"
+            );
+            if progress.status == 4 {
+                terminal_error = Some(progress);
+            }
+        }
+        let terminal_error = terminal_error.expect("terminal error reaches the consumer");
+        assert_eq!(terminal_error.task_id, id);
+        assert!(
+            terminal_error
+                .error_message
+                .contains("completion write rejected")
+        );
+        engine.manager.shutdown().await;
+        injector.close().await;
+        drop(engine);
+        if let Err(error) = tokio::fs::remove_dir_all(&dir).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, "test directory cleanup failed");
+        }
+        Ok(())
+    }
+
+    fn fake_ftp_url(port: u16) -> super::FtpUrl {
+        super::FtpUrl {
+            host: "127.0.0.1".to_string(),
+            port,
+            username: "u".to_string(),
+            password: "p".to_string(),
+            path: "/file.bin".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_checkpoint_flush_does_not_advance_resume_progress()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use tokio::io::AsyncWriteExt;
+        let db = crate::db::Db::connect("sqlite::memory:").await?;
+        db.insert_task(
+            "checkpoint",
+            "ftp://localhost/f",
+            "f",
+            "",
+            1,
+            6,
+            "",
+            "",
+            "",
+            1,
+        )
+        .await?;
+        let path =
+            std::env::temp_dir().join(format!("fluxdown_ftp_checkpoint_{}", uuid::Uuid::new_v4()));
+        tokio::fs::write(&path, b"old").await?;
+        let file = tokio::fs::File::open(&path).await?;
+        let mut writer = tokio::io::BufWriter::with_capacity(1024, file);
+        writer.write_all(b"new").await?;
+        assert!(matches!(
+            super::persist_ftp_single_progress(&mut writer, &db, "checkpoint", 6).await,
+            Err(super::DownloadError::Io(_))
+        ));
+        assert_eq!(
+            db.load_task_by_id("checkpoint")
+                .await?
+                .ok_or("missing task")?
+                .downloaded_bytes,
+            0
+        );
+        assert_eq!(tokio::fs::read(&path).await?, b"old");
+        drop(writer);
+        tokio::fs::remove_file(path).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn writer_failure_joins_reader_and_preserves_first_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::downloader::DownloadError;
+        let db = crate::db::Db::connect("sqlite::memory:").await?;
+        db.insert_task(
+            "writer-error",
+            "ftp://localhost/f",
+            "f",
+            "",
+            1,
+            7,
+            "",
+            "",
+            "",
+            1,
+        )
+        .await?;
+        let dest = std::env::temp_dir().join(format!(
+            "fluxdown_ftp_writer_error_{}",
+            uuid::Uuid::new_v4()
+        ));
+        tokio::fs::create_dir_all(&dest).await?;
+        // The local directory cannot be opened as an output file; RETR also fails.
+        let (port, _, _) = spawn_fake_ftp(false, true, b"")?;
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            super::ftp_download_single(
+                "writer-error",
+                &fake_ftp_url(port),
+                &dest,
+                7,
+                false,
+                &db,
+                &tx,
+                &tokio_util::sync::CancellationToken::new(),
+                &crate::speed_limiter::SpeedLimiter::new(0),
+                &crate::proxy_config::ProxyConfig::default(),
+                &crate::transfer_activity::TransferTracker::new(),
+            ),
+        )
+        .await?;
+        assert!(
+            matches!(result, Err(DownloadError::Io(_))),
+            "writer I/O error must survive reader RETR failure: {result:?}"
+        );
+        assert_eq!(
+            db.load_task_by_id("writer-error")
+                .await?
+                .ok_or("missing task")?
+                .downloaded_bytes,
+            0
+        );
+        tokio::fs::remove_dir(dest).await?;
+        Ok(())
+    }
 
     #[test]
-    fn integrity_check_db_only_misses_disk_corruption() {
-        // Simulates the integrity check logic from ftp_downloader.rs:566-586
-        struct SegRecord {
-            downloaded_bytes: i64,
-        }
-        let total_bytes: i64 = 1_000_000;
-        let segments = [
-            SegRecord {
-                downloaded_bytes: 500_000,
-            },
-            SegRecord {
-                downloaded_bytes: 500_000,
-            },
-        ];
-        let seg_total: i64 = segments.iter().map(|s| s.downloaded_bytes).sum();
+    fn retr_falls_back_to_epsv_when_pasv_is_refused() -> Result<(), Box<dyn std::error::Error>> {
+        const PAYLOAD: &[u8] = b"epsv-fallback-payload";
+        let (port, connections, commands) = spawn_fake_ftp(true, false, PAYLOAD)?;
+        let url = fake_ftp_url(port);
+        let mut ftp = super::ftp_connect_sync_with_proxy(&url, None)?;
 
-        // DB says all segments complete
-        assert_eq!(seg_total, total_bytes, "DB check passes");
+        let mut stream = super::open_data_with_epsv_fallback(&mut ftp, &url, None, Some(5), |f| {
+            f.retr_as_stream(&url.path)
+        })?;
+        let mut received = Vec::new();
+        stream.read_to_end(&mut received)?;
 
-        // But the actual file on disk could be different (e.g., 0 bytes due to crash)
-        let actual_file_size: i64 = 0; // simulated disk corruption
-        assert_ne!(
-            actual_file_size, total_bytes,
-            "BUG: DB integrity check passes but disk file is corrupted/empty — \
-             current code does not verify disk file size for multi-segment FTP"
-        );
+        assert_eq!(received, PAYLOAD);
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
+        let seen = commands.lock().map(|c| c.clone()).unwrap_or_default();
+        assert!(seen.iter().any(|c| c == "PASV"), "{seen:?}");
+        assert!(seen.iter().any(|c| c == "EPSV"), "{seen:?}");
+        // 新连接上要重新发 REST，断点偏移不能丢。
+        assert!(seen.iter().any(|c| c == "REST 5"), "{seen:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn retr_rejection_does_not_trigger_epsv_fallback() -> Result<(), Box<dyn std::error::Error>> {
+        let (port, connections, commands) = spawn_fake_ftp(false, true, b"")?;
+        let url = fake_ftp_url(port);
+        let mut ftp = super::ftp_connect_sync_with_proxy(&url, None)?;
+
+        let result = super::open_data_with_epsv_fallback(&mut ftp, &url, None, None, |f| {
+            f.retr_as_stream(&url.path)
+        });
+
+        assert!(result.is_err());
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+        let seen = commands.lock().map(|c| c.clone()).unwrap_or_default();
+        assert!(!seen.iter().any(|c| c == "EPSV"), "{seen:?}");
+        Ok(())
     }
 }

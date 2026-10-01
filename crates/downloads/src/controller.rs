@@ -51,6 +51,35 @@ pub struct SeedLimits {
     pub upload_limit_bps: i64,
 }
 
+/// `SeedLimits` 各限制字段的「跟随全局」哨兵（与 `native/protocol` 一致）。
+pub(crate) const SEED_LIMIT_FOLLOW_GLOBAL: i64 = -2;
+
+impl SeedLimits {
+    /// 全部跟随全局（上传限速 0 = 未设置）。
+    #[must_use]
+    pub(crate) fn inherit_all() -> Self {
+        Self {
+            ratio_limit_milli: SEED_LIMIT_FOLLOW_GLOBAL,
+            post_ratio_limit_milli: SEED_LIMIT_FOLLOW_GLOBAL,
+            seed_time_limit_minutes: SEED_LIMIT_FOLLOW_GLOBAL,
+            inactive_time_limit_minutes: SEED_LIMIT_FOLLOW_GLOBAL,
+            upload_limit_bps: 0,
+        }
+    }
+
+    /// 任务当前生效的单任务做种限制。
+    #[must_use]
+    pub(crate) fn from_dto(dto: &TaskDto) -> Self {
+        Self {
+            ratio_limit_milli: dto.seed_ratio_limit_milli,
+            post_ratio_limit_milli: dto.seed_post_ratio_limit_milli,
+            seed_time_limit_minutes: dto.seed_time_limit_minutes,
+            inactive_time_limit_minutes: dto.seed_inactive_time_limit_minutes,
+            upload_limit_bps: dto.seed_upload_limit_bps,
+        }
+    }
+}
+
 pub enum DownloadsCommand {
     /// 分页读取 daemon 持久活动历史。
     TaskActivity(TaskActivityQuery),
@@ -67,6 +96,19 @@ pub enum DownloadsCommand {
     },
     Delete {
         task_id: String,
+        delete_files: bool,
+    },
+    /// 批量暂停（`daemon.task.pauseMany`）：整批一次 RPC、一次任务快照。
+    PauseMany {
+        task_ids: Vec<String>,
+    },
+    /// 批量继续（`daemon.task.resumeMany`）。
+    ResumeMany {
+        task_ids: Vec<String>,
+    },
+    /// 批量删除（`daemon.task.deleteMany`）：同一批共用 `delete_files`。
+    DeleteMany {
+        task_ids: Vec<String>,
         delete_files: bool,
     },
     PauseAll,
@@ -148,8 +190,15 @@ pub enum DownloadsCommand {
     /// `fileMissingChanged` 事件回流）。
     RescanFiles,
     /// 本机 `.torrent` 文件：agent 读取、上传 blob 后按捕获路径建任务。
+    /// `silent = false`（用户主动打开）走 BT 文件选择；`true` 仅用于扩展 / 文件关联
+    /// 这类无人值守入口（全选文件）。保存目录 / 队列 / 开始暂停由表单入口携带，
+    /// 缺省（`None`）沿用 agent 的默认行为。
     SubmitTorrentFile {
         path: String,
+        silent: bool,
+        save_dir: Option<String>,
+        queue_id: Option<String>,
+        start_paused: Option<bool>,
     },
     /// 系统文件管理器为该文件显示的图标（`agent.platform.fileIcon`，结果为 PNG）。
     FileIcon(fluxdown_protocol::PlatformFileIconParams),
@@ -163,6 +212,20 @@ pub enum DownloadsCommand {
         key: &'static str,
         value: serde_json::Value,
     },
+}
+
+impl DownloadsCommand {
+    /// 用户主动打开的 `.torrent`（菜单 / 拖入）：走 BT 文件选择，其余沿用 agent 默认。
+    #[must_use]
+    pub(crate) fn open_torrent_file(path: &std::path::Path) -> Self {
+        Self::SubmitTorrentFile {
+            path: path.display().to_string(),
+            silent: false,
+            save_dir: None,
+            queue_id: None,
+            start_paused: None,
+        }
+    }
 }
 
 pub enum DownloadsResult {
@@ -650,7 +713,9 @@ impl DownloadsController {
                     if !file_name.is_empty() {
                         task.file_name.clone_from(file_name);
                     }
-                    task.total_bytes = *total_bytes;
+                    if *total_bytes > 0 {
+                        task.total_bytes = *total_bytes;
+                    }
                 }
                 self.rebuild_row(ix);
                 true
@@ -910,6 +975,17 @@ mod tests {
             assert!(!rows[0].metadata_pending);
         }
 
+        controller.apply_daemon_event(&DaemonEvent::Engine(WsServerMsg::TaskMetaProbed {
+            task_id: "task-1".to_owned(),
+            file_name: String::new(),
+            total_bytes: 0,
+        }));
+        {
+            let rows = controller.store().local();
+            assert_eq!(rows[0].name, "resolved.bin");
+            assert_eq!(rows[0].size_bytes, 4096);
+        }
+
         controller.apply_daemon_event(&DaemonEvent::Engine(WsServerMsg::TaskProgress {
             task_id: "task-1".to_owned(),
             status: 1,
@@ -1003,8 +1079,10 @@ mod tests {
     }
     #[test]
     fn late_snapshot_contains_segments_and_pausing_clears_active_without_erasing_bytes() {
-        let mut snapshot = fluxdown_protocol::AgentSnapshot::default();
-        snapshot.daemon_connected = true;
+        let mut snapshot = fluxdown_protocol::AgentSnapshot {
+            daemon_connected: true,
+            ..Default::default()
+        };
         let mut initial = task("t");
         initial.status = 1;
         initial.total_bytes = 100;
@@ -1060,8 +1138,10 @@ mod tests {
     }
     #[test]
     fn runtime_source_sequence_prevents_regression_and_paused_transfer_revival() {
-        let mut snapshot = fluxdown_protocol::AgentSnapshot::default();
-        snapshot.daemon_connected = true;
+        let mut snapshot = fluxdown_protocol::AgentSnapshot {
+            daemon_connected: true,
+            ..Default::default()
+        };
         let mut task = task("t");
         task.status = 1;
         snapshot.daemon.tasks.push(task.clone());

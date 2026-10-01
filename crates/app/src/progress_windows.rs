@@ -64,10 +64,17 @@ pub fn user_started(task_id: String, cx: &mut App) {
                 .find(|task| task.task_id == task_id)
                 .map(|task| task.status)
         });
-    if let Some(status) = status {
+    if let Some(status) = status.filter(|status| is_fresh_status(*status)) {
         observe(&task_id, status, cx);
     }
     hold_ui_until_resolved(task_id, cx);
+}
+
+/// 登记前的会话快照只有「正在运行」类状态可信：命令刚成功，暂停 / 失败 / 完成多半是
+/// 开始之前的旧状态，按它补判会把刚登记的意图立刻撤销或误弹完成窗口。
+fn is_fresh_status(status: i32) -> bool {
+    // 与下载能力的状态码一致：1 下载中、5 准备中。
+    matches!(status, 1 | 5)
 }
 
 /// agent 为静默建成的任务拉起界面（`--progress-task`）：首个快照到达后按用户开始处理。
@@ -97,12 +104,23 @@ fn hold_ui_until_resolved(task_id: String, cx: &mut App) {
         return;
     }
     let (resolved, wait) = oneshot::channel();
-    if let Some(previous) = windows.waiters.insert(task_id, resolved) {
-        let _ = previous.send(());
+    if let Some(previous) = windows.waiters.insert(task_id, resolved)
+        && previous.send(()).is_err()
+    {
+        log::trace!("previous progress-window keepalive has already ended");
     }
     let timeout = Box::pin(cx.background_executor().timer(ARMED_KEEP_ALIVE));
     let task = cx.background_spawn(async move {
-        let _ = select(wait, timeout).await;
+        match select(wait, timeout).await {
+            futures_util::future::Either::Left((result, _timeout)) => {
+                if result.is_err() {
+                    log::debug!("progress-window keepalive owner released");
+                }
+            }
+            futures_util::future::Either::Right(((), _wait)) => {
+                log::trace!("progress-window keepalive deadline reached");
+            }
+        }
     });
     crate::lifecycle::keep_alive(cx, task).detach();
 }
@@ -113,8 +131,10 @@ fn release_if_resolved(task_id: &str, cx: &mut App) {
     if windows.tracker.is_armed(task_id) {
         return;
     }
-    if let Some(resolved) = windows.waiters.remove(task_id) {
-        let _ = resolved.send(());
+    if let Some(resolved) = windows.waiters.remove(task_id)
+        && resolved.send(()).is_err()
+    {
+        log::trace!("progress-window keepalive has already ended");
     }
 }
 
@@ -210,5 +230,16 @@ fn observe(task_id: &str, status: i32, cx: &mut App) {
         }
         Some(ProgressWindowEffect::Close) => WindowRegistry::close(cx, &key),
         None => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_fresh_status;
+
+    #[test]
+    fn stale_inactive_statuses_do_not_resolve_a_fresh_intent() {
+        assert!(is_fresh_status(1) && is_fresh_status(5));
+        assert!(!is_fresh_status(2) && !is_fresh_status(4) && !is_fresh_status(3));
     }
 }

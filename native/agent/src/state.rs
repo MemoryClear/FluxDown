@@ -78,6 +78,8 @@ pub struct AgentState {
     pub gateway_migration_revision: Option<u64>,
     pub analytics_install_reported: bool,
     pub analytics_last_active_day: u64,
+    /// 匿名统计专用随机 ID；刻意与 FluxCloud `device_id` 分离，统计无法关联到账号 / 设备。
+    pub analytics_id: String,
     /// 调试构建下用户覆盖的 FluxCloud 地址；正式构建启动时忽略（锁定固定地址）。
     pub cloud_base_url_override: Option<String>,
 }
@@ -192,6 +194,14 @@ pub struct StateStore {
     acl_dir_ready: bool,
 }
 
+/// Windows 上锁争用是 `ERROR_LOCK_VIOLATION`，std 不把它映射为 `WouldBlock`。
+fn is_lock_contended(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || error
+            .raw_os_error()
+            .is_some_and(|code| fs2::lock_contended_error().raw_os_error() == Some(code))
+}
+
 impl StateStore {
     /// 打开状态目录并获取 `<data-dir>/agent.lock`。
     pub async fn open(data_dir: PathBuf) -> Result<Self, StateError> {
@@ -205,7 +215,7 @@ impl StateStore {
             .write(true)
             .open(lock_path)?;
         lock.try_lock_exclusive().map_err(|error| {
-            if error.kind() == std::io::ErrorKind::WouldBlock {
+            if is_lock_contended(&error) {
                 StateError::Locked
             } else {
                 StateError::Io(error)
@@ -266,20 +276,36 @@ impl StateStore {
             .data_dir
             .join(format!("agent-state.corrupt-{stamp:020}.json"));
         tokio::fs::rename(&self.state_path, &backup).await?;
-        if let Ok(mut entries) = tokio::fs::read_dir(&self.data_dir).await {
-            let mut backups = Vec::new();
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name.starts_with("agent-state.corrupt-") && name.ends_with(".json") {
-                    backups.push(entry.path());
+        match tokio::fs::read_dir(&self.data_dir).await {
+            Ok(mut entries) => {
+                let mut backups = Vec::new();
+                loop {
+                    let entry = match entries.next_entry().await {
+                        Ok(Some(entry)) => entry,
+                        Ok(None) => break,
+                        Err(error) => {
+                            tracing::warn!(path = %self.data_dir.display(), error = %error, "could not enumerate corrupt agent state backups");
+                            break;
+                        }
+                    };
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name.starts_with("agent-state.corrupt-") && name.ends_with(".json") {
+                        backups.push(entry.path());
+                    }
+                }
+                backups.sort();
+                let surplus = backups.len().saturating_sub(CORRUPT_BACKUP_LIMIT);
+                for stale in backups.into_iter().take(surplus) {
+                    // 已消失的旧备份无需再清理，其他失败不能掩盖隔离结果。
+                    if let Err(error) = tokio::fs::remove_file(&stale).await
+                        && error.kind() != std::io::ErrorKind::NotFound
+                    {
+                        tracing::warn!(path = %stale.display(), error = %error, "could not prune old corrupt agent state backup");
+                    }
                 }
             }
-            backups.sort();
-            let surplus = backups.len().saturating_sub(CORRUPT_BACKUP_LIMIT);
-            for stale in backups.into_iter().take(surplus) {
-                if let Err(error) = tokio::fs::remove_file(&stale).await {
-                    tracing::warn!(path = %stale.display(), error = %error, "could not prune old corrupt agent state backup");
-                }
+            Err(error) => {
+                tracing::warn!(path = %self.data_dir.display(), error = %error, "could not list corrupt agent state backups");
             }
         }
         Ok(backup)
@@ -316,7 +342,12 @@ impl StateStore {
             .join(format!(".agent-state.{}.tmp", Uuid::new_v4()));
         let result = self.write_temp_then_rename(&temp, bytes).await;
         if result.is_err() {
-            let _ = tokio::fs::remove_file(&temp).await;
+            // 创建临时文件前失败或 rename 后 fsync 失败时，临时路径可能本就不存在。
+            if let Err(error) = tokio::fs::remove_file(&temp).await
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(path = %temp.display(), error = %error, "could not remove failed agent state temp file");
+            }
         } else {
             *written = generation;
         }
@@ -349,14 +380,28 @@ impl StateStore {
 
 /// 清理上次崩溃遗留的临时状态文件（调用方已持有独占锁，不会误删并发写入）。
 async fn remove_stale_temp_files(dir: &Path) {
-    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
-        return;
+    let mut entries = match tokio::fs::read_dir(dir).await {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(path = %dir.display(), error = %error, "could not list stale agent state temp files");
+            return;
+        }
     };
-    while let Ok(Some(entry)) = entries.next_entry().await {
+    loop {
+        let entry = match entries.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(error) => {
+                tracing::warn!(path = %dir.display(), error = %error, "could not enumerate stale agent state temp files");
+                break;
+            }
+        };
         let name = entry.file_name().to_string_lossy().into_owned();
+        // 清理时已消失的文件已达成目的；保留其他失败的诊断。
         if name.starts_with(".agent-state.")
             && name.ends_with(".tmp")
             && let Err(error) = tokio::fs::remove_file(entry.path()).await
+            && error.kind() != std::io::ErrorKind::NotFound
         {
             tracing::warn!(file = %name, error = %error, "could not remove stale agent state temp file");
         }
@@ -416,16 +461,25 @@ async fn current_user_sid() -> Result<String, StateError> {
     if !output.status.success() {
         return Err(StateError::Acl("whoami /user failed".to_owned()));
     }
-    let text =
-        String::from_utf8(output.stdout).map_err(|error| StateError::Acl(error.to_string()))?;
-    let sid = text
-        .split(',')
-        .nth(1)
-        .map(|value| value.trim().trim_matches('"'))
-        .filter(|value| value.starts_with("S-1-"))
-        .ok_or_else(|| StateError::Acl("could not parse current SID".to_owned()))?
-        .to_owned();
+    let sid = parse_whoami_sid(&output.stdout)
+        .ok_or_else(|| StateError::Acl("could not parse current SID".to_owned()))?;
     Ok(SID.get_or_init(|| sid).clone())
+}
+
+/// 从 `whoami /user /fo csv /nh` 的原始输出取 SID。
+///
+/// 输出按控制台 OEM 代码页编码（简体中文系统为 GBK），计算机名 / 用户名含非 ASCII 字符时不是
+/// 合法 UTF-8。SID 是末尾字段且纯 ASCII，`,` 也不会出现在任何多字节编码的尾字节里，所以按字节
+/// 切出末字段再解码，与代码页无关。
+#[cfg(any(windows, test))]
+fn parse_whoami_sid(output: &[u8]) -> Option<String> {
+    let field = output.rsplit(|&byte| byte == b',').next()?;
+    let sid = std::str::from_utf8(field).ok()?.trim().trim_matches('"');
+    (sid.starts_with("S-1-")
+        && sid
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
+    .then(|| sid.to_owned())
 }
 
 #[cfg(windows)]
@@ -486,6 +540,32 @@ mod tests {
     use tokio::sync::Mutex;
 
     use super::{AgentState, PersistedSyncEntry, StateError, StateStore};
+
+    #[test]
+    fn platform_lock_contention_error_is_recognized() {
+        assert!(super::is_lock_contended(&fs2::lock_contended_error()));
+        assert!(super::is_lock_contended(&std::io::Error::from(
+            std::io::ErrorKind::WouldBlock
+        )));
+        assert!(!super::is_lock_contended(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied
+        )));
+    }
+
+    #[test]
+    fn whoami_sid_is_parsed_from_non_utf8_oem_output() {
+        // 简体中文系统的 OEM 代码页（GBK）输出，计算机名与用户名为「张三」：整行不是合法 UTF-8。
+        let gbk = b"\"\xd5\xc5\xc8\xfd-PC\\\xd5\xc5\xc8\xfd\",\"S-1-5-21-1-2-3-1001\"\r\n";
+        assert_eq!(
+            super::parse_whoami_sid(gbk).as_deref(),
+            Some("S-1-5-21-1-2-3-1001")
+        );
+        assert_eq!(
+            super::parse_whoami_sid(b"\"pc\\user\",\"S-1-5-21-1-2-3-1001\"\r\n").as_deref(),
+            Some("S-1-5-21-1-2-3-1001")
+        );
+        assert_eq!(super::parse_whoami_sid(b"garbage"), None);
+    }
 
     fn temp_dir(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -553,6 +633,50 @@ mod tests {
         }
         assert!(state.sync_stash.len() <= super::SYNC_STASH_LIMIT);
     }
+    #[tokio::test]
+    async fn failed_atomic_rename_removes_temp_and_does_not_report_a_saved_snapshot() {
+        let dir = temp_dir("state_failed_rename");
+        let store = StateStore::open(dir.clone()).await.expect("open store");
+        // 用目录阻止状态文件原子替换：temp 已创建且写入，rename 必须失败。
+        let state_path = dir.join("agent-state.json");
+        tokio::fs::create_dir(&state_path)
+            .await
+            .expect("block state rename");
+        let state = AgentState {
+            device_id: "must-not-report-saved".to_owned(),
+            ..AgentState::default()
+        };
+        let error = store
+            .save(&state)
+            .await
+            .expect_err("state rename must fail");
+        assert!(matches!(error, StateError::Io(_)));
+        assert!(
+            state_path.is_dir(),
+            "failed save must preserve the destination"
+        );
+        let temps: Vec<_> = std::fs::read_dir(&dir)
+            .expect("list state directory")
+            .map(|entry| entry.expect("read state directory entry").file_name())
+            .filter(|name| name.to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(
+            temps.is_empty(),
+            "failed save must remove its temporary snapshot"
+        );
+        tokio::fs::remove_dir(&state_path)
+            .await
+            .expect("unblock state rename");
+        store.save(&state).await.expect("save after rename failure");
+        assert_eq!(
+            store.load().await.expect("load saved state").device_id,
+            state.device_id
+        );
+        drop(store);
+        if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
+            tracing::warn!(path = %dir.display(), error = %error, "remove failed rename directory");
+        }
+    }
 
     #[tokio::test]
     async fn corrupt_state_is_quarantined_and_agent_starts_from_default() {
@@ -569,7 +693,7 @@ mod tests {
         assert!(!dir.join("agent-state.json").exists());
         let backups = std::fs::read_dir(&dir)
             .expect("list dir")
-            .filter_map(Result::ok)
+            .map(|entry| entry.expect("read backup directory entry"))
             .filter(|entry| {
                 entry
                     .file_name()
@@ -586,7 +710,9 @@ mod tests {
         store.save(&state).await.expect("save after recovery");
         assert_eq!(store.load().await.expect("reload").device_id, "fresh");
         drop(store);
-        let _ = std::fs::remove_dir_all(dir);
+        if let Err(error) = std::fs::remove_dir_all(&dir) {
+            tracing::warn!(path = %dir.display(), error = %error, "remove recovered state directory");
+        }
     }
 
     #[tokio::test]
@@ -610,12 +736,14 @@ mod tests {
         assert_eq!(store.load().await.expect("load").device_name, in_memory);
         let temps = std::fs::read_dir(&dir)
             .expect("list dir")
-            .filter_map(Result::ok)
+            .map(|entry| entry.expect("read state directory entry"))
             .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
             .count();
         assert_eq!(temps, 0, "no temp files may leak");
         drop(store);
-        let _ = std::fs::remove_dir_all(dir);
+        if let Err(error) = std::fs::remove_dir_all(&dir) {
+            tracing::warn!(path = %dir.display(), error = %error, "remove concurrent persist directory");
+        }
     }
 
     #[tokio::test]
@@ -652,6 +780,8 @@ mod tests {
         drop(store);
         let reopened = StateStore::open(dir.clone()).await.expect("reopen");
         drop(reopened);
-        let _ = std::fs::remove_dir_all(dir);
+        if let Err(error) = std::fs::remove_dir_all(&dir) {
+            tracing::warn!(path = %dir.display(), error = %error, "remove state directory");
+        }
     }
 }

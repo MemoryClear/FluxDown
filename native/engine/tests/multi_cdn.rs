@@ -91,7 +91,18 @@ async fn start_node(addr: SocketAddr, body: Arc<Vec<u8>>, throttle_ms: u64) -> N
             let body = body.clone();
             let rg = rg.clone();
             let h = tokio::spawn(async move {
-                let _ = serve_conn(stream, body, rg, throttle_ms).await;
+                if let Err(error) = serve_conn(stream, body, rg, throttle_ms).await {
+                    assert!(
+                        matches!(
+                            error.kind(),
+                            std::io::ErrorKind::BrokenPipe
+                                | std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                                | std::io::ErrorKind::UnexpectedEof
+                        ),
+                        "test server connection failed: {error}"
+                    );
+                }
             });
             cs.lock().unwrap().push(h);
         }
@@ -184,7 +195,14 @@ async fn serve_conn(
 
 fn work_dir(tag: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!("fluxdown_mcdn_{}_{}", tag, std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
+
+    if let Err(error) = std::fs::remove_dir_all(&d) {
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::NotFound,
+            "clean test path: {error}"
+        );
+    }
     std::fs::create_dir_all(&d).expect("create work dir");
     d
 }
@@ -265,8 +283,20 @@ async fn run_with_pool(
     )
     .await;
     drop(tx);
-    let _ = drain.await;
+
+    drain.await.expect("test background task must not panic");
     (res, dest)
+}
+
+/// macOS 等平台默认只有 127.0.0.1 环回别名；目标地址绑不上时跳过用例。
+async fn can_bind_all(ips: &[IpAddr]) -> bool {
+    for ip in ips {
+        if TcpListener::bind((*ip, 0)).await.is_err() {
+            eprintln!("skip: cannot bind loopback alias {ip}");
+            return false;
+        }
+    }
+    true
 }
 
 /// 分流 + 故障切换：三 IP 服务同一文件；等 `.2` 真正服务到 range GET 后
@@ -277,6 +307,9 @@ async fn multi_cdn_distributes_and_survives_node_kill() {
     let ip1 = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
     let ip2 = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
     let ip3 = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 3));
+    if !can_bind_all(&[ip2, ip3]).await {
+        return;
+    }
 
     // 先在 127.0.0.1:0 拿随机端口，再把 .2/.3 绑到同一端口。
     let probe = TcpListener::bind((ip1, 0)).await.expect("bind :0");
@@ -329,7 +362,12 @@ async fn multi_cdn_distributes_and_survives_node_kill() {
         served >= 2,
         "分片必须分布在 ≥2 个 IP（实际 range GET 计数: {counts:?}）"
     );
-    let _ = std::fs::remove_dir_all(&dir);
+
+    if let Err(error) = std::fs::remove_dir_all(&dir)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("best-effort test directory cleanup: {error}");
+    }
 }
 
 /// SYS 兜底不变量（不变量 1）：候选里混入一个从未启动的死节点（connect
@@ -344,6 +382,9 @@ async fn multi_cdn_dead_candidate_never_fails_task() {
     let body = Arc::new(gen_body(2 * 1024 * 1024, 0xBEEF));
     let ip1 = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
     let ip2 = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
+    if !can_bind_all(&[ip2]).await {
+        return;
+    }
     let dead = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 3)); // 不启动服务器
 
     let probe = TcpListener::bind((ip1, 0)).await.expect("bind :0");
@@ -371,5 +412,10 @@ async fn multi_cdn_dead_candidate_never_fails_task() {
         "healthy pinned node range GETs: {}",
         s2.range_gets.load(Ordering::Relaxed)
     );
-    let _ = std::fs::remove_dir_all(&dir);
+
+    if let Err(error) = std::fs::remove_dir_all(&dir)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("best-effort test directory cleanup: {error}");
+    }
 }

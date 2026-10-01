@@ -44,6 +44,7 @@ pub fn owner_for_key(key: &str) -> SyncOwner {
 const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(75);
 const LOCAL_DEBOUNCE: Duration = Duration::from_millis(600);
 const RESYNC_PAUSE: Duration = Duration::from_secs(1);
+const SSE_STABLE: Duration = Duration::from_secs(60);
 const RETRY_DELAYS: [Duration; 4] = [
     Duration::from_secs(5),
     Duration::from_secs(15),
@@ -266,7 +267,7 @@ impl SyncService {
                 }
                 continue;
             }
-            retry_attempt = 0;
+            let sync_started = std::time::Instant::now();
             let device_id = self.state.lock().await.device_id.clone();
             match self.cloud.sync_events(&device_id).await {
                 Ok(response) => {
@@ -302,6 +303,9 @@ impl SyncService {
                         continue;
                     }
                 }
+            }
+            if sync_started.elapsed() >= SSE_STABLE {
+                retry_attempt = 0;
             }
             let delay = RETRY_DELAYS[retry_attempt.min(RETRY_DELAYS.len() - 1)];
             retry_attempt = retry_attempt.saturating_add(1);
@@ -525,6 +529,7 @@ impl SyncService {
         let pull_value = self.cloud.sync_pull(since, &device_id).await?;
         let pull = serde_json::from_value::<PullResult>(pull_value)
             .map_err(|error| SyncError::Protocol(format!("sync pull response: {error}")))?;
+        let no_pulled_items = pull.items.is_empty();
         let items = pull
             .items
             .into_iter()
@@ -558,7 +563,7 @@ impl SyncService {
         if !daemon_changes.is_empty() {
             self.patch_daemon(daemon_changes).await?;
         }
-
+        let mut idle = false;
         if !sent_entries.is_empty() {
             let payload = sent_entries
                 .iter()
@@ -595,17 +600,25 @@ impl SyncService {
                     entry.dirty = false;
                 }
             }
-            state.sync.revision = revision;
+            // 回包恰好是 pull 之后的下一个 revision 才说明期间无他人写入；
+            // 否则保持 pull 水位，让后续 SSE 触发的 pull 补回并发写入。
+            state.sync.revision = if revision == pull.revision.saturating_add(1) {
+                revision
+            } else {
+                pull.revision
+            };
         } else {
             let mut state = self.state.lock().await;
             if state.account_uid.as_deref() != Some(uid.as_str()) {
                 return Err(SyncError::AccountChanged);
             }
             state.sync.revision = pull.revision;
+            idle = no_pulled_items && !first_sync && pull.revision == since;
         }
 
         let (preferences, status) = {
             let mut state = self.state.lock().await;
+            idle = idle && state.sync_pulled && state.sync.last_error.is_none();
             state.sync_pulled = true;
             state.refresh_sync_projection();
             state.sync.last_error = None;
@@ -614,7 +627,9 @@ impl SyncService {
             state.sync.last_synced_at_unix_ms = Some(now_unix_ms());
             (state.preferences.clone(), state.sync.clone())
         };
-        self.persist().await?;
+        if !idle {
+            self.persist().await?;
+        }
         if prefs_changed {
             self.events
                 .publish(AgentEvent::PreferencesChanged(preferences));
@@ -797,7 +812,7 @@ fn apply_pull(
             report.skipped.push((item.key, "local-only key"));
             continue;
         }
-        if item.device_id == local_device {
+        if item.device_id == local_device && state.sync_entries.contains_key(&item.key) {
             let entry = state.sync_entries.entry(item.key).or_default();
             entry.version = entry.version.max(item.version);
             if entry.value == item.value && entry.deleted == item.deleted {
@@ -932,9 +947,15 @@ fn seed_local_values(
             continue;
         }
         let local_value = match spec.owner {
-            SyncOwner::Daemon => current_daemon
-                .get(spec.storage_key)
-                .and_then(|wire| daemon_config_to_value(spec, wire).ok()),
+            SyncOwner::Daemon => current_daemon.get(spec.storage_key).and_then(|wire| {
+                match daemon_config_to_value(spec, wire) {
+                    Ok(value) => Some(value),
+                    Err(reason) => {
+                        tracing::warn!(key = %spec.key, reason = %reason, "not seeding unusable daemon config value");
+                        None
+                    }
+                }
+            }),
             SyncOwner::Agent | SyncOwner::Preferences => {
                 state.preferences.values.get(spec.key).cloned()
             }
@@ -951,9 +972,11 @@ fn seed_local_values(
                     continue;
                 }
             }
-        } else if validate_value(spec.key, &local_value).is_err() {
-            continue;
         } else {
+            if let Err(reason) = validate_value(spec.key, &local_value) {
+                tracing::warn!(key = %spec.key, reason = %reason, "not seeding invalid local setting");
+                continue;
+            }
             local_value
         };
         state.sync_entries.insert(
@@ -996,9 +1019,15 @@ fn categories_to_wire(value: &Value) -> Result<Value, String> {
 /// 云端分类合并进本机：保留本机同 id 分类的 `saveDir`；本机偏好的存储形态（JSON 字符串 / 数组）不变。
 fn merge_categories_from_wire(remote: &Value, local: Option<&Value>) -> Result<Value, String> {
     let mut list = parse_category_list(remote)?;
-    let local_dirs = local
-        .and_then(|local| parse_category_list(local).ok())
-        .unwrap_or_default()
+    let local_categories = match local.map(parse_category_list).transpose() {
+        Ok(categories) => categories.unwrap_or_default(),
+        Err(reason) => {
+            // 旧的本机值不可解析时仍可恢复云端分类；无法保留的本机目录必须可诊断。
+            tracing::warn!(reason = %reason, "cannot preserve local category directories while merging cloud categories");
+            Vec::new()
+        }
+    };
+    let local_dirs = local_categories
         .into_iter()
         .filter_map(|category| {
             let id = category.get("id")?.as_str()?.to_owned();
@@ -1442,6 +1471,7 @@ mod tests {
     struct SyncMockState {
         pulls: AtomicUsize,
         events: AtomicUsize,
+        push_revision: AtomicUsize,
         pushes: Mutex<Vec<Value>>,
         pull_status: Mutex<Option<(StatusCode, Value)>>,
         pull_items: Mutex<Vec<Value>>,
@@ -1463,7 +1493,11 @@ mod tests {
         axum::Json(body): axum::Json<Value>,
     ) -> impl IntoResponse {
         state.pushes.lock().await.push(body);
-        axum::Json(json!({"revision": 9}))
+        let revision = match state.push_revision.load(Ordering::SeqCst) {
+            0 => 9,
+            value => value,
+        };
+        axum::Json(json!({"revision": revision}))
     }
 
     async fn mock_events(
@@ -1515,7 +1549,7 @@ mod tests {
                 .route("/api/v1/sync/events", get(mock_events))
                 .with_state(mock.clone());
             tokio::spawn(async move {
-                let _ = axum::serve(listener, app).await;
+                axum::serve(listener, app).await.expect("serve sync mock");
             });
             let dir = std::env::temp_dir().join(format!(
                 "fluxdown_sync_{label}_{}_{}",
@@ -1601,7 +1635,9 @@ mod tests {
             drop(service);
             drop(state);
             drop(store);
-            let _ = tokio::fs::remove_dir_all(dir).await;
+            if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
+                tracing::warn!(path = %dir.display(), error = %error, "could not remove sync test directory");
+            }
         }
     }
 
@@ -1611,7 +1647,8 @@ mod tests {
         let cancel = CancellationToken::new();
         let worker = tokio::spawn(harness.service.clone().run(cancel.clone()));
         let mock = harness.mock.clone();
-        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        // 断开后按真实的 `RETRY_DELAYS[0]`（5s）退避重连；超时须留足余量，避免慢 CI 偶发超时。
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
             while mock.pulls.load(Ordering::SeqCst) < 2 || mock.events.load(Ordering::SeqCst) < 2 {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
@@ -1719,7 +1756,9 @@ mod tests {
             "no automatic retry while halted"
         );
 
-        // 用户重新启用后恢复。
+        // 用户重新启用后恢复。SSE 保持长连接：否则 `connected` 只在发完即断的一瞬为真，
+        // 10ms 轮询可能错过，下一次重连又落在退避之后而超时。
+        harness.mock.hold_open.store(true, Ordering::SeqCst);
         *harness.mock.pull_status.lock().await = None;
         harness.service.set_enabled(true).await.expect("re-enable");
         harness
@@ -1783,7 +1822,9 @@ mod tests {
         assert!(!error.halts(), "network failures retry automatically");
         drop(service);
         drop(store);
-        let _ = tokio::fs::remove_dir_all(dir).await;
+        if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
+            tracing::warn!(path = %dir.display(), error = %error, "could not remove unreachable sync test directory");
+        }
     }
 
     #[tokio::test]
@@ -1810,8 +1851,8 @@ mod tests {
         );
         assert_eq!(state.preferences.values["general.locale"], json!("zh"));
         assert_eq!(
-            state.sync.revision, 9,
-            "revision comes from the push response"
+            state.sync.revision, 7,
+            "a push revision more than one past the pull keeps the pull watermark"
         );
         assert!(state.sync.dirty_keys.is_empty());
         drop(state);
@@ -1832,6 +1873,22 @@ mod tests {
             !pushed_keys.contains(&"general.locale"),
             "echo of a fresh cloud item is not re-pushed"
         );
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_push_revision_right_after_the_pull_fast_forwards_the_watermark() {
+        let harness = Harness::new("push_fast_forward", |state| {
+            state.sync.enabled = true;
+            state
+                .preferences
+                .values
+                .insert("appearance.theme_mode".to_owned(), json!("dark"));
+        })
+        .await;
+        harness.mock.push_revision.store(8, Ordering::SeqCst);
+        harness.service.sync_now().await.expect("sync now");
+        assert_eq!(harness.state.lock().await.sync.revision, 8);
         harness.finish().await;
     }
 

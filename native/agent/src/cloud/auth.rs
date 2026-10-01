@@ -89,7 +89,7 @@ impl CloudAuthService {
             }
             map.insert(
                 "appVersion".to_owned(),
-                Value::String(env!("CARGO_PKG_VERSION").to_owned()),
+                Value::String(fluxdown_protocol::APP_VERSION.to_owned()),
             );
         }
         let value: Value = self.client.public(Method::POST, path, Some(&body)).await?;
@@ -188,7 +188,7 @@ mod tests {
         let address = listener.local_addr().expect("login mock address");
         let app = Router::new().route("/api/v1/auth/login", post(login));
         tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
+            axum::serve(listener, app).await.expect("serve login mock");
         });
 
         let dir = std::env::temp_dir().join(format!(
@@ -221,6 +221,8 @@ mod tests {
         drop(auth);
         drop(state);
         drop(store);
-        let _ = tokio::fs::remove_dir_all(dir).await;
+        if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
+            tracing::warn!(path = %dir.display(), error = %error, "remove login test directory");
+        }
     }
 }

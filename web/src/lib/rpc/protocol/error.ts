@@ -37,6 +37,7 @@ export type ErrorReason =
   | 'pluginDownloadFailed'
   | 'pluginPackageTooLarge'
   | 'pluginPackageInvalid'
+  | 'marketVersionChanged'
   | 'invalidCredentials'
   | 'invalidVerificationCode'
   | 'rateLimited'
@@ -62,8 +63,14 @@ export type ErrorReason =
   | 'pairingRejected'
   | 'pairingSignatureInvalid'
   | 'pairingSelf'
+  | 'pairingVersionMismatch'
   | 'peerNotPaired'
   | 'peerOffline'
+  | 'elevationCancelled'
+  | 'elevationUnavailable'
+  | 'runningElevated'
+  | 'repairIncomplete'
+  | 'repairNotApplicable'
   | 'unknown';
 
 /** `error.data`：应用错误的机器可读详情。 */

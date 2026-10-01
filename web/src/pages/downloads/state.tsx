@@ -28,9 +28,12 @@ import type {
   TaskRuntimeDto,
 } from '../../lib/rpc'
 import { CategoryIndex, categoriesFromPreference } from './model/categories'
+import { RescanThrottle } from '../../lib/rescanThrottle'
 import { currentDeviceId, visibleRemoteTasks } from './model/devices'
 import { filterMatches, LOCAL_DEVICE, SELECTION_ALL } from './model/filters'
 import type { SidebarSelection } from './model/filters'
+import { remoteCan } from './model/batchPlan'
+import { isDownloadable } from './model/actions'
 import { useLiveSpeeds } from './model/liveSpeeds'
 import { isDynamicSortKey } from './model/rowOrder'
 import { buildLocalView, buildRemoteView, isLocalKey, sourceSite, STATE_RANK } from './model/task'
@@ -263,6 +266,37 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
   const phase = useConnection().phase
   const live = useLiveSpeeds()
   const connected = phase === 'ready' && daemonConnected
+
+  // 页面可见 / 连接就绪时重扫已完成文件（daemon 空闲不再定时扫描）；节流镜像 GPUI RescanThrottle。
+  const rescanThrottle = useRef(new RescanThrottle())
+  const rescanTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    if (!connected) return
+    const fire = () => {
+      rpc.daemon.task.rescan().catch(() => {})
+    }
+    const request = () => {
+      if (document.visibilityState !== 'visible') return
+      const decision = rescanThrottle.current.request(Date.now())
+      if (decision.kind === 'now') fire()
+      else if (decision.kind === 'after') {
+        rescanTimer.current = setTimeout(() => {
+          rescanTimer.current = null
+          rescanThrottle.current.trailingFired(Date.now())
+          fire()
+        }, decision.delayMs)
+      }
+    }
+    request()
+    document.addEventListener('visibilitychange', request)
+    return () => document.removeEventListener('visibilitychange', request)
+  }, [connected])
+  useEffect(
+    () => () => {
+      if (rescanTimer.current !== null) clearTimeout(rescanTimer.current)
+    },
+    [],
+  )
 
   const { prefs, updatePrefs } = useViewPrefsState()
   const [sidebarSelection, setSidebarSelectionState] = useState<SidebarSelection>(SELECTION_ALL)
@@ -572,9 +606,9 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
     let allDownloadable = selectedViews.length > 0
     for (const view of selectedViews) {
       anyLocal ||= view.source === 'local'
-      if (view.state === 'downloading' || view.state === 'pending') anyActive = true
-      else if (view.state === 'paused' || view.state === 'failed') anyResumable = true
-      if (!(view.source === 'local' && view.state === 'completed')) allDownloadable = false
+      if (view.state === 'downloading' || view.state === 'pending') anyActive ||= remoteCan(view, 'pause')
+      else if (view.state === 'paused' || view.state === 'failed') anyResumable ||= remoteCan(view, 'resume')
+      if (!isDownloadable(view)) allDownloadable = false
     }
     return {
       count: selectedViews.length,

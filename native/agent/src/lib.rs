@@ -19,6 +19,7 @@ pub mod device_meta;
 pub mod diagnostics;
 pub mod event_hub;
 pub mod gateway;
+mod http_client;
 pub mod lifecycle;
 pub mod link;
 pub mod log_export;
@@ -26,6 +27,7 @@ pub mod logging;
 pub mod nmh;
 pub mod notification;
 mod open_association;
+pub mod permission;
 pub mod platform;
 pub mod power;
 pub mod remote;
@@ -50,7 +52,7 @@ pub fn service_hello(instance_id: impl Into<String>, capabilities: Vec<String>) 
     ServiceHello::new(
         ServiceRole::Agent,
         SERVICE_NAME,
-        env!("CARGO_PKG_VERSION"),
+        fluxdown_protocol::APP_VERSION,
         instance_id,
         capabilities,
     )

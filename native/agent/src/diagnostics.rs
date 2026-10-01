@@ -2,7 +2,14 @@
 //!
 //! 每个检查项是一次只读探测：NMH 中继/清单/浏览器注册、本进程 IPC 与网关监听、
 //! 兼容 HTTP API、daemon RPC、URL scheme 与 `.torrent` 关联、日志目录可写。
-//! 修复动作是显式的第二步（`repair`），探测本身从不改动系统。
+//! 权限类检查是动态的：daemon 在下载实际发生的进程里真实写入每个下载目录 / 数据目录并运行
+//! 外部组件（`daemon.diagnostics.probe`），agent 像浏览器那样拉起 NMH 中继；桌面宿主另读开机
+//! 自启与系统通知的系统级开关。
+//! 修复动作是显式的第二步（`repair`，实现见 [`repair`] 子模块），探测本身从不改动配置（写入
+//! 探测只留下随即删除的临时文件）。需要管理员授权的修复只「释放」旧权限（见
+//! [`crate::permission`]）。打开日志目录仅接受已存在的 agent/daemon 日志目录或 agent 数据目录。
+
+mod repair;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -10,8 +17,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fluxdown_protocol::capture_link::OpenAssociation;
 use fluxdown_protocol::{
-    AgentSnapshot, DiagnosticCheckDto, DiagnosticLevel, DiagnosticRepairParams,
-    DiagnosticsReportDto, LogExportParams, LogExportResult, LogPathsDto, PlatformIntegrationDto,
+    AgentSnapshot, CUSTOM_CATEGORIES_PREF_KEY, ComponentProbeDto, CustomCategoryDto,
+    DiagnosticCheckDto, DiagnosticLevel, DiagnosticRepairParams, DiagnosticsProbeParams,
+    DiagnosticsProbeResult, DiagnosticsReportDto, LogExportParams, LogExportResult, LogPathsDto,
+    PlatformIntegrationDto, StorageProbeDto, StorageProbeFailure, StorageProbeRole,
+    StorageProbeTarget,
 };
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -19,6 +29,7 @@ use tokio::sync::Mutex;
 use crate::daemon_client::{DaemonClient, DaemonClientConfig};
 use crate::event_hub::AgentEventHub;
 use crate::state::{AgentState, StateStore};
+use crate::supervisor::DaemonSupervisor;
 
 /// 检查项 id；UI 据此映射 `doctorCheck{Camel}` 文案与修复按钮。
 const CHECK_NMH_BINARY: &str = "nmh_binary";
@@ -31,6 +42,32 @@ const CHECK_DAEMON: &str = "daemon";
 const CHECK_URL_PROTOCOL: &str = "url_protocol";
 const CHECK_TORRENT_ASSOCIATION: &str = "torrent_association";
 const CHECK_LOG_DIR: &str = "log_dir";
+const CHECK_DAEMON_STARTUP: &str = "daemon_startup";
+/// 空闲时仍会周期性访问硬盘的来源（做种、RSS 定时抓取、空闲文件扫描）。
+const CHECK_DISK_SLEEP: &str = "disk_sleep";
+/// daemon 动态写入探测：全局默认 / 队列 / RSS 源 / 分类保存目录与 daemon 数据目录。
+const CHECK_SAVE_DIR: &str = "save_dir";
+const CHECK_QUEUE_SAVE_DIR: &str = "queue_save_dir";
+const CHECK_RSS_SAVE_DIR: &str = "rss_save_dir";
+const CHECK_CATEGORY_SAVE_DIR: &str = "category_save_dir";
+const CHECK_DATA_DIR: &str = "data_dir";
+/// daemon 动态探测本身失败（超时 / 不支持）：目录与组件都没有结果。
+const CHECK_PERMISSION_PROBE: &str = "permission_probe";
+/// 外部组件（ffmpeg / ffprobe / yt-dlp）能否被 daemon 实际运行。
+const CHECK_COMPONENT: &str = "component";
+/// 桌面宿主：开机自启是否被系统级开关禁用。
+const CHECK_AUTOSTART: &str = "autostart";
+/// 桌面宿主：系统是否允许显示下载完成通知。
+const CHECK_NOTIFICATIONS: &str = "notifications";
+/// 桌面宿主：像浏览器那样拉起已注册的 NMH 入口并经它连到本 agent。
+const CHECK_NMH_LAUNCH: &str = "nmh_launch";
+/// Windows：限制原生消息主机的组织策略。
+const CHECK_NMH_POLICY: &str = "nmh_policy";
+/// 类 Unix：属于其他用户的 NMH 启动脚本 / 清单（以后的自动注册改不了）。
+const CHECK_NMH_OWNERSHIP: &str = "nmh_ownership";
+/// 类 Unix 桌面：FluxDown 正以 root 运行。
+#[cfg(unix)]
+const CHECK_ELEVATED_RUN: &str = "elevated_run";
 
 /// 提示码；UI 映射 `doctorHint{Camel}`。
 const HINT_REINSTALL_APP: &str = "reinstall_app";
@@ -43,6 +80,44 @@ const HINT_ENABLE_PROTOCOL: &str = "enable_protocol";
 /// 用户已在设置中关闭该关联，但系统里没有其他可接手的程序（macOS 回落到 FluxDown）。
 const HINT_ASSOCIATION_OFF: &str = "association_off";
 const HINT_CHECK_DISK: &str = "check_disk";
+/// daemon 反复启动即退出（端口无法监听、初始化失败）；详情带 stderr 摘要。
+const HINT_DAEMON_STARTUP_FAILED: &str = "daemon_startup_failed";
+/// 存在阻止硬盘休眠的来源；详情逐项列出数量与间隔。
+const HINT_DISK_SLEEP_BLOCKERS: &str = "disk_sleep_blockers";
+/// 目录无写入权限（属主 / ACL / 容器 uid 不符）。
+const HINT_DIR_PERMISSION: &str = "dir_permission";
+/// macOS：「下载」「桌面」「文稿」、外置与网络卷受隐私授权（TCC）保护。
+const HINT_DIR_PERMISSION_MACOS: &str = "dir_permission_macos";
+const HINT_DIR_READ_ONLY: &str = "dir_read_only";
+/// 目录所在卷剩余空间不足（或配额已满）。
+const HINT_LOW_DISK_SPACE: &str = "low_disk_space";
+/// 目录与所有上级都不存在：移动硬盘 / 网络盘未挂载或路径写错。
+const HINT_DIR_MISSING: &str = "dir_missing";
+/// 文件调用在时限内没有返回：网络盘失联或磁盘无响应。
+const HINT_DIR_TIMEOUT: &str = "dir_timeout";
+/// 组件启动被系统拒绝：缺执行权限、noexec 挂载、隔离属性或安全软件拦截。
+const HINT_COMPONENT_BLOCKED: &str = "component_blocked";
+/// 同上，但这是 FluxDown 托管安装的组件，可点「修复执行权限」。
+const HINT_COMPONENT_BLOCKED_FIXABLE: &str = "component_blocked_fixable";
+/// daemon 未在时限内完成动态探测。
+const HINT_PERMISSION_PROBE_FAILED: &str = "permission_probe_failed";
+/// 组件能启动但运行失败：文件损坏、架构不符或缺运行库。
+const HINT_COMPONENT_BROKEN: &str = "component_broken";
+/// 自启条目在，但被系统设置 / 任务管理器 / 桌面环境禁用。
+const HINT_AUTOSTART_BLOCKED: &str = "autostart_blocked";
+const HINT_NOTIFICATIONS_BLOCKED: &str = "notifications_blocked";
+/// Linux 会话里没有通知服务。
+const HINT_NOTIFICATIONS_UNAVAILABLE: &str = "notifications_unavailable";
+/// macOS 授权状态不可读，只能发送测试通知目视确认。
+const HINT_NOTIFICATIONS_UNVERIFIED: &str = "notifications_unverified";
+/// 浏览器式拉起 NMH 入口失败。
+const HINT_NMH_LAUNCH_FAILED: &str = "nmh_launch_failed";
+const HINT_NMH_POLICY_BLOCKED: &str = "nmh_policy_blocked";
+const HINT_NMH_USER_HOSTS_DISABLED: &str = "nmh_user_hosts_disabled";
+const HINT_NMH_CMD_DISABLED: &str = "nmh_cmd_disabled";
+const HINT_NMH_FOREIGN_OWNED: &str = "nmh_foreign_owned";
+#[cfg(unix)]
+const HINT_RUNNING_ELEVATED: &str = "running_elevated";
 
 /// 修复动作；UI 映射 `doctorAction{Camel}`，并作为 `repair` 的 `action`。
 pub const ACTION_REREGISTER: &str = "reregister";
@@ -53,6 +128,16 @@ pub const ACTION_REGISTER: &str = "register";
 pub const ACTION_OPEN_LOG_DIR: &str = "open_log_dir";
 pub const ACTION_REFRESH_TRACKERS: &str = "refreshTrackers";
 pub const ACTION_REFRESH_ED2K_SERVERS: &str = "refreshEd2kServers";
+/// 发送一条测试通知（只在桌面宿主可用）。
+pub const ACTION_TEST_NOTIFICATION: &str = "test_notification";
+/// 目录写入被拒：改回属主 / 加 ACL（必要时请求管理员授权），`target` 为目录配置路径。
+pub const ACTION_FIX_DIR_ACCESS: &str = "fix_dir_access";
+/// 补上托管组件的执行权限，`target` 为组件名。
+pub const ACTION_FIX_COMPONENT: &str = "fix_component";
+/// 重新启用被系统级开关禁用的开机自启。
+pub const ACTION_ENABLE_AUTOSTART: &str = "enable_autostart";
+/// 打开系统设置页，`target` 为 [`crate::platform::SettingsPane::name`]。
+pub const ACTION_OPEN_SETTINGS: &str = "open_settings";
 /// `register` 动作的 `.torrent` 关联目标。
 pub const TARGET_TORRENT: &str = "torrent";
 
@@ -63,6 +148,10 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const DAEMON_TIMEOUT: Duration = Duration::from_secs(5);
 /// NMH 中继日志导出上限。
 const NMH_LOG_EXPORT_BYTES: u64 = 4 * 1024 * 1024;
+/// daemon 动态探测的总时限（daemon 内单目录 10s、单组件 20s，彼此并发）。
+const PERMISSION_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+/// 剩余空间低于该值报警告：大文件下载、BT 预分配与 mux 中间文件都会在此之前失败。
+const LOW_SPACE_BYTES: u64 = 1024 * 1024 * 1024;
 
 pub struct DiagnosticsService {
     daemon: Arc<DaemonClient>,
@@ -72,6 +161,22 @@ pub struct DiagnosticsService {
     store: Arc<StateStore>,
     api_switches: Arc<fluxdown_api::server::ApiRuntimeSwitches>,
     api_token: fluxdown_api::auth::TokenCell,
+    /// daemon 拉起监管与其 stderr 落盘文件；未接线（精简宿主 / 测试）时不产出启动检查。
+    startup: Option<DaemonStartupProbe>,
+    /// 桌面宿主的系统集成探测（开机自启、系统通知）；headless / 测试宿主为 `None`。
+    desktop: Option<DesktopProbe>,
+    /// 修复串行执行：多个界面连接同时点修复时不会叠出多个授权对话框，也不会交错改写注册。
+    repair_lock: Mutex<()>,
+}
+
+struct DaemonStartupProbe {
+    supervisor: Arc<DaemonSupervisor>,
+    stderr_log: PathBuf,
+}
+
+struct DesktopProbe {
+    notifier: Arc<crate::notification::Notifier>,
+    text: crate::notification::NoticeText,
 }
 
 impl DiagnosticsService {
@@ -93,7 +198,34 @@ impl DiagnosticsService {
             store,
             api_switches,
             api_token,
+            startup: None,
+            desktop: None,
+            repair_lock: Mutex::new(()),
         }
+    }
+
+    /// 接入 daemon 监管：Doctor 据此暴露「启动即崩溃 / 无法监听」的崩溃循环与 stderr 摘要。
+    #[must_use]
+    pub fn with_daemon_startup(
+        mut self,
+        supervisor: Arc<DaemonSupervisor>,
+        stderr_log: PathBuf,
+    ) -> Self {
+        self.startup = Some(DaemonStartupProbe {
+            supervisor,
+            stderr_log,
+        });
+        self
+    }
+
+    /// 桌面宿主：Doctor 额外检查开机自启与系统通知，并提供「发送测试通知」。
+    #[must_use]
+    pub fn with_desktop_checks(mut self, notifier: Arc<crate::notification::Notifier>) -> Self {
+        self.desktop = Some(DesktopProbe {
+            notifier,
+            text: crate::notification::NoticeText::default(),
+        });
+        self
     }
 
     /// 运行全部探测并生成报告。
@@ -101,18 +233,52 @@ impl DiagnosticsService {
         let gateway = self.state.lock().await.gateway.clone();
         let data_dir = self.store.data_dir().to_path_buf();
         let opted_out = self.events.inspect(opted_out_associations);
+        let disk_sleep = self.events.inspect(disk_sleep_blockers);
+        let category_dirs = self.events.inspect(category_probe_targets);
         let sync_probe = tokio::task::spawn_blocking(move || probe_sync(&data_dir, &opted_out))
             .await
             .map_err(join_error)?;
-        let daemon = self.probe_daemon().await;
-        let listener = probe_listener(gateway.port).await;
-        let local_server = probe_local_server(&gateway).await;
+        let (daemon, listener, local_server, daemon_startup, permissions, desktop, nmh_launch) = tokio::join!(
+            self.probe_daemon(),
+            probe_listener(gateway.port),
+            probe_local_server(&gateway),
+            self.probe_daemon_startup(),
+            self.probe_permissions(category_dirs),
+            self.probe_desktop(),
+            self.probe_nmh_launch(&sync_probe.nmh_diagnosis),
+        );
 
         let mut checks = sync_probe.nmh;
+        checks.extend(nmh_launch);
+
         checks.push(listener);
         checks.push(local_server);
         checks.push(daemon.check);
+        if let Some(check) = daemon_startup {
+            checks.push(check);
+        }
+        if let Some(blockers) = disk_sleep {
+            checks.push(disk_sleep_check(&blockers));
+        }
+        match permissions {
+            Ok(result) => checks.extend(permission_checks(
+                &result,
+                self.desktop.is_some(),
+                crate::permission::Os::CURRENT,
+            )),
+            // daemon 不可达时上面的 daemon 检查已报错，不再重复。
+            Err(error) if daemon.connected => checks.push(check(
+                CHECK_PERMISSION_PROBE,
+                "",
+                DiagnosticLevel::Error,
+                format!("permission probe failed: {error}"),
+                HINT_PERMISSION_PROBE_FAILED,
+                None,
+            )),
+            Err(_) => {}
+        }
         checks.extend(sync_probe.shell);
+        checks.extend(desktop);
         checks.push(sync_probe.log_dir);
 
         let attention = checks
@@ -123,7 +289,7 @@ impl DiagnosticsService {
 
         Ok(DiagnosticsReportDto {
             generated_at_unix_ms: unix_ms(),
-            app_version: env!("CARGO_PKG_VERSION").to_owned(),
+            app_version: fluxdown_protocol::APP_VERSION.to_owned(),
             platform: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
             agent_data_dir: self.store.data_dir().display().to_string(),
             daemon_connected: daemon.connected,
@@ -133,13 +299,19 @@ impl DiagnosticsService {
 
     /// 执行修复动作；成功返回 `{ok:true}` 或 daemon RPC 的返回值。
     pub async fn repair(&self, params: &DiagnosticRepairParams) -> Result<Value, DiagnosticsError> {
+        let _serial = self.repair_lock.lock().await;
         match params.action.as_str() {
-            ACTION_REREGISTER | ACTION_USE_THIS_INSTALL => {
-                spawn_blocking_io(crate::nmh::registry::register).await?;
-                Ok(json!({ "ok": true }))
-            }
+            ACTION_REREGISTER | ACTION_USE_THIS_INSTALL => self.repair_nmh().await,
+            ACTION_FIX_DIR_ACCESS => self.repair_dir_access(&params.target).await,
+            ACTION_FIX_COMPONENT => self.repair_component(&params.target).await,
+            ACTION_ENABLE_AUTOSTART => self.repair_autostart().await,
+            ACTION_OPEN_SETTINGS => self.open_settings(&params.target).await,
             ACTION_ENABLE_SERVICE => {
                 self.enable_service().await?;
+                Ok(json!({ "ok": true }))
+            }
+            ACTION_TEST_NOTIFICATION => {
+                self.send_test_notification().await?;
                 Ok(json!({ "ok": true }))
             }
             ACTION_REGISTER => {
@@ -159,12 +331,27 @@ impl DiagnosticsService {
                 Ok(json!({ "ok": true }))
             }
             ACTION_OPEN_LOG_DIR => {
+                let data_dir = self.store.data_dir().to_path_buf();
                 let target = if params.target.trim().is_empty() {
-                    self.store.data_dir().to_path_buf()
+                    data_dir.clone()
                 } else {
                     PathBuf::from(params.target.trim())
                 };
-                spawn_blocking_platform(move || crate::platform::open_path(&target, false)).await?;
+                let paths = self.log_paths().await;
+                let mut allowed = vec![data_dir, PathBuf::from(paths.agent_log_dir)];
+                if !paths.daemon_log_dir.is_empty() {
+                    allowed.push(PathBuf::from(paths.daemon_log_dir));
+                }
+                spawn_blocking_platform(move || {
+                    let target = resolve_log_dir_target(&target, &allowed).ok_or_else(|| {
+                        crate::platform::PlatformError::Failed(
+                            "open_log_dir target must be an existing log or data directory"
+                                .to_owned(),
+                        )
+                    })?;
+                    crate::platform::open_path(&target, false)
+                })
+                .await?;
                 Ok(json!({ "ok": true }))
             }
             ACTION_REFRESH_TRACKERS => {
@@ -193,12 +380,8 @@ impl DiagnosticsService {
         &self,
         params: &LogExportParams,
     ) -> Result<LogExportResult, DiagnosticsError> {
-        if params.target_path.trim().is_empty() {
-            return Err(DiagnosticsError::InvalidAction(
-                "exportLogs requires targetPath".to_owned(),
-            ));
-        }
-        let target = crate::log_export::resolve_target(&params.target_path);
+        let target = crate::log_export::resolve_target(&params.target_path)
+            .map_err(|message| DiagnosticsError::InvalidAction(message.to_owned()))?;
         let mut zip = crate::log_export::ZipWriter::new();
 
         let report = self.run().await?;
@@ -217,7 +400,10 @@ impl DiagnosticsService {
             ),
         }
         match self.fetch_daemon_export().await {
-            Ok(bytes) => zip.add("daemon/snapshot.json", &bytes),
+            Ok(bytes) => zip.add(
+                "daemon/snapshot.json",
+                &crate::log_export::sanitize_json_export(&bytes),
+            ),
             Err(error) => {
                 tracing::warn!(error = %error, "daemon log export unavailable");
                 zip.add(
@@ -227,19 +413,29 @@ impl DiagnosticsService {
             }
         }
 
+        // 日志里会出现请求 URL、代理与 Webhook 错误等：所有文本日志按共享规则脱敏后再打包。
         let agent_logs = crate::log_export::agent_log_dir(self.store.data_dir());
         for (name, bytes) in crate::log_export::collect_log_files(&agent_logs).await {
-            zip.add(&format!("agent/logs/{name}"), &bytes);
+            zip.add(
+                &format!("agent/logs/{name}"),
+                &crate::log_export::sanitize_text(&bytes),
+            );
         }
         if let Some(dir) = daemon_log_dir(describe.as_ref()) {
             for (name, bytes) in crate::log_export::collect_log_files(Path::new(dir)).await {
-                zip.add(&format!("daemon/logs/{name}"), &bytes);
+                zip.add(
+                    &format!("daemon/logs/{name}"),
+                    &crate::log_export::sanitize_text(&bytes),
+                );
             }
         }
         if let Some(path) = crate::log_export::nmh_relay_log_path()
             && let Some(bytes) = crate::log_export::read_tail(&path, NMH_LOG_EXPORT_BYTES).await
         {
-            zip.add("nmh/fluxdown_nmh.log", &bytes);
+            zip.add(
+                "nmh/fluxdown_nmh.log",
+                &crate::log_export::sanitize_text(&bytes),
+            );
         }
 
         let bytes = zip.finish();
@@ -318,6 +514,109 @@ impl DiagnosticsService {
         }
     }
 
+    /// daemon 启动检查：崩溃循环状态来自监管器，摘要来自 `fluxdownd.stderr.log` 末尾。
+    async fn probe_daemon_startup(&self) -> Option<DiagnosticCheckDto> {
+        let startup = self.startup.as_ref()?;
+        let streak = startup.supervisor.crash_streak();
+        let looping = startup.supervisor.in_crash_loop();
+        let stderr = if looping {
+            crate::log_export::read_tail(&startup.stderr_log, STARTUP_STDERR_TAIL_BYTES)
+                .await
+                .map(|bytes| {
+                    String::from_utf8_lossy(&crate::log_export::sanitize_text(&bytes)).into_owned()
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        Some(daemon_startup_check(streak, looping, &stderr))
+    }
+
+    /// `daemon.diagnostics.probe`：daemon 收集自己的目录，agent 追加分类保存目录。
+    async fn probe_permissions(
+        &self,
+        extra_dirs: Vec<StorageProbeTarget>,
+    ) -> Result<DiagnosticsProbeResult, String> {
+        let params = DiagnosticsProbeParams { extra_dirs };
+        match tokio::time::timeout(
+            PERMISSION_PROBE_TIMEOUT,
+            self.daemon
+                .call::<DiagnosticsProbeParams, DiagnosticsProbeResult>(
+                    fluxdown_protocol::method::DAEMON_DIAGNOSTICS_PROBE,
+                    Some(params),
+                ),
+        )
+        .await
+        {
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(error)) => Err(format!("{:?}", error.code)),
+            Err(_) => Err(format!(
+                "no response within {}s",
+                PERMISSION_PROBE_TIMEOUT.as_secs()
+            )),
+        }
+    }
+
+    /// 开机自启、系统通知与是否以 root 运行（只读注册表 / 文件 / 会话总线，放进阻塞线程）。
+    async fn probe_desktop(&self) -> Vec<DiagnosticCheckDto> {
+        if self.desktop.is_none() {
+            return Vec::new();
+        }
+        let notify_enabled = self
+            .events
+            .inspect(crate::background_effects::notify_on_complete);
+        tokio::task::spawn_blocking(move || {
+            let mut checks = Vec::with_capacity(3);
+            #[cfg(unix)]
+            if crate::permission::effective_uid().is_ok_and(|uid| uid == 0) {
+                checks.push(elevated_run_check());
+            }
+            checks.push(autostart_check(crate::platform::autostart_state()));
+            checks.push(notification_check(
+                notify_enabled.then(crate::notification::availability),
+            ));
+            checks
+        })
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(error = %error, "desktop doctor probes failed");
+            Vec::new()
+        })
+    }
+
+    /// 桌面宿主：像浏览器那样拉起已注册的 NMH 入口（本进程 IPC 端点在线才有意义；headless
+    /// 不跑 NMH 服务）。注册缺失 / 失效时由中继检查报告，这里不重复。
+    async fn probe_nmh_launch(
+        &self,
+        diagnosis: &crate::nmh::registry::NmhDiagnosis,
+    ) -> Option<DiagnosticCheckDto> {
+        self.desktop.as_ref()?;
+        let result = crate::nmh::registry::probe_browser_launch(diagnosis).await?;
+        Some(nmh_launch_check(diagnosis, &result))
+    }
+
+    /// 按界面语言发送一条测试通知；投递失败（系统拒收 / 无通知服务）作为修复失败返回。
+    async fn send_test_notification(&self) -> Result<(), DiagnosticsError> {
+        let desktop = self
+            .desktop
+            .as_ref()
+            .ok_or_else(|| DiagnosticsError::InvalidAction(ACTION_TEST_NOTIFICATION.to_owned()))?;
+        let locale = self
+            .events
+            .inspect(crate::background_effects::locale_preference);
+        let title = desktop
+            .text
+            .text("doctorTestNotificationTitle", locale.as_deref());
+        let body = desktop
+            .text
+            .text("doctorTestNotificationBody", locale.as_deref());
+        let notifier = Arc::clone(&desktop.notifier);
+        tokio::task::spawn_blocking(move || notifier.try_show(&title, &body))
+            .await
+            .map_err(join_error)?
+            .map_err(DiagnosticsError::Notification)
+    }
+
     /// 与 `agent.gateway.patch` 同一条路径：持久化 → 运行时开关 → 广播 `GatewayChanged`。
     async fn enable_service(&self) -> Result<(), DiagnosticsError> {
         let mut state = self.state.lock().await;
@@ -346,7 +645,7 @@ impl DiagnosticsService {
     async fn agent_summary(&self) -> Value {
         let state = self.state.lock().await;
         json!({
-            "appVersion": env!("CARGO_PKG_VERSION"),
+            "appVersion": fluxdown_protocol::APP_VERSION,
             "platform": format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
             "dataDir": self.store.data_dir().display().to_string(),
             "daemonRpcUrl": self.daemon_config.rpc_url,
@@ -388,9 +687,17 @@ impl DiagnosticsService {
             .timeout(DAEMON_TIMEOUT)
             .build()
             .map_err(|error| DiagnosticsError::Export(error.to_string()))?;
+        // 会话级凭据只在已认证的 daemon 连接上存在；没有会话就是 daemon 不可用，不退回长期 token。
+        let credential = self
+            .daemon_config
+            .http_session()
+            .credential()
+            .ok_or_else(|| {
+                DiagnosticsError::Export("daemon session is not established".to_owned())
+            })?;
         let response = client
             .get(url)
-            .bearer_auth(&self.daemon_config.bearer)
+            .bearer_auth(credential)
             .send()
             .await
             .map_err(|error| DiagnosticsError::Export(error.to_string()))?;
@@ -416,15 +723,461 @@ struct DaemonProbe {
 /// 无需 `await` 的探测（文件、注册表、平台集成状态），在一次 `spawn_blocking` 内完成。
 struct SyncProbe {
     nmh: Vec<DiagnosticCheckDto>,
+    /// 供随后的浏览器式拉起探测复用，避免再读一遍注册。
+    nmh_diagnosis: crate::nmh::registry::NmhDiagnosis,
     shell: Vec<DiagnosticCheckDto>,
     log_dir: DiagnosticCheckDto,
 }
 
 fn probe_sync(data_dir: &Path, opted_out: &[OpenAssociation]) -> SyncProbe {
+    let nmh_diagnosis = crate::nmh::registry::diagnose();
     SyncProbe {
-        nmh: nmh_checks(&crate::nmh::registry::diagnose()),
+        nmh: nmh_checks(&nmh_diagnosis),
+        nmh_diagnosis,
         shell: shell_checks(&crate::platform::integration_status(), opted_out),
         log_dir: probe_log_dir(&crate::log_export::agent_log_dir(data_dir)),
+    }
+}
+
+/// 崩溃循环检查详情里保留的 daemon stderr 末尾行数。
+const STARTUP_STDERR_LINES: usize = 8;
+/// 读取 stderr 日志末尾的字节数。
+const STARTUP_STDERR_TAIL_BYTES: u64 = 4 * 1024;
+
+/// `daemon_startup`：daemon 子进程是否在「启动即崩溃」的循环里（端口无法监听、引擎初始化
+/// 失败等）。循环中时详情带 `fluxdownd.stderr.log` 的末尾摘要（已脱敏）。
+fn daemon_startup_check(
+    crash_streak: u32,
+    in_crash_loop: bool,
+    stderr: &str,
+) -> DiagnosticCheckDto {
+    if !in_crash_loop {
+        return check(
+            CHECK_DAEMON_STARTUP,
+            "",
+            DiagnosticLevel::Ok,
+            "fluxdownd is not crash-looping".to_owned(),
+            "",
+            None,
+        );
+    }
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let tail = &lines[lines.len().saturating_sub(STARTUP_STDERR_LINES)..];
+    let mut detail = format!(
+        "fluxdownd exited abnormally {crash_streak} times in a row right after launch \
+         (local port unavailable or startup failure); see fluxdownd.stderr.log"
+    );
+    for line in tail {
+        detail.push('\n');
+        detail.push_str(line);
+    }
+    check(
+        CHECK_DAEMON_STARTUP,
+        "",
+        DiagnosticLevel::Error,
+        detail,
+        HINT_DAEMON_STARTUP_FAILED,
+        None,
+    )
+}
+
+/// 无 RSS 间隔（`0`）时引擎使用的默认抓取间隔（分钟），与 engine `DEFAULT_INTERVAL_MINUTES` 一致。
+const RSS_DEFAULT_INTERVAL_MINUTES: i64 = 30;
+
+/// 会在空闲时唤醒硬盘的来源汇总；全部取自 agent 已缓存的 daemon 快照，探测本身零磁盘访问。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DiskSleepBlockers {
+    /// `seeding_status == 1`（做种中）的任务数；排队等待做种槽的不计。
+    seeding_tasks: usize,
+    /// 启用的 RSS 源数量。
+    rss_sources: usize,
+    /// 启用的 RSS 源里最短的配置抓取间隔（分钟）。
+    shortest_rss_minutes: Option<i64>,
+    /// 空闲时是否仍周期性扫描已完成任务的文件。
+    idle_file_scan: bool,
+}
+
+impl DiskSleepBlockers {
+    fn any(&self) -> bool {
+        self.seeding_tasks > 0 || self.rss_sources > 0 || self.idle_file_scan
+    }
+}
+
+/// 从 agent 快照收集阻碍项；daemon 未连接时快照里的任务/RSS 已过期，不产出该检查。
+fn disk_sleep_blockers(snapshot: &AgentSnapshot) -> Option<DiskSleepBlockers> {
+    if !snapshot.daemon_connected {
+        return None;
+    }
+    let daemon = &snapshot.daemon;
+    let enabled_intervals = daemon
+        .rss_sources
+        .iter()
+        .filter(|source| source.enabled)
+        .map(|source| match i64::from(source.interval_minutes) {
+            minutes if minutes > 0 => minutes,
+            _ => RSS_DEFAULT_INTERVAL_MINUTES,
+        });
+    let idle_file_scan = daemon
+        .config
+        .values
+        .get("idle_file_scan")
+        .map_or_else(
+            || fluxdown_protocol::daemon_config_default("idle_file_scan"),
+            String::as_str,
+        )
+        .trim()
+        .to_ascii_lowercase();
+    Some(DiskSleepBlockers {
+        seeding_tasks: daemon
+            .tasks
+            .iter()
+            .filter(|task| task.seeding_status == 1)
+            .count(),
+        rss_sources: enabled_intervals.clone().count(),
+        shortest_rss_minutes: enabled_intervals.min(),
+        idle_file_scan: matches!(idle_file_scan.as_str(), "true" | "1"),
+    })
+}
+
+/// `disk_sleep`：列出会让 NAS 硬盘无法休眠的来源。这些都是用户主动启用的功能而非故障，
+/// 所以有阻碍项时只报 info（不计入「需要关注」），无阻碍项报 ok。
+fn disk_sleep_check(blockers: &DiskSleepBlockers) -> DiagnosticCheckDto {
+    if !blockers.any() {
+        return check(
+            CHECK_DISK_SLEEP,
+            "",
+            DiagnosticLevel::Ok,
+            "No seeding tasks, enabled RSS sources or idle file scan: \
+             the daemon does not touch the disk while idle"
+                .to_owned(),
+            "",
+            None,
+        );
+    }
+    let mut items = Vec::with_capacity(3);
+    if blockers.seeding_tasks > 0 {
+        items.push(format!("seeding tasks: {}", blockers.seeding_tasks));
+    }
+    if blockers.rss_sources > 0 {
+        let mut item = format!("enabled RSS sources: {}", blockers.rss_sources);
+        if let Some(minutes) = blockers.shortest_rss_minutes {
+            item.push_str(&format!(" (shortest interval {minutes} min)"));
+        }
+        items.push(item);
+    }
+    if blockers.idle_file_scan {
+        items.push("idle file scan: on".to_owned());
+    }
+    check(
+        CHECK_DISK_SLEEP,
+        "",
+        DiagnosticLevel::Info,
+        format!(
+            "Active while idle and may keep the disk awake — {}",
+            items.join("; ")
+        ),
+        HINT_DISK_SLEEP_BLOCKERS,
+        None,
+    )
+}
+
+/// 分类保存目录（agent 偏好里只有 agent 知道的目录）：可见且配置了目录的分类。
+fn category_probe_targets(snapshot: &AgentSnapshot) -> Vec<StorageProbeTarget> {
+    CustomCategoryDto::from_preference(snapshot.preferences.values.get(CUSTOM_CATEGORIES_PREF_KEY))
+        .into_iter()
+        .filter(|category| category.visible && !category.save_dir.trim().is_empty())
+        .map(|category| StorageProbeTarget {
+            role: StorageProbeRole::Category,
+            label: if category.name.trim().is_empty() {
+                category.builtin_type.unwrap_or(category.id)
+            } else {
+                category.name
+            },
+            path: category.save_dir,
+        })
+        .collect()
+}
+
+/// daemon 动态探测结果 → 检查项：目录按 daemon 返回顺序，组件在后。`desktop` 决定是否提供
+/// 需要桌面会话（授权对话框 / 系统设置页）的修复按钮。
+fn permission_checks(
+    result: &DiagnosticsProbeResult,
+    desktop: bool,
+    os: crate::permission::Os,
+) -> Vec<DiagnosticCheckDto> {
+    result
+        .storage
+        .iter()
+        .map(|probe| storage_check(probe, desktop, os))
+        .chain(
+            result
+                .components
+                .iter()
+                .map(|probe| component_check(probe, os)),
+        )
+        .collect()
+}
+
+/// 单个目录的写入探测：失败报错并按失败类型给建议；通过但剩余空间低于
+/// [`LOW_SPACE_BYTES`] 报警告。
+fn storage_check(
+    probe: &StorageProbeDto,
+    desktop: bool,
+    os: crate::permission::Os,
+) -> DiagnosticCheckDto {
+    let id = match probe.role {
+        StorageProbeRole::DefaultSaveDir => CHECK_SAVE_DIR,
+        StorageProbeRole::Queue => CHECK_QUEUE_SAVE_DIR,
+        StorageProbeRole::Rss => CHECK_RSS_SAVE_DIR,
+        StorageProbeRole::Category => CHECK_CATEGORY_SAVE_DIR,
+        StorageProbeRole::DataDir => CHECK_DATA_DIR,
+    };
+    let mut detail = probe.path.clone();
+    if !probe.exists && !probe.probed_dir.is_empty() {
+        let state = if probe.failure.is_none() {
+            "not created yet (created on first download)"
+        } else {
+            "does not exist"
+        };
+        detail.push_str(&format!("\n{state}; probed {}", probe.probed_dir));
+    }
+    if let Some(bytes) = probe.available_bytes {
+        detail.push_str(&format!("\nfree space: {}", format_bytes(bytes)));
+    }
+    let (level, hint, repair) = match probe.failure {
+        Some(failure) => {
+            detail.push('\n');
+            if !probe.failed_step.is_empty() {
+                detail.push_str(&format!("{} failed: ", probe.failed_step));
+            }
+            detail.push_str(&probe.error);
+            (
+                DiagnosticLevel::Error,
+                storage_failure_hint(failure, os, probe.os_error),
+                storage_repair(probe, desktop, os),
+            )
+        }
+        None if probe
+            .available_bytes
+            .is_some_and(|bytes| bytes < LOW_SPACE_BYTES) =>
+        {
+            (DiagnosticLevel::Warn, HINT_LOW_DISK_SPACE, None)
+        }
+        None => (DiagnosticLevel::Ok, "", None),
+    };
+    check(
+        id,
+        &probe.label,
+        level,
+        detail,
+        hint,
+        repair
+            .as_ref()
+            .map(|(action, target)| (*action, target.as_str())),
+    )
+}
+
+/// macOS 上 `EPERM` 是隐私授权（TCC）拒绝，`EACCES` 才是权限位 / ACL。
+fn storage_failure_hint(
+    failure: StorageProbeFailure,
+    os: crate::permission::Os,
+    os_error: Option<i32>,
+) -> &'static str {
+    match failure {
+        StorageProbeFailure::PermissionDenied
+            if os == crate::permission::Os::MacOs && os_error == Some(crate::permission::EPERM) =>
+        {
+            HINT_DIR_PERMISSION_MACOS
+        }
+        StorageProbeFailure::PermissionDenied => HINT_DIR_PERMISSION,
+        StorageProbeFailure::ReadOnly => HINT_DIR_READ_ONLY,
+        StorageProbeFailure::NoSpace => HINT_LOW_DISK_SPACE,
+        StorageProbeFailure::Missing => HINT_DIR_MISSING,
+        StorageProbeFailure::Timeout => HINT_DIR_TIMEOUT,
+        StorageProbeFailure::NotDirectory | StorageProbeFailure::Other => HINT_CHECK_DISK,
+    }
+}
+
+/// 写入被拒时的修复按钮：权限位 / ACL 问题给「修复权限」，macOS 隐私授权给「打开系统设置」；
+/// 两者都需要桌面会话。其它失败（只读、满盘、不可变属性）没有自动修复。
+fn storage_repair(
+    probe: &StorageProbeDto,
+    desktop: bool,
+    os: crate::permission::Os,
+) -> Option<(&'static str, String)> {
+    use crate::permission::{EACCES, EPERM, ERROR_ACCESS_DENIED, Os};
+    if !desktop || probe.failure != Some(StorageProbeFailure::PermissionDenied) {
+        return None;
+    }
+    match (os, probe.os_error) {
+        (Os::MacOs, Some(EPERM)) => Some((
+            ACTION_OPEN_SETTINGS,
+            crate::platform::SettingsPane::FilesAndFolders
+                .name()
+                .to_owned(),
+        )),
+        (Os::Linux | Os::MacOs, Some(EACCES)) | (Os::Windows, Some(ERROR_ACCESS_DENIED)) => {
+            Some((ACTION_FIX_DIR_ACCESS, probe.path.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// 外部组件实际运行结果；启动被拒与运行失败给不同建议。托管组件（daemon 数据目录内）在
+/// 类 Unix 上缺执行位时可就地修复（由 daemon 执行，不需要桌面会话）。
+fn component_check(probe: &ComponentProbeDto, os: crate::permission::Os) -> DiagnosticCheckDto {
+    if probe.error.is_empty() {
+        return check(
+            CHECK_COMPONENT,
+            &probe.name,
+            DiagnosticLevel::Ok,
+            format!("{} → {}", probe.path, probe.output),
+            "",
+            None,
+        );
+    }
+    let fixable = probe.permission_denied && probe.managed && os != crate::permission::Os::Windows;
+    check(
+        CHECK_COMPONENT,
+        &probe.name,
+        DiagnosticLevel::Error,
+        format!("{} — {}", probe.path, probe.error),
+        match (probe.permission_denied, fixable) {
+            (true, true) => HINT_COMPONENT_BLOCKED_FIXABLE,
+            (true, false) => HINT_COMPONENT_BLOCKED,
+            (false, _) => HINT_COMPONENT_BROKEN,
+        },
+        fixable.then_some((ACTION_FIX_COMPONENT, probe.name.as_str())),
+    )
+}
+
+/// 开机自启：用户没开是选择而非故障；开了却被系统级开关禁用才需要关注，并可一键重新启用
+/// （用户在 Doctor 里的明确操作，等同于在设置里重新打开）。
+fn autostart_check(state: crate::platform::AutostartState) -> DiagnosticCheckDto {
+    use crate::platform::AutostartState;
+    let (level, detail, hint, repair) = match state {
+        AutostartState::Unsupported => (
+            DiagnosticLevel::Info,
+            "not supported by this installation",
+            "",
+            None,
+        ),
+        AutostartState::Off => (DiagnosticLevel::Ok, "turned off in settings", "", None),
+        AutostartState::Enabled => (DiagnosticLevel::Ok, "enabled", "", None),
+        AutostartState::DisabledBySystem => (
+            DiagnosticLevel::Warn,
+            "turned on in FluxDown but disabled by the system startup settings",
+            HINT_AUTOSTART_BLOCKED,
+            Some((ACTION_ENABLE_AUTOSTART, "")),
+        ),
+    };
+    check(CHECK_AUTOSTART, "", level, detail.to_owned(), hint, repair)
+}
+
+/// 系统通知：`None` = 完成通知已在设置中关闭，不探测。被系统关闭时优先打开通知设置页（平台
+/// 有该页时），其余能投递的情况附「发送测试通知」。
+fn notification_check(
+    availability: Option<crate::notification::NotificationAvailability>,
+) -> DiagnosticCheckDto {
+    use crate::notification::NotificationAvailability;
+    use crate::platform::SettingsPane;
+    let test = Some((ACTION_TEST_NOTIFICATION, ""));
+    let (level, detail, hint, repair) = match availability {
+        None => (
+            DiagnosticLevel::Ok,
+            "download notifications are turned off in settings".to_owned(),
+            "",
+            None,
+        ),
+        Some(NotificationAvailability::Available(detail)) => {
+            (DiagnosticLevel::Ok, detail, "", test)
+        }
+        Some(NotificationAvailability::Blocked(detail)) => (
+            DiagnosticLevel::Warn,
+            detail,
+            HINT_NOTIFICATIONS_BLOCKED,
+            if SettingsPane::Notifications.uri().is_some() {
+                Some((ACTION_OPEN_SETTINGS, SettingsPane::Notifications.name()))
+            } else {
+                test
+            },
+        ),
+        Some(NotificationAvailability::Unavailable(detail)) => (
+            DiagnosticLevel::Warn,
+            format!("no notification service: {detail}"),
+            HINT_NOTIFICATIONS_UNAVAILABLE,
+            None,
+        ),
+        Some(NotificationAvailability::Unverifiable) => (
+            DiagnosticLevel::Info,
+            "the system does not expose notification permission".to_owned(),
+            HINT_NOTIFICATIONS_UNVERIFIED,
+            test,
+        ),
+    };
+    check(CHECK_NOTIFICATIONS, "", level, detail, hint, repair)
+}
+
+/// 类 Unix 桌面以 root 运行：写出的文件都属于 root，回到普通身份后改不动。
+#[cfg(unix)]
+fn elevated_run_check() -> DiagnosticCheckDto {
+    check(
+        CHECK_ELEVATED_RUN,
+        "",
+        DiagnosticLevel::Warn,
+        "fluxdown-agent is running as root".to_owned(),
+        HINT_RUNNING_ELEVATED,
+        None,
+    )
+}
+
+/// 浏览器式拉起 NMH 入口的结果；失败时「重新注册」会重写注册并在需要时请求授权释放旧文件。
+fn nmh_launch_check(
+    diagnosis: &crate::nmh::registry::NmhDiagnosis,
+    result: &Result<(), crate::nmh::registry::RelayLaunchError>,
+) -> DiagnosticCheckDto {
+    let entry = if cfg!(windows) {
+        format!("cmd.exe /d /c {}", diagnosis.registered_relay)
+    } else {
+        diagnosis.relay_location.clone()
+    };
+    match result {
+        Ok(()) => check(
+            CHECK_NMH_LAUNCH,
+            "",
+            DiagnosticLevel::Ok,
+            format!("{entry} → pong"),
+            "",
+            None,
+        ),
+        Err(error) => check(
+            CHECK_NMH_LAUNCH,
+            "",
+            DiagnosticLevel::Error,
+            format!("{entry} — {error}"),
+            HINT_NMH_LAUNCH_FAILED,
+            Some((ACTION_REREGISTER, "")),
+        ),
+    }
+}
+
+/// 1024 进制、一位小数（`12.3 GB`）。
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
     }
 }
 
@@ -505,7 +1258,51 @@ fn nmh_checks(diagnosis: &crate::nmh::registry::NmhDiagnosis) -> Vec<DiagnosticC
             repair,
         ));
     }
+    if !diagnosis.foreign_owned.is_empty() {
+        checks.push(check(
+            CHECK_NMH_OWNERSHIP,
+            "",
+            DiagnosticLevel::Warn,
+            format!(
+                "owned by another user:\n{}",
+                diagnosis.foreign_owned.join("\n")
+            ),
+            HINT_NMH_FOREIGN_OWNED,
+            Some((ACTION_REREGISTER, "")),
+        ));
+    }
+    checks.extend(diagnosis.policy_blocks.iter().map(policy_check));
     checks
+}
+
+/// 组织策略是管理员的明确意图：只报告，不提供修复（FluxDown 不绕过策略）。
+fn policy_check(block: &crate::nmh::registry::PolicyBlock) -> DiagnosticCheckDto {
+    use crate::nmh::registry::PolicyBlock;
+    let (target, detail, hint) = match block {
+        PolicyBlock::UserLevelHostsDisabled { browser } => (
+            browser.as_str(),
+            "NativeMessagingUserLevelHosts = 0: per-user native messaging hosts are ignored",
+            HINT_NMH_USER_HOSTS_DISABLED,
+        ),
+        PolicyBlock::Blocklisted { browser } => (
+            browser.as_str(),
+            "NativeMessagingBlocklist blocks com.fluxdown.nmh",
+            HINT_NMH_POLICY_BLOCKED,
+        ),
+        PolicyBlock::CommandPromptDisabled => (
+            "",
+            "DisableCMD = 1: Chrome / Edge cannot start native messaging hosts",
+            HINT_NMH_CMD_DISABLED,
+        ),
+    };
+    check(
+        CHECK_NMH_POLICY,
+        target,
+        DiagnosticLevel::Error,
+        detail.to_owned(),
+        hint,
+        None,
+    )
 }
 
 /// 注册入口（启动脚本 / 注册表键）实际指向哪个中继。这是所有浏览器共用的根因，只报一次；
@@ -764,7 +1561,18 @@ fn probe_log_dir(dir: &Path) -> DiagnosticCheckDto {
     let probe_file = dir.join(".doctor_write_probe");
     match std::fs::write(&probe_file, b"") {
         Ok(()) => {
-            let _ = std::fs::remove_file(&probe_file);
+            if let Err(error) = std::fs::remove_file(&probe_file)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                return check(
+                    CHECK_LOG_DIR,
+                    "",
+                    DiagnosticLevel::Error,
+                    format!("{summary} — probe cleanup failed: {error}"),
+                    HINT_CHECK_DISK,
+                    repair,
+                );
+            }
             check(CHECK_LOG_DIR, "", DiagnosticLevel::Ok, summary, "", repair)
         }
         Err(error) => check(
@@ -898,6 +1706,18 @@ async fn probe_local_server(gateway: &fluxdown_protocol::GatewayStatusDto) -> Di
     }
 }
 
+/// 解析符号链接与父目录引用后精确匹配已知目录；返回同一规范路径交给平台打开，拒绝文件与子目录。
+fn resolve_log_dir_target(target: &Path, allowed: &[PathBuf]) -> Option<PathBuf> {
+    let target = std::fs::canonicalize(target).ok()?;
+    if !target.is_dir() {
+        return None;
+    }
+    allowed
+        .iter()
+        .any(|root| std::fs::canonicalize(root).is_ok_and(|root| target == root))
+        .then_some(target)
+}
+
 fn daemon_log_dir(describe: Option<&Value>) -> Option<&str> {
     describe?
         .get("logDir")
@@ -933,16 +1753,6 @@ fn unix_ms() -> i64 {
         .unwrap_or(0)
 }
 
-async fn spawn_blocking_io<F>(task: F) -> Result<(), DiagnosticsError>
-where
-    F: FnOnce() -> Result<(), std::io::Error> + Send + 'static,
-{
-    tokio::task::spawn_blocking(task)
-        .await
-        .map_err(join_error)?
-        .map_err(DiagnosticsError::Io)
-}
-
 async fn spawn_blocking_platform<F>(task: F) -> Result<(), DiagnosticsError>
 where
     F: FnOnce() -> Result<(), crate::platform::PlatformError> + Send + 'static,
@@ -973,6 +1783,13 @@ pub enum DiagnosticsError {
     Platform(#[from] crate::platform::PlatformError),
     #[error("log export failed: {0}")]
     Export(String),
+    #[error("test notification failed: {0}")]
+    Notification(String),
+    #[error(transparent)]
+    Permission(#[from] crate::permission::PermissionError),
+    /// 修复步骤已执行，但重新探测仍未通过。
+    #[error("repair did not resolve the problem: {0}")]
+    RepairIncomplete(String),
 }
 
 #[cfg(test)]
@@ -980,17 +1797,30 @@ mod tests {
     use std::collections::BTreeMap;
 
     use fluxdown_protocol::capture_link::OpenAssociation;
-    use fluxdown_protocol::{AgentSnapshot, DiagnosticLevel, PlatformIntegrationDto};
+    use fluxdown_protocol::{
+        AgentSnapshot, ComponentProbeDto, DiagnosticLevel, PlatformIntegrationDto, StorageProbeDto,
+        StorageProbeFailure, StorageProbeRole,
+    };
     use serde_json::json;
 
     use super::{
-        ACTION_ENABLE_SERVICE, ACTION_OPEN_LOG_DIR, ACTION_REGISTER, ACTION_REREGISTER,
-        ACTION_USE_THIS_INSTALL, HINT_ASSOCIATION_OFF, HINT_CHECK_DISK, HINT_ENABLE_LOCAL_SERVER,
-        HINT_ENABLE_PROTOCOL, HINT_NMH_OTHER_INSTALL, HINT_REINSTALL_APP, HINT_REREGISTER_NMH,
-        TARGET_TORRENT, daemon_export_url, daemon_log_dir, manifest_check, nmh_checks,
-        opted_out_associations, probe_local_server, probe_log_dir, relay_check, shell_checks,
+        ACTION_ENABLE_AUTOSTART, ACTION_ENABLE_SERVICE, ACTION_FIX_COMPONENT,
+        ACTION_FIX_DIR_ACCESS, ACTION_OPEN_LOG_DIR, ACTION_OPEN_SETTINGS, ACTION_REGISTER,
+        ACTION_REREGISTER, ACTION_TEST_NOTIFICATION, ACTION_USE_THIS_INSTALL, DiskSleepBlockers,
+        HINT_ASSOCIATION_OFF, HINT_AUTOSTART_BLOCKED, HINT_CHECK_DISK, HINT_COMPONENT_BLOCKED,
+        HINT_COMPONENT_BLOCKED_FIXABLE, HINT_COMPONENT_BROKEN, HINT_DAEMON_STARTUP_FAILED,
+        HINT_DIR_PERMISSION, HINT_DIR_PERMISSION_MACOS, HINT_DIR_TIMEOUT, HINT_DISK_SLEEP_BLOCKERS,
+        HINT_ENABLE_LOCAL_SERVER, HINT_ENABLE_PROTOCOL, HINT_LOW_DISK_SPACE, HINT_NMH_CMD_DISABLED,
+        HINT_NMH_FOREIGN_OWNED, HINT_NMH_LAUNCH_FAILED, HINT_NMH_OTHER_INSTALL,
+        HINT_NMH_USER_HOSTS_DISABLED, HINT_NOTIFICATIONS_BLOCKED, HINT_REINSTALL_APP,
+        HINT_REREGISTER_NMH, LOW_SPACE_BYTES, STARTUP_STDERR_LINES, TARGET_TORRENT,
+        autostart_check, category_probe_targets, component_check, daemon_export_url,
+        daemon_log_dir, daemon_startup_check, disk_sleep_blockers, disk_sleep_check,
+        manifest_check, nmh_checks, nmh_launch_check, notification_check, opted_out_associations,
+        probe_local_server, probe_log_dir, relay_check, shell_checks, storage_check,
     };
     use crate::nmh::registry::{NmhDiagnosis, NmhTarget, RelayOwner};
+    use crate::permission::Os;
 
     fn target(label: &str, installed: bool, ok: bool) -> NmhTarget {
         NmhTarget {
@@ -1004,6 +1834,179 @@ mod tests {
                 "manifest file missing".to_owned()
             },
         }
+    }
+
+    fn snapshot_with(
+        connected: bool,
+        seeding_statuses: &[i32],
+        rss: &[(bool, i32)],
+        idle_scan: Option<&str>,
+    ) -> Result<AgentSnapshot, serde_json::Error> {
+        let mut snapshot = AgentSnapshot {
+            daemon_connected: connected,
+            ..AgentSnapshot::default()
+        };
+        for (index, status) in seeding_statuses.iter().enumerate() {
+            snapshot.daemon.tasks.push(serde_json::from_value(json!({
+                "taskId": format!("t{index}"),
+                "url": "magnet:?xt=urn:btih:x",
+                "fileName": "f",
+                "saveDir": "/tmp",
+                "status": 3,
+                "downloadedBytes": 1,
+                "totalBytes": 1,
+                "errorMessage": "",
+                "createdAt": "1",
+                "proxyUrl": "",
+                "queueId": "",
+                "checksum": "",
+                "seedingStatus": status,
+            }))?);
+        }
+        for (enabled, minutes) in rss {
+            snapshot
+                .daemon
+                .rss_sources
+                .push(serde_json::from_value(json!({
+                    "url": "https://feed.test/rss",
+                    "enabled": enabled,
+                    "intervalMinutes": minutes,
+                }))?);
+        }
+        if let Some(value) = idle_scan {
+            snapshot
+                .daemon
+                .config
+                .values
+                .insert("idle_file_scan".to_owned(), value.to_owned());
+        }
+        Ok(snapshot)
+    }
+
+    #[test]
+    fn disk_sleep_blockers_count_only_active_seeding_and_enabled_rss()
+    -> Result<(), serde_json::Error> {
+        // 1=做种中；8=排队等待做种槽、2=达分享率停止，均不访问磁盘；禁用的 RSS 源不计。
+        // 间隔 0 落回引擎默认 30 分钟。
+        let snapshot = snapshot_with(
+            true,
+            &[1, 1, 8, 2, 0],
+            &[(true, 0), (true, 15), (false, 1)],
+            None,
+        )?;
+        assert_eq!(
+            disk_sleep_blockers(&snapshot),
+            Some(DiskSleepBlockers {
+                seeding_tasks: 2,
+                rss_sources: 2,
+                shortest_rss_minutes: Some(15),
+                idle_file_scan: false,
+            })
+        );
+        let defaulted = snapshot_with(true, &[], &[(true, 0)], None)?;
+        assert_eq!(
+            disk_sleep_blockers(&defaulted).and_then(|b| b.shortest_rss_minutes),
+            Some(30)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn disk_sleep_idle_scan_accepts_bool_spellings_and_defaults_off()
+    -> Result<(), serde_json::Error> {
+        for (raw, expected) in [
+            (Some("true"), true),
+            (Some("1"), true),
+            (Some("TRUE"), true),
+            (Some("false"), false),
+            (Some("0"), false),
+            (None, false),
+        ] {
+            let snapshot = snapshot_with(true, &[], &[], raw)?;
+            assert_eq!(
+                disk_sleep_blockers(&snapshot).map(|b| b.idle_file_scan),
+                Some(expected),
+                "idle_file_scan={raw:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn disk_sleep_is_skipped_while_daemon_is_disconnected() -> Result<(), serde_json::Error> {
+        // 断线时快照里的任务 / RSS 是过期数据，不能据此下结论。
+        let snapshot = snapshot_with(false, &[1], &[(true, 5)], Some("1"))?;
+        assert_eq!(disk_sleep_blockers(&snapshot), None);
+        Ok(())
+    }
+
+    #[test]
+    fn disk_sleep_check_is_ok_when_idle_and_info_listing_every_blocker() {
+        let quiet = disk_sleep_check(&DiskSleepBlockers {
+            seeding_tasks: 0,
+            rss_sources: 0,
+            shortest_rss_minutes: None,
+            idle_file_scan: false,
+        });
+        assert_eq!(quiet.id, "disk_sleep");
+        assert_eq!(quiet.level, DiagnosticLevel::Ok);
+        assert!(quiet.hint.is_empty());
+        assert!(quiet.repair.is_none());
+
+        let busy = disk_sleep_check(&DiskSleepBlockers {
+            seeding_tasks: 3,
+            rss_sources: 2,
+            shortest_rss_minutes: Some(10),
+            idle_file_scan: true,
+        });
+        assert_eq!(busy.level, DiagnosticLevel::Info);
+        assert_eq!(busy.hint, HINT_DISK_SLEEP_BLOCKERS);
+        assert!(busy.repair.is_none());
+        for needle in [
+            "seeding tasks: 3",
+            "enabled RSS sources: 2",
+            "shortest interval 10 min",
+            "idle file scan: on",
+        ] {
+            assert!(busy.detail.contains(needle), "{needle} in {}", busy.detail);
+        }
+
+        let only_seeding = disk_sleep_check(&DiskSleepBlockers {
+            seeding_tasks: 1,
+            rss_sources: 0,
+            shortest_rss_minutes: None,
+            idle_file_scan: false,
+        });
+        assert!(!only_seeding.detail.contains("RSS"));
+        assert!(!only_seeding.detail.contains("idle file scan"));
+    }
+
+    #[test]
+    fn daemon_startup_check_surfaces_crash_loop_with_a_bounded_stderr_tail() {
+        let ok = daemon_startup_check(0, false, "");
+        assert_eq!(ok.id, "daemon_startup");
+        assert_eq!(ok.level, DiagnosticLevel::Ok);
+        assert!(ok.hint.is_empty());
+
+        let stderr = (1..=30)
+            .map(|line| format!("startup line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let failing = daemon_startup_check(4, true, &stderr);
+        assert_eq!(failing.level, DiagnosticLevel::Error);
+        assert_eq!(failing.hint, HINT_DAEMON_STARTUP_FAILED);
+        assert!(failing.detail.contains("4"), "{}", failing.detail);
+        assert!(failing.detail.contains("startup line 30"));
+        assert!(!failing.detail.contains("startup line 1\n"));
+        assert!(
+            failing.detail.lines().count() <= STARTUP_STDERR_LINES + 2,
+            "{}",
+            failing.detail
+        );
+
+        // 崩溃循环但还没有任何 stderr：仍然报错，只是没有摘要。
+        let silent = daemon_startup_check(3, true, "  \n");
+        assert_eq!(silent.level, DiagnosticLevel::Error);
     }
 
     #[test]
@@ -1188,6 +2191,71 @@ mod tests {
     }
 
     #[test]
+    fn open_log_dir_accepts_only_existing_known_directories() {
+        let root = std::env::temp_dir().join(format!("fluxdown_doctor_{}", uuid::Uuid::new_v4()));
+        let data = root.join("data");
+        let logs = data.join("logs");
+        let daemon_logs = root.join("daemon-logs");
+        let outside = root.join("other");
+        let child = logs.join("nested");
+        for dir in [&logs, &daemon_logs, &outside, &child] {
+            std::fs::create_dir_all(dir).expect("create diagnostic directories");
+        }
+        let executable = logs.join("downloaded-program");
+        std::fs::write(&executable, b"program").expect("create file inside logs");
+        let allowed = vec![data.clone(), logs.clone(), daemon_logs.clone()];
+        for dir in [&data, &logs, &daemon_logs] {
+            assert_eq!(
+                super::resolve_log_dir_target(dir, &allowed),
+                Some(std::fs::canonicalize(dir).expect("canonical directory"))
+            );
+        }
+        assert_eq!(
+            super::resolve_log_dir_target(&logs.join("..").join("logs"), &allowed),
+            Some(std::fs::canonicalize(&logs).expect("canonical logs"))
+        );
+        for rejected in [
+            outside,
+            child,
+            executable.clone(),
+            root.join("missing"),
+            logs.join("..").join("..").join("other"),
+        ] {
+            assert_eq!(
+                super::resolve_log_dir_target(&rejected, &allowed),
+                None,
+                "{}",
+                rejected.display()
+            );
+        }
+        assert_eq!(
+            super::resolve_log_dir_target(&executable, std::slice::from_ref(&executable)),
+            None
+        );
+        std::fs::remove_dir_all(root).expect("remove diagnostic directories");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_log_dir_resolves_aliases_without_allowing_symlink_escapes() {
+        let root = std::env::temp_dir().join(format!("fluxdown_doctor_{}", uuid::Uuid::new_v4()));
+        let logs = root.join("logs");
+        let outside = root.join("other");
+        std::fs::create_dir_all(&logs).expect("create logs");
+        std::fs::create_dir_all(&outside).expect("create outside directory");
+        let alias = root.join("logs-alias");
+        let escape = logs.join("escape");
+        std::os::unix::fs::symlink(&logs, &alias).expect("alias logs");
+        std::os::unix::fs::symlink(&outside, &escape).expect("symlink outside directory");
+        assert_eq!(
+            super::resolve_log_dir_target(&alias, std::slice::from_ref(&logs)),
+            Some(std::fs::canonicalize(&logs).expect("canonical logs"))
+        );
+        assert_eq!(super::resolve_log_dir_target(&escape, &[logs]), None);
+        std::fs::remove_dir_all(root).expect("remove diagnostic directories");
+    }
+
+    #[test]
     fn log_dir_probe_reports_writability() {
         let dir = std::env::temp_dir().join(format!(
             "fluxdown_doctor_{}_{}",
@@ -1197,8 +2265,8 @@ mod tests {
         let missing = probe_log_dir(&dir);
         assert_eq!(missing.level, DiagnosticLevel::Error);
         assert_eq!(missing.hint, HINT_CHECK_DISK);
-        std::fs::create_dir_all(&dir).ok();
-        std::fs::write(dir.join("agent.log"), b"line\n").ok();
+        std::fs::create_dir_all(&dir).expect("create doctor test log directory");
+        std::fs::write(dir.join("agent.log"), b"line\n").expect("write doctor test log");
         let writable = probe_log_dir(&dir);
         assert_eq!(writable.level, DiagnosticLevel::Ok);
         assert!(writable.detail.contains("1 log files"));
@@ -1207,7 +2275,9 @@ mod tests {
             Some(ACTION_OPEN_LOG_DIR)
         );
         assert!(!dir.join(".doctor_write_probe").exists());
-        std::fs::remove_dir_all(&dir).ok();
+        if let Err(error) = std::fs::remove_dir_all(&dir) {
+            tracing::warn!(path = %dir.display(), %error, "doctor test cleanup failed");
+        }
     }
 
     #[tokio::test]
@@ -1233,5 +2303,328 @@ mod tests {
         assert_eq!(daemon_log_dir(Some(&describe)), Some("/data/logs"));
         assert_eq!(daemon_log_dir(Some(&serde_json::json!({}))), None);
         assert_eq!(daemon_log_dir(None), None);
+    }
+
+    fn storage(
+        role: StorageProbeRole,
+        failure: Option<StorageProbeFailure>,
+        available_bytes: Option<u64>,
+    ) -> StorageProbeDto {
+        StorageProbeDto {
+            role,
+            label: "Main".to_owned(),
+            path: "/data/dl".to_owned(),
+            exists: true,
+            probed_dir: "/data/dl".to_owned(),
+            failed_step: if failure.is_some() { "create" } else { "" }.to_owned(),
+            failure,
+            error: if failure.is_some() {
+                "Permission denied (os error 13)"
+            } else {
+                ""
+            }
+            .to_owned(),
+            available_bytes,
+            os_error: failure.map(|_| 13),
+        }
+    }
+
+    fn repair_of(check: &fluxdown_protocol::DiagnosticCheckDto) -> Option<(String, String)> {
+        check
+            .repair
+            .as_ref()
+            .map(|repair| (repair.action.clone(), repair.target.clone()))
+    }
+
+    #[test]
+    fn storage_probe_failures_and_low_space_need_attention() {
+        let ok = storage_check(
+            &storage(StorageProbeRole::Queue, None, Some(LOW_SPACE_BYTES)),
+            true,
+            Os::Linux,
+        );
+        assert_eq!(
+            (ok.id.as_str(), ok.target.as_str()),
+            ("queue_save_dir", "Main")
+        );
+        assert_eq!((ok.level, repair_of(&ok)), (DiagnosticLevel::Ok, None));
+
+        let low = storage_check(
+            &storage(
+                StorageProbeRole::DefaultSaveDir,
+                None,
+                Some(LOW_SPACE_BYTES - 1),
+            ),
+            true,
+            Os::Linux,
+        );
+        assert_eq!(low.id, "save_dir");
+        assert_eq!(low.level, DiagnosticLevel::Warn);
+        assert_eq!(low.hint, HINT_LOW_DISK_SPACE);
+
+        let full = storage_check(
+            &storage(
+                StorageProbeRole::Rss,
+                Some(StorageProbeFailure::NoSpace),
+                None,
+            ),
+            true,
+            Os::Linux,
+        );
+        assert_eq!(
+            (full.hint.as_str(), repair_of(&full)),
+            (HINT_LOW_DISK_SPACE, None)
+        );
+        let offline = storage_check(
+            &storage(
+                StorageProbeRole::Category,
+                Some(StorageProbeFailure::Timeout),
+                None,
+            ),
+            true,
+            Os::Linux,
+        );
+        assert_eq!(offline.id, "category_save_dir");
+        assert_eq!(offline.hint, HINT_DIR_TIMEOUT);
+    }
+
+    #[test]
+    fn permission_denied_dirs_offer_the_repair_matching_the_cause() {
+        let denied = storage(
+            StorageProbeRole::DataDir,
+            Some(StorageProbeFailure::PermissionDenied),
+            Some(u64::MAX),
+        );
+        let unix = storage_check(&denied, true, Os::Linux);
+        assert_eq!(unix.id, "data_dir");
+        assert_eq!(unix.level, DiagnosticLevel::Error);
+        assert!(unix.detail.contains("create failed: Permission denied"));
+        assert_eq!(unix.hint, HINT_DIR_PERMISSION);
+        assert_eq!(
+            repair_of(&unix),
+            Some((ACTION_FIX_DIR_ACCESS.to_owned(), "/data/dl".to_owned()))
+        );
+        // headless：没有授权对话框，不给按钮。
+        assert_eq!(repair_of(&storage_check(&denied, false, Os::Linux)), None);
+
+        let mut tcc = denied.clone();
+        tcc.os_error = Some(1);
+        let mac = storage_check(&tcc, true, Os::MacOs);
+        assert_eq!(mac.hint, HINT_DIR_PERMISSION_MACOS);
+        assert_eq!(
+            repair_of(&mac),
+            Some((
+                ACTION_OPEN_SETTINGS.to_owned(),
+                "files_and_folders".to_owned()
+            ))
+        );
+        // Linux 上的 EPERM（不可变属性等）改属主无效：没有按钮。
+        assert_eq!(repair_of(&storage_check(&tcc, true, Os::Linux)), None);
+
+        let mut windows = denied;
+        windows.os_error = Some(5);
+        assert_eq!(
+            repair_of(&storage_check(&windows, true, Os::Windows)).map(|(action, _)| action),
+            Some(ACTION_FIX_DIR_ACCESS.to_owned())
+        );
+    }
+
+    #[test]
+    fn missing_save_dir_reports_the_probed_parent() {
+        let mut probe = storage(StorageProbeRole::DefaultSaveDir, None, Some(u64::MAX));
+        probe.exists = false;
+        probe.probed_dir = "/data".to_owned();
+        let check = storage_check(&probe, true, Os::Linux);
+        assert_eq!(check.level, DiagnosticLevel::Ok);
+        assert!(check.detail.contains("probed /data"));
+    }
+
+    #[test]
+    fn component_launch_denial_and_runtime_failure_get_distinct_hints() {
+        let mut probe = ComponentProbeDto {
+            name: "yt-dlp".to_owned(),
+            path: "/bin/yt-dlp".to_owned(),
+            output: "2026.07.04".to_owned(),
+            error: String::new(),
+            permission_denied: false,
+            managed: true,
+        };
+        let ok = component_check(&probe, Os::Linux);
+        assert_eq!(
+            (ok.target.as_str(), ok.level),
+            ("yt-dlp", DiagnosticLevel::Ok)
+        );
+        probe.output.clear();
+        probe.error = "spawn failed: Permission denied".to_owned();
+        probe.permission_denied = true;
+        let denied = component_check(&probe, Os::Linux);
+        assert_eq!(denied.level, DiagnosticLevel::Error);
+        assert_eq!(denied.hint, HINT_COMPONENT_BLOCKED_FIXABLE);
+        assert_eq!(
+            repair_of(&denied),
+            Some((ACTION_FIX_COMPONENT.to_owned(), "yt-dlp".to_owned()))
+        );
+        // Windows 没有执行位；手动 / 系统路径不替用户改：都不给按钮，提示里也不提按钮。
+        let windows = component_check(&probe, Os::Windows);
+        assert_eq!(
+            (windows.hint.as_str(), repair_of(&windows)),
+            (HINT_COMPONENT_BLOCKED, None)
+        );
+        probe.managed = false;
+        let manual = component_check(&probe, Os::Linux);
+        assert_eq!(
+            (manual.hint.as_str(), repair_of(&manual)),
+            (HINT_COMPONENT_BLOCKED, None)
+        );
+        probe.permission_denied = false;
+        assert_eq!(
+            component_check(&probe, Os::Linux).hint,
+            HINT_COMPONENT_BROKEN
+        );
+    }
+
+    #[test]
+    fn only_system_disabled_autostart_needs_attention() {
+        use crate::platform::AutostartState;
+        let off = autostart_check(AutostartState::Off);
+        assert_eq!((off.level, repair_of(&off)), (DiagnosticLevel::Ok, None));
+        assert_eq!(
+            autostart_check(AutostartState::Enabled).level,
+            DiagnosticLevel::Ok
+        );
+        let blocked = autostart_check(AutostartState::DisabledBySystem);
+        assert_eq!(blocked.level, DiagnosticLevel::Warn);
+        assert_eq!(blocked.hint, HINT_AUTOSTART_BLOCKED);
+        assert_eq!(
+            repair_of(&blocked).map(|(action, _)| action),
+            Some(ACTION_ENABLE_AUTOSTART.to_owned())
+        );
+    }
+
+    #[test]
+    fn notification_check_offers_test_only_when_a_notification_can_be_sent() {
+        use crate::notification::NotificationAvailability;
+        let action = |check: &fluxdown_protocol::DiagnosticCheckDto| {
+            check.repair.as_ref().map(|repair| repair.action.clone())
+        };
+        let off = notification_check(None);
+        assert_eq!((off.level, action(&off)), (DiagnosticLevel::Ok, None));
+        let blocked = notification_check(Some(NotificationAvailability::Blocked("off".to_owned())));
+        assert_eq!(blocked.level, DiagnosticLevel::Warn);
+        assert_eq!(blocked.hint, HINT_NOTIFICATIONS_BLOCKED);
+        // 有通知设置页的平台引导去放行，否则只能发测试通知。
+        let expected = if crate::platform::SettingsPane::Notifications.uri().is_some() {
+            ACTION_OPEN_SETTINGS
+        } else {
+            ACTION_TEST_NOTIFICATION
+        };
+        assert_eq!(action(&blocked).as_deref(), Some(expected));
+        let missing = notification_check(Some(NotificationAvailability::Unavailable(
+            "no dbus".to_owned(),
+        )));
+        assert_eq!(missing.level, DiagnosticLevel::Warn);
+        assert_eq!(action(&missing), None);
+        let unknown = notification_check(Some(NotificationAvailability::Unverifiable));
+        assert_eq!(unknown.level, DiagnosticLevel::Info);
+        assert_eq!(action(&unknown).as_deref(), Some(ACTION_TEST_NOTIFICATION));
+    }
+
+    #[test]
+    fn nmh_ownership_and_policy_blocks_are_reported() {
+        use crate::nmh::registry::PolicyBlock;
+        let diagnosis = NmhDiagnosis {
+            exe_path: "/app/fluxdown_nmh".to_owned(),
+            relay_location: "/data/fluxdown_nmh.sh".to_owned(),
+            registered_relay: "/app/fluxdown_nmh".to_owned(),
+            relay_owner: RelayOwner::Current,
+            foreign_owned: vec!["/data/fluxdown_nmh.sh".to_owned()],
+            policy_blocks: vec![
+                PolicyBlock::UserLevelHostsDisabled {
+                    browser: "Chrome".to_owned(),
+                },
+                PolicyBlock::CommandPromptDisabled,
+            ],
+            ..NmhDiagnosis::default()
+        };
+        let checks = nmh_checks(&diagnosis);
+        let ownership = checks
+            .iter()
+            .find(|check| check.id == "nmh_ownership")
+            .map(|check| (check.level, check.hint.clone(), repair_of(check)));
+        assert_eq!(
+            ownership,
+            Some((
+                DiagnosticLevel::Warn,
+                HINT_NMH_FOREIGN_OWNED.to_owned(),
+                Some((ACTION_REREGISTER.to_owned(), String::new()))
+            ))
+        );
+        let policies: Vec<_> = checks
+            .iter()
+            .filter(|check| check.id == "nmh_policy")
+            .map(|check| {
+                (
+                    check.target.as_str(),
+                    check.hint.as_str(),
+                    check.repair.is_none(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            policies,
+            [
+                ("Chrome", HINT_NMH_USER_HOSTS_DISABLED, true),
+                ("", HINT_NMH_CMD_DISABLED, true)
+            ]
+        );
+    }
+
+    #[test]
+    fn nmh_launch_failure_offers_reregister() {
+        use crate::nmh::registry::RelayLaunchError;
+        let diagnosis = NmhDiagnosis {
+            relay_location: "/data/fluxdown_nmh.sh".to_owned(),
+            registered_relay: "/app/fluxdown_nmh".to_owned(),
+            ..NmhDiagnosis::default()
+        };
+        let ok = nmh_launch_check(&diagnosis, &Ok(()));
+        assert_eq!((ok.level, repair_of(&ok)), (DiagnosticLevel::Ok, None));
+        let failed = nmh_launch_check(
+            &diagnosis,
+            &Err(RelayLaunchError::Exited("exit status: 126".to_owned())),
+        );
+        assert_eq!(failed.level, DiagnosticLevel::Error);
+        assert_eq!(failed.hint, HINT_NMH_LAUNCH_FAILED);
+        assert!(failed.detail.contains("126"));
+        assert_eq!(
+            repair_of(&failed),
+            Some((ACTION_REREGISTER.to_owned(), String::new()))
+        );
+    }
+
+    #[test]
+    fn category_targets_skip_hidden_and_unset_dirs() -> Result<(), serde_json::Error> {
+        let mut snapshot = AgentSnapshot::default();
+        snapshot.preferences.values.insert(
+            fluxdown_protocol::CUSTOM_CATEGORIES_PREF_KEY.to_owned(),
+            json!([
+                {"id": "builtin_video", "name": "", "builtinType": "video", "saveDir": "/dl/Video"},
+                {"id": "c1", "name": "ISO", "saveDir": "/dl/ISO", "visible": false},
+                {"id": "c2", "name": "Docs", "saveDir": " "},
+                {"id": "c3", "name": "Books", "saveDir": "/dl/Books"},
+            ]),
+        );
+        let targets = category_probe_targets(&snapshot);
+        let labels: Vec<_> = targets
+            .iter()
+            .map(|target| (target.label.as_str(), target.path.as_str()))
+            .collect();
+        assert_eq!(labels, vec![("video", "/dl/Video"), ("Books", "/dl/Books")]);
+        assert!(
+            targets
+                .iter()
+                .all(|target| target.role == StorageProbeRole::Category)
+        );
+        Ok(())
     }
 }

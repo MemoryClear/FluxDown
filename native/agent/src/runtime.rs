@@ -42,15 +42,21 @@ pub fn run_blocking(host: ShellHost) -> AgentResult {
 pub(crate) async fn shutdown_signal() {
     use tokio::signal::unix::{SignalKind, signal};
 
-    let Ok(mut terminate) = signal(SignalKind::terminate()) else {
-        if tokio::signal::ctrl_c().await.is_err() {
-            std::future::pending::<()>().await;
+    let mut terminate = match signal(SignalKind::terminate()) {
+        Ok(terminate) => terminate,
+        Err(error) => {
+            tracing::warn!(error = %error, "could not register SIGTERM handler; falling back to Ctrl-C");
+            if let Err(error) = tokio::signal::ctrl_c().await {
+                tracing::error!(error = %error, "could not wait for shutdown signals");
+                std::future::pending::<()>().await;
+            }
+            return;
         }
-        return;
     };
     tokio::select! {
         result = tokio::signal::ctrl_c() => {
-            if result.is_err() {
+            if let Err(error) = result {
+                tracing::warn!(error = %error, "could not wait for Ctrl-C; waiting for SIGTERM");
                 terminate.recv().await;
             }
         }
@@ -61,7 +67,8 @@ pub(crate) async fn shutdown_signal() {
 /// GUI 子系统进程没有控制台时 Ctrl-C 处理器可能注册失败：失败即永不触发，而不是立刻退出。
 #[cfg(not(unix))]
 pub(crate) async fn shutdown_signal() {
-    if tokio::signal::ctrl_c().await.is_err() {
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        tracing::warn!(error = %error, "Ctrl-C unavailable; waiting for another agent shutdown source");
         std::future::pending::<()>().await;
     }
 }
@@ -118,19 +125,15 @@ pub(crate) async fn run_with(
         .and_then(|config| config.effective_demo_url(bound))
         .map(|url| vec![("FLUXDOWN_DEMO_URL".to_owned(), url)])
         .unwrap_or_default();
+    let daemon_stderr_log =
+        crate::log_export::agent_log_dir(&paths.agent_data_dir).join("fluxdownd.stderr.log");
     let supervisor = Arc::new(
         DaemonSupervisor::new(daemon_address)
             .with_extra_env(daemon_env)
-            .with_stderr_log(
-                crate::log_export::agent_log_dir(&paths.agent_data_dir)
-                    .join("fluxdownd.stderr.log"),
-            ),
+            .with_stderr_log(daemon_stderr_log.clone()),
     );
-    let daemon_bearer = load_daemon_bearer(&paths, &supervisor).await?;
-    let daemon_config = DaemonClientConfig {
-        rpc_url: paths.daemon_rpc_url.clone(),
-        bearer: daemon_bearer,
-    };
+    let daemon_bearer = load_daemon_bearer(&paths, &supervisor, &cancel).await?;
+    let daemon_config = DaemonClientConfig::new(paths.daemon_rpc_url.clone(), daemon_bearer);
     let (daemon, daemon_events) =
         DaemonClient::start(daemon_config.clone(), supervisor.clone(), cancel.clone())?;
     let daemon = Arc::new(daemon);
@@ -153,12 +156,15 @@ pub(crate) async fn run_with(
         ..AgentSnapshot::default()
     };
     let events = AgentEventHub::new(initial);
-    let lifecycle = Arc::new(Lifecycle::new(
-        cancel.clone(),
-        daemon.clone(),
-        supervisor,
-        paths.daemon_data_dir.clone(),
-    ));
+    let lifecycle = Arc::new(
+        Lifecycle::new(
+            cancel.clone(),
+            daemon.clone(),
+            supervisor.clone(),
+            paths.daemon_data_dir.clone(),
+        )
+        .with_shutdown_config(daemon_config.clone()),
+    );
     if let Some(server) = &server {
         // SIGTERM / SIGINT → 与 `system.shutdown` 同一条完全退出路径（先关停 daemon）。
         let quit = server.quit.clone();
@@ -196,11 +202,16 @@ pub(crate) async fn run_with(
     });
     let link_task = tokio::spawn(link.clone().run(cancel.clone()));
     let analytics_task = tokio::spawn(
-        crate::analytics::AnalyticsWorker::new(shared_state.clone(), store.clone())?
+        crate::analytics::AnalyticsWorker::new(shared_state.clone(), store.clone())
             .run(cancel.clone()),
     );
     let (api_config, api_switches, api_token) = {
-        let state = shared_state.lock().await;
+        let mut state = shared_state.lock().await;
+        // 局域网 / CORS 放开且 takeover 或 aria2 开启时，空 token 等于对外匿名开放：启动即补齐。
+        // server 模式的空密钥表示尚未完成首次设置，由兼容 API 自身拒绝，不能自动补。
+        if server.is_none() && crate::gateway::ensure_exposed_auth_token(&mut state) {
+            store.save(&state).await?;
+        }
         // legacy Gateway 设置（含用户令牌）尚未从 daemon 迁入时，空令牌意味着兼容 API 不鉴权：
         // 迁移完成前兼容面全部关闭，由 readiness 任务按迁移后的状态开启。
         let migrated = state.gateway_migration_revision.is_some();
@@ -211,7 +222,11 @@ pub(crate) async fn run_with(
             migrated && state.gateway.mcp_enabled,
             state.gateway.cors_enabled,
         ));
-        let config = compatibility_api_config(&state).with_runtime_switches(switches.clone());
+        let mut config = compatibility_api_config(&state).with_runtime_switches(switches.clone());
+        // 监听地址在启动时按 `lan_enabled` 固定（运行期切换下次启动生效），Host 校验与之同步；
+        // server 模式可监听非回环地址，LAN 模式本就对外开放，均不强制。
+        config.enforce_loopback_host = server.is_none() && !state.gateway.lan_enabled;
+        config.require_token = server.is_some();
         let token = config.token.clone();
         (config, switches, token)
     };
@@ -287,28 +302,41 @@ pub(crate) async fn run_with(
         shell.clone(),
     ));
     let blobs = Arc::new(crate::capture::DaemonBlobClient::new(&daemon_config)?);
-    let mut nmh_task = if server.is_some() {
+    let nmh_task = if server.is_some() {
         // server 模式没有浏览器扩展中继：不启动 NMH IPC 也不注册 native messaging host；
         // 占位任务永不完成，退出时 abort。
         tokio::spawn(std::future::pending::<Result<(), std::io::Error>>())
     } else {
-        tokio::spawn(
-            crate::nmh::NmhService::new(daemon.clone(), capture.clone()).run(cancel.clone()),
-        )
-    };
-    // 浏览器扩展靠 NMH 注册找到中继：启动时按归属规则自愈，不与并存的另一份 FluxDown 互相覆盖。
-    if server.is_none() {
-        tokio::task::spawn_blocking(|| match crate::nmh::registry::auto_register() {
-            Ok(crate::nmh::registry::AutoRegisterOutcome::UpToDate) => {
-                tracing::debug!("NMH registration up to date");
+        // NMH 需要实时速度（扩展弹窗）：自持一个任务事件泵，与网关的泵互不依赖。
+        let task_events = crate::task_events::TaskEventHub::spawn(&events);
+        let nmh = crate::nmh::NmhService::new(daemon.clone(), capture.clone())
+            .with_task_events(task_events);
+        let nmh_cancel = cancel.clone();
+        let (endpoint_ready, endpoint_live) = tokio::sync::oneshot::channel();
+        // 浏览器扩展靠 NMH 注册找到中继：端点开始监听后再按归属规则自愈，并存安装的中继
+        // 要实测能连到本 agent 才保留，仍可用时不与它互相覆盖。
+        tokio::spawn(async move {
+            match crate::nmh::registry::auto_register(endpoint_live.await.is_ok()).await {
+                Ok(crate::nmh::registry::AutoRegisterOutcome::UpToDate) => {
+                    tracing::debug!("NMH registration up to date");
+                }
+                Ok(crate::nmh::registry::AutoRegisterOutcome::Registered(relay)) => {
+                    tracing::info!(relay = %relay.display(), "NMH registration repaired");
+                }
+                Err(error) => tracing::warn!(error = %error, "NMH auto-registration failed"),
             }
-            Ok(crate::nmh::registry::AutoRegisterOutcome::Registered(relay)) => {
-                tracing::info!(relay = %relay.display(), "NMH registration repaired");
-            }
-            Err(error) => tracing::warn!(error = %error, "NMH auto-registration failed"),
         });
-    }
-    let diagnostics = Arc::new(crate::diagnostics::DiagnosticsService::new(
+        tokio::spawn(async move {
+            let outcome = nmh.run(nmh_cancel.clone(), endpoint_ready).await;
+            if let Err(error) = &outcome {
+                tracing::warn!(error = %error, "NMH IPC service stopped; browser relay unavailable");
+            } else if !nmh_cancel.is_cancelled() {
+                tracing::warn!("NMH IPC service stopped unexpectedly; browser relay unavailable");
+            }
+            Ok(())
+        })
+    };
+    let diagnostics = crate::diagnostics::DiagnosticsService::new(
         daemon.clone(),
         daemon_config.clone(),
         events.clone(),
@@ -316,10 +344,17 @@ pub(crate) async fn run_with(
         store.clone(),
         api_switches.clone(),
         api_token.clone(),
+    )
+    .with_daemon_startup(supervisor.clone(), daemon_stderr_log);
+    // 开机自启与系统通知只属于桌面宿主；headless 没有登录会话可检查。
+    let diagnostics = Arc::new(if server.is_some() {
+        diagnostics
+    } else {
+        diagnostics.with_desktop_checks(notifier.clone())
+    });
+    let update = Arc::new(crate::update::UpdateService::new(
+        fluxdown_protocol::APP_VERSION,
     ));
-    let update = Arc::new(crate::update::UpdateService::new(env!(
-        "CARGO_PKG_VERSION"
-    ))?);
     let cloud = Arc::new(cloud_api);
     let gateway_service = Arc::new(
         GatewayService::new(
@@ -370,11 +405,19 @@ pub(crate) async fn run_with(
     if server.is_none() {
         crate::clipboard_watch::spawn(events.clone(), gateway_service.clone(), cancel.clone());
     }
-    if server.is_none()
-        && let Ok(Err(error)) =
-            tokio::task::spawn_blocking(crate::platform::migrate_legacy_autostart).await
-    {
-        tracing::warn!(error = %error, "could not migrate legacy autostart entry");
+    if server.is_none() {
+        match tokio::task::spawn_blocking(crate::platform::migrate_legacy_autostart).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(error = %error, "could not migrate legacy autostart entry");
+            }
+            Err(error) if error.is_cancelled() => {
+                tracing::debug!("legacy autostart migration task cancelled during shutdown");
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "legacy autostart migration task panicked");
+            }
+        }
     }
     let server_handle = match server_config {
         Some(config) => {
@@ -402,47 +445,83 @@ pub(crate) async fn run_with(
         link.clone(),
         server_config.and_then(|config| config.language.clone()),
     ));
-    let (result, nmh_completed): (Result<(), Box<dyn std::error::Error + Send + Sync>>, bool) = tokio::select! {
-        gateway = crate::gateway::serve(
-            listener,
-            gateway_service,
-            api_host,
-            api_config,
-            bearer,
-            cancel.clone(),
-            server_handle,
-        ) => (gateway.map_err(Into::into), false),
-        nmh = &mut nmh_task => {
-            let error = match nmh {
-                Ok(Ok(())) => std::io::Error::other("NMH IPC service stopped unexpectedly"),
-                Ok(Err(error)) => error,
-                Err(error) => std::io::Error::other(error.to_string()),
-            };
-            (Err(Box::new(error)), true)
-        }
-    };
+    // NMH 只服务浏览器扩展：其端点故障只记日志，不拖垮 agent；正常退出也不是故障。
+    let result: Result<(), Box<dyn std::error::Error + Send + Sync>> = crate::gateway::serve(
+        listener,
+        gateway_service,
+        api_host,
+        api_config,
+        bearer,
+        cancel.clone(),
+        server_handle,
+    )
+    .await
+    .map_err(Into::into);
     cancel.cancel();
-    // daemon 启动失败 / 迁移失败时 readiness 任务取消了 Gateway：以它的错误作为退出原因。
-    let result = match (result, readiness_task.await) {
-        (Ok(()), Ok(Err(error))) => Err(error),
-        (result, _) => result,
-    };
-    let _ = event_task.await;
-    let _ = cdn_task.await;
-    let _ = sync_task.await;
-    let _ = remote_task.await;
-    let _ = link_task.await;
-    let _ = device_meta_task.await;
-    let _ = effects_task.await;
-    let _ = analytics_task.await;
-    let _ = power_task.await;
-    let _ = shell_task.await;
-    if !nmh_completed {
-        if server.is_some() {
-            // server 模式的 NMH 占位任务永不自行结束。
-            nmh_task.abort();
+    // 所有后台任务都收尾：保留 Gateway / readiness 的首错，同时记录其他故障。
+    let mut result = result;
+    match readiness_task.await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            if result.is_ok() {
+                result = Err(error);
+            } else {
+                tracing::error!(error = %error, "daemon readiness failed during shutdown");
+            }
         }
-        let _ = nmh_task.await;
+        Err(error) if error.is_cancelled() => {
+            tracing::debug!("daemon readiness task cancelled during shutdown");
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "daemon readiness task panicked");
+            if result.is_ok() {
+                result = Err(error.into());
+            }
+        }
+    }
+    for (task, handle) in [
+        ("daemon event projection", event_task),
+        ("CDN", cdn_task),
+        ("cloud sync", sync_task),
+        ("remote tasks", remote_task),
+        ("device link", link_task),
+        ("device metadata", device_meta_task),
+        ("background effects", effects_task),
+        ("analytics", analytics_task),
+        ("power", power_task),
+        ("shell", shell_task),
+    ] {
+        match handle.await {
+            Ok(()) => {}
+            Err(error) if error.is_cancelled() => {
+                tracing::debug!(task, "agent background task cancelled during shutdown");
+            }
+            Err(error) => {
+                tracing::error!(task, error = %error, "agent background task panicked");
+                if result.is_ok() {
+                    result = Err(error.into());
+                }
+            }
+        }
+    }
+    if server.is_some() {
+        // server 模式的 NMH 占位任务永不自行结束。
+        nmh_task.abort();
+    }
+    match nmh_task.await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "NMH IPC service stopped; browser relay unavailable");
+        }
+        Err(error) if error.is_cancelled() => {
+            tracing::debug!("NMH task cancelled during shutdown");
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "NMH task panicked");
+            if result.is_ok() {
+                result = Err(error.into());
+            }
+        }
     }
     result
 }
@@ -484,8 +563,9 @@ async fn await_daemon_ready(readiness: DaemonReadiness) -> AgentResult {
         // 慢盘 / NAS 冷启动可能远超 30s：daemon 客户端自己持续重连，这里持续等待并周期性
         // 报告状态；只有 agent 退出（信号 / daemon 致命错误 → cancel）才结束等待。
         let started = std::time::Instant::now();
-        while daemon.wait_ready(DAEMON_READY_POLL).await.is_err() {
+        while let Err(error) = daemon.wait_ready(DAEMON_READY_POLL).await {
             tracing::warn!(
+                error = ?error,
                 waited_secs = started.elapsed().as_secs(),
                 "fluxdownd is not ready yet; still waiting"
             );
@@ -505,6 +585,15 @@ async fn await_daemon_ready(readiness: DaemonReadiness) -> AgentResult {
                     state.gateway.clone(),
                 ));
             }
+        } else {
+            // 迁移可能带入 CORS 放开与接管 / aria2 开关：对外暴露面必须有 token。
+            let mut state = state.lock().await;
+            if crate::gateway::ensure_exposed_auth_token(&mut state) {
+                store.save(&state).await?;
+                events.publish(fluxdown_protocol::AgentEvent::GatewayChanged(
+                    state.gateway.clone(),
+                ));
+            }
         }
         let state = state.lock().await;
         api_switches.update(
@@ -516,8 +605,11 @@ async fn await_daemon_ready(readiness: DaemonReadiness) -> AgentResult {
         );
         api_token.set(state.gateway_user_token.clone());
         // 令牌与开关都已就位：放行首次设置 / 状态接口（避免 setup 在迁移前落定、被迁移覆盖）。
-        if let Some(server) = &server {
-            let _ = server.ready.send(true);
+        if let Some(server) = &server
+            && server.ready.send(true).is_err()
+        {
+            // Gateway 已退出时没有 readiness 接收者，无须把正常关停当成引导失败。
+            tracing::debug!("server readiness receiver closed during shutdown");
         }
         Ok(())
     };
@@ -656,10 +748,15 @@ async fn initialize_device_identity(
 async fn load_daemon_bearer(
     paths: &AgentPaths,
     supervisor: &DaemonSupervisor,
+    cancel: &CancellationToken,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    if let Ok(token) = tokio::fs::read_to_string(&paths.daemon_token_file).await
-        && !token.trim().is_empty()
-    {
+    let token = match tokio::fs::read_to_string(&paths.daemon_token_file).await {
+        Ok(token) => token,
+        // 冷启动时 daemon 尚未生成令牌，只有缺失允许进入启动 / 等待路径。
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    if !token.trim().is_empty() {
         return Ok(token.trim().to_owned());
     }
     let address = daemon_socket_address(&paths.daemon_rpc_url)?;
@@ -672,15 +769,32 @@ async fn load_daemon_bearer(
         }
         Err(error) => return Err(error.into()),
     }
-    for _ in 0..100 {
-        if let Ok(token) = tokio::fs::read_to_string(&paths.daemon_token_file).await
-            && !token.trim().is_empty()
-        {
+    // daemon 在迁移 / 慢盘冷启动后才写 token：与 await_daemon_ready 一致持续等待，直到取消。
+    const TICKS_PER_CHECK: u32 = 300;
+    let mut remaining = TICKS_PER_CHECK;
+    loop {
+        let token = match tokio::fs::read_to_string(&paths.daemon_token_file).await {
+            Ok(token) => token,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(error.into()),
+        };
+        if !token.trim().is_empty() {
             return Ok(token.trim().to_owned());
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::select! {
+            () = cancel.cancelled() => {
+                return Err("cancelled while waiting for the daemon token file".into());
+            }
+            () = tokio::time::sleep(Duration::from_millis(100)) => {}
+        }
+        remaining -= 1;
+        if remaining == 0 {
+            remaining = TICKS_PER_CHECK;
+            tracing::warn!("still waiting for the daemon token file");
+            // 子进程若已崩溃则重新拉起；仍存活的代际上是空操作。
+            supervisor.ensure_running().await?;
+        }
     }
-    Err("daemon token file was not created after supervised launch".into())
 }
 
 fn compatibility_api_config(state: &AgentState) -> fluxdown_api::server::ApiServerConfig {
@@ -719,7 +833,7 @@ fn compatibility_api_config(state: &AgentState) -> fluxdown_api::server::ApiServ
             state.gateway.port.to_string(),
         ),
     ]);
-    fluxdown_api::server::ApiServerConfig::from_config_map(&config, env!("CARGO_PKG_VERSION"))
+    fluxdown_api::server::ApiServerConfig::from_config_map(&config, fluxdown_protocol::APP_VERSION)
 }
 
 /// UI Gateway 监听地址：`FLUXDOWN_AGENT_BIND` 覆盖时必须是回环；否则按持久化的
@@ -781,14 +895,57 @@ pub fn resolve_agent_data_dir() -> Result<PathBuf, Box<dyn std::error::Error + S
     if let Some(dir) = std::env::var_os("FLUXDOWN_AGENT_DATA_DIR") {
         return Ok(PathBuf::from(dir));
     }
-    let root = match std::env::var_os("FLUXDOWN_DATA_DIR") {
-        Some(root) => PathBuf::from(root),
-        None => directories::ProjectDirs::from("dev", "zerx", "FluxDown")
+    let project_root = || -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(directories::ProjectDirs::from("dev", "zerx", "FluxDown")
             .ok_or("could not resolve application data directory")?
             .data_dir()
-            .to_owned(),
+            .to_owned())
     };
-    Ok(root.join("agent"))
+    if let Some(root) = std::env::var_os("FLUXDOWN_DATA_DIR") {
+        return Ok(PathBuf::from(root).join("agent"));
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(portable) = portable_data_dir() {
+        // 便携版与引擎 data_dir 同判定；旧版本把状态写在 ProjectDirs，首启迁移一次。
+        let target = portable.join("agent");
+        match project_root() {
+            Ok(root) => migrate_legacy_agent_state(&root.join("agent"), &target),
+            Err(error) => {
+                tracing::warn!(error = %error, "could not locate legacy agent state for portable migration");
+            }
+        }
+        return Ok(target);
+    }
+    Ok(project_root()?.join("agent"))
+}
+
+/// `<exe>/portable` 标记存在时返回 `<exe>/portable_data`。
+#[cfg(target_os = "windows")]
+fn portable_data_dir() -> Option<PathBuf> {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))?;
+    exe_dir
+        .join("portable")
+        .exists()
+        .then(|| exe_dir.join("portable_data"))
+}
+
+/// 目标无状态文件而旧位置有时复制 `agent-state.json`（登录态 / 设备身份）；失败不阻断启动。
+#[cfg(target_os = "windows")]
+fn migrate_legacy_agent_state(legacy: &Path, target: &Path) {
+    let name = "agent-state.json";
+    let (from, to) = (legacy.join(name), target.join(name));
+    if to.exists() || !from.is_file() {
+        return;
+    }
+    if let Err(error) = std::fs::create_dir_all(target) {
+        tracing::warn!(path = %target.display(), error = %error, "could not create portable agent state directory");
+        return;
+    }
+    if let Err(error) = std::fs::copy(&from, &to) {
+        tracing::warn!(source = %from.display(), target = %to.display(), error = %error, "could not migrate legacy agent state");
+    }
 }
 
 /// 镜像 `fluxdown_engine::data_dir::resolve_data_dir_inner` 的默认目录（agent 不依赖 engine）。

@@ -11,12 +11,7 @@ pub enum CreateActorsError {
 pub async fn create_actors(
     shutdown: tokio_util::sync::CancellationToken,
 ) -> Result<(), CreateActorsError> {
-    // Determine the data directory using the shared resolver.
-    //
-    // Linux:   $XDG_DATA_HOME/fluxdown  (~/.local/share/fluxdown)
-    // macOS:   ~/Library/Application Support/fluxdown
-    // Windows portable (marker file present): exe directory
-    // Windows installed: %LOCALAPPDATA%\FluxDown
+    // Determine the data directory using the shared resolver (Android/iOS app-private dir).
     let db_dir = fluxdown_engine::data_dir::resolve_data_dir(None)?;
     download_actor::run(db_dir, shutdown).await?;
     Ok(())
@@ -44,7 +39,17 @@ async fn shutdown_engine(
             Ok(Err(error)) => crate::logger::report_error("hub", "drain task progress", &error),
             Err(error) => {
                 progress_task.abort();
-                let _ = progress_task.await;
+                if let Err(join_error) = progress_task.await {
+                    if join_error.is_cancelled() {
+                        tracing::debug!("hub progress reporter cancelled after timeout");
+                    } else {
+                        crate::logger::report_error(
+                            "hub",
+                            "join aborted task progress",
+                            &join_error,
+                        );
+                    }
+                }
                 crate::logger::report_error("hub", "drain task progress timed out", &error);
             }
         }

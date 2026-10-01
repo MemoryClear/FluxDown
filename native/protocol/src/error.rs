@@ -57,6 +57,8 @@ pub enum ErrorReason {
     PluginPackageTooLarge,
     /// 插件包 / 插件目录未通过 manifest、脚本或版本门槛校验。
     PluginPackageInvalid,
+    /// 市场安装：最新可装版本与用户确认时看到的版本不一致（需刷新目录后重新确认权限）。
+    MarketVersionChanged,
     /// FluxCloud：账号或密码错误。
     InvalidCredentials,
     /// FluxCloud：邮箱验证码错误或已过期。
@@ -107,10 +109,22 @@ pub enum ErrorReason {
     PairingSignatureInvalid,
     /// 局域网配对：不能与自身配对。
     PairingSelf,
+    /// 局域网配对：对端配对协议版本不兼容（含旧版对端），两端需升级到同一版本。
+    PairingVersionMismatch,
     /// 局域网互联：目标设备未配对或已解除配对。
     PeerNotPaired,
     /// 局域网互联：已配对设备当前不可达。
     PeerOffline,
+    /// Doctor 修复：用户取消了系统管理员授权对话框（UAC / polkit / macOS 授权），未做任何更改。
+    ElevationCancelled,
+    /// Doctor 修复：无法请求管理员授权（缺 `pkexec` / polkit 认证代理、无桌面会话等）。
+    ElevationUnavailable,
+    /// Doctor 修复：FluxDown 自身正以 root 身份运行，无法把权限还给普通用户。
+    RunningElevated,
+    /// Doctor 修复：修复步骤已执行，但重新探测仍未通过（noexec 挂载、安全软件、组织策略等）。
+    RepairIncomplete,
+    /// Doctor 修复：目标不在自动修复范围内（系统目录、家目录本身、非权限类错误），需用户手动处理。
+    RepairNotApplicable,
     /// 对端发送了本端不认识的原因。
     #[serde(other)]
     Unknown,

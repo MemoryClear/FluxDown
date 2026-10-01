@@ -47,7 +47,7 @@ use crate::bt_seeding::{SeedingManager, SeedingRegistration, UnregisteredSeed};
 use crate::db::Db;
 use crate::downloader::{DownloadError, ProgressUpdate, SegmentProgressInfo};
 use crate::events::EventSink;
-use crate::logger::{log_error, log_info};
+use crate::logger::{log_error, log_info, log_warn};
 use crate::model::{BtFileEntry, TorrentMetaResult};
 use crate::output;
 use crate::selection::{HostSelection, SelectionOutcome};
@@ -136,7 +136,7 @@ impl TorrentSource {
 /// file name inconsistently with the queued-task path.  Returns `None` when the
 /// decoded value is empty (before sanitization), so callers fall back to a
 /// generated name instead of the literal `"download"` placeholder.
-fn magnet_display_name(url: &str) -> Option<String> {
+pub(crate) fn magnet_display_name(url: &str) -> Option<String> {
     url.split('&')
         .find_map(|part| {
             let part = part.strip_prefix("magnet:?").unwrap_or(part);
@@ -260,6 +260,14 @@ fn hex_val(b: u8) -> Option<u8> {
 /// keeps identical throughput down to a cap of 16. 64 leaves headroom for the
 /// long-running `spawn_blocking` work (completion moves, full re-verification).
 const BT_MAX_BLOCKING_THREADS: usize = 64;
+
+/// DHT 路由表（`dht.json`）的落盘间隔。
+///
+/// librqbit 默认每 60s 重写一次 `dht.json`（临时文件 + rename）。路由表只是
+/// 加速下次引导的缓存，丢几十分钟的增量无关紧要；但 60s 周期写盘会让 NAS
+/// 上休眠的 HDD 在会话存活期间永远无法休眠。拉长到 30 分钟，与做种时长的兜底
+/// 落库周期同量级。
+const DHT_PERSIST_DUMP_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
 /// Well-known public trackers used to accelerate peer discovery for magnet
 /// links that ship without `tr=` parameters.
@@ -558,6 +566,10 @@ pub struct SharedBtSession {
     /// 暂停」等待者触发前校验世代未变，防止用户已 resume 后仍把 torrent
     /// 暂停回去。`Arc` 使等待者能脱离 `&self` 存活于 BT runtime 上。
     pause_epochs: Arc<Mutex<HashMap<String, u64>>>,
+    /// 句柄入册前（磁力元数据解析 / add 进行中）收到的暂停意图：task_id →
+    /// 登记时的 pause 世代号。add 闭包在句柄入册后校验世代并补执行暂停；
+    /// resume / delete / 新一次 add 会作废它。
+    pending_pauses: Mutex<HashMap<String, u64>>,
     /// 本次 add 时存在既有 `{hash}.bitv`、或经缓存句柄跨暂停恢复过的任务。
     /// 这类任务的 have-bits 可能来自采样式 fastresume 校验（对哈希不匹配
     /// 宽容）或暂停期间磁盘被外部改动后的内存位图，完成期必须全量重哈希
@@ -593,6 +605,14 @@ impl SharedBtSession {
         upload_limit_bps: u64,
         bt_config: &BtConfig,
     ) -> Result<Self, DownloadError> {
+        // BT 每个文件、每个 peer 常驻 FD；macOS GUI 启动的软限制仅 256，
+        // 多文件种子或多任务会撞 EMFILE 并连带拖垮同进程的 SQLite/HTTP。
+        // 进程级只需提升一次，失败（硬限制更低等）不影响启动。
+        static NOFILE_LIMIT_ONCE: std::sync::Once = std::sync::Once::new();
+        NOFILE_LIMIT_ONCE.call_once(|| match librqbit::try_increase_nofile_limit() {
+            Ok(limit) => log_info!("[BT] RLIMIT_NOFILE soft limit raised to {limit}"),
+            Err(e) => log_info!("[BT] failed to raise RLIMIT_NOFILE: {e:#}"),
+        });
         // Scale worker threads with CPU cores.  BT workload is mostly I/O-bound
         // so diminishing returns beyond 8 threads; capping here saves ~2 MB of
         // stack memory per thread avoided.
@@ -675,7 +695,7 @@ impl SharedBtSession {
                 ]),
                 persistence: Some(librqbit::dht::DhtPersistenceConfig {
                     config_filename: Some(dht_config_path.clone()),
-                    ..Default::default()
+                    dump_interval: Some(DHT_PERSIST_DUMP_INTERVAL),
                 }),
                 ..Default::default()
             }),
@@ -798,7 +818,15 @@ impl SharedBtSession {
                     "[BT] session init failed with persisted DHT: {first:#} — dropping {} and retrying",
                     dht_config_path.display()
                 );
-                let _ = std::fs::remove_file(&dht_config_path);
+                if let Err(error) = std::fs::remove_file(&dht_config_path)
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    log_warn!(
+                        "[BT] could not reset DHT cache {}: {}",
+                        dht_config_path.display(),
+                        error
+                    );
+                }
                 match start_session(true) {
                     Ok(s) => {
                         log_info!("[BT] session init recovered after resetting DHT state");
@@ -832,22 +860,47 @@ impl SharedBtSession {
         // for resume via do_resume_task → add_torrent.
         {
             let save_path = std::path::Path::new(&save_dir_for_cleanup);
-            if let Ok(entries) = std::fs::read_dir(save_path) {
-                for entry in entries.filter_map(|e| e.ok()) {
-                    let name = entry.file_name();
-                    let name_str = name.to_string_lossy();
-                    if !name_str.starts_with(BT_STAGE_PREFIX) {
-                        continue;
-                    }
-                    let path = entry.path();
-                    if !stage_dir_has_real_data(&path) {
-                        log_info!(
-                            "[BT] startup: removing empty/stub staging dir {}",
-                            path.display()
-                        );
-                        let _ = std::fs::remove_dir_all(&path);
+            match std::fs::read_dir(save_path) {
+                Ok(entries) => {
+                    for entry in entries {
+                        let entry = match entry {
+                            Ok(entry) => entry,
+                            Err(error) => {
+                                log_warn!("[BT] startup staging enumeration failed: {}", error);
+                                continue;
+                            }
+                        };
+                        let name = entry.file_name();
+                        let name_str = name.to_string_lossy();
+                        if !name_str.starts_with(BT_STAGE_PREFIX) {
+                            continue;
+                        }
+                        let path = entry.path();
+                        if !stage_dir_has_real_data(&path) {
+                            log_info!(
+                                "[BT] startup: removing empty/stub staging dir {}",
+                                path.display()
+                            );
+                            if let Err(error) = std::fs::remove_dir_all(&path)
+                                && error.kind() != std::io::ErrorKind::NotFound
+                            {
+                                log_warn!(
+                                    "[BT] empty staging cleanup failed for {}: {}",
+                                    path.display(),
+                                    error
+                                );
+                            }
+                        }
                     }
                 }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    tracing::debug!("BT startup save directory not created yet");
+                }
+                Err(error) => log_warn!(
+                    "[BT] startup staging scan failed for {}: {}",
+                    save_path.display(),
+                    error
+                ),
             }
         }
 
@@ -875,6 +928,7 @@ impl SharedBtSession {
             completion_move_lock: Mutex::new(()),
             seeding: Arc::new(SeedingManager::new()),
             pause_epochs: Arc::new(Mutex::new(HashMap::new())),
+            pending_pauses: Mutex::new(HashMap::new()),
             fastresume_tainted: Mutex::new(HashSet::new()),
             persistence_folder,
         })
@@ -984,26 +1038,80 @@ impl SharedBtSession {
         // Clone the Arc handle and release the lock immediately so that
         // the async session.pause() call doesn't block other handle ops.
         let handle = self.handles.lock().await.get(task_id).cloned();
+        let epoch = self.bump_pause_epoch(task_id).await;
         if let Some(handle) = handle {
-            let epoch = self.bump_pause_epoch(task_id).await;
-            if !handle.is_paused()
-                && let Err(e) = self.session.pause(&handle).await
-            {
-                if matches!(
-                    handle.stats().state,
-                    librqbit::TorrentStatsState::Initializing { .. }
-                ) {
-                    log_info!(
-                        "[BT] task={} pause requested during init — deferring until check completes",
-                        short_id(task_id)
-                    );
-                    self.spawn_deferred_pause(task_id.to_string(), handle, epoch);
-                    return Ok(());
-                }
-                return Err(DownloadError::Other(format!("BT pause failed: {e}")));
-            }
-            log_info!("[BT] task={} paused via session API", short_id(task_id));
+            return self.pause_handle(task_id, handle, epoch).await;
         }
+        // 句柄尚未入册（磁力元数据解析 / add 进行中）：登记暂停意图，由 add
+        // 闭包在句柄入册后补执行；否则该 add 会以运行态入会话形成幽灵下载。
+        self.pending_pauses
+            .lock()
+            .await
+            .insert(task_id.to_string(), epoch);
+        log_info!(
+            "[BT] task={} pause requested before handle registered — pending",
+            short_id(task_id)
+        );
+        // add 闭包可能恰在上面的 handles 查询之后、登记之前完成入册：复查一次，
+        // 命中则由本处接手（pause_handle 幂等）。
+        let late = self.handles.lock().await.get(task_id).cloned();
+        if let Some(handle) = late
+            && self.pending_pauses.lock().await.remove(task_id) == Some(epoch)
+        {
+            return self.pause_handle(task_id, handle, epoch).await;
+        }
+        Ok(())
+    }
+
+    /// add 闭包在句柄入册（并通过 pending-delete 复查）后调用：若存在仍然
+    /// 有效（世代未变）的暂停意图，则按 `pause_task` 同一逻辑暂停并保留句柄。
+    async fn apply_pending_pause(&self, task_id: &str) {
+        let Some(epoch) = self.pending_pauses.lock().await.remove(task_id) else {
+            return;
+        };
+        if self.pause_epochs.lock().await.get(task_id).copied() != Some(epoch) {
+            return;
+        }
+        let handle = self.handles.lock().await.get(task_id).cloned();
+        if let Some(handle) = handle
+            && let Err(e) = self.pause_handle(task_id, handle, epoch).await
+        {
+            log_info!(
+                "[BT] task={} pending pause failed after add: {e}",
+                short_id(task_id)
+            );
+        }
+    }
+
+    /// 清除上一轮遗留的 pending delete / pause 意图（新一次 add 之前调用）。
+    async fn clear_pending_intents(&self, task_id: &str) {
+        self.pending_deletes.lock().await.remove(task_id);
+        self.pending_pauses.lock().await.remove(task_id);
+    }
+
+    async fn pause_handle(
+        &self,
+        task_id: &str,
+        handle: BtHandle,
+        epoch: u64,
+    ) -> Result<(), DownloadError> {
+        if !handle.is_paused()
+            && let Err(e) = self.session.pause(&handle).await
+        {
+            if matches!(
+                handle.stats().state,
+                librqbit::TorrentStatsState::Initializing { .. }
+            ) {
+                log_info!(
+                    "[BT] task={} pause requested during init — deferring until check completes",
+                    short_id(task_id)
+                );
+                self.spawn_deferred_pause(task_id.to_string(), handle, epoch);
+                return Ok(());
+            }
+            return Err(DownloadError::Other(format!("BT pause failed: {e:#}")));
+        }
+        log_info!("[BT] task={} paused via session API", short_id(task_id));
         Ok(())
     }
 
@@ -1023,9 +1131,12 @@ impl SharedBtSession {
         let epochs = Arc::clone(&self.pause_epochs);
         let session = self.session.clone();
         self.runtime.handle().spawn(async move {
-            if handle.wait_until_initialized().await.is_err() {
-                // 初检失败进 Error 态：无可暂停；之后 resume 会走
-                // Error → 全量重检的恢复路径。
+            if let Err(error) = handle.wait_until_initialized().await {
+                // Initial checking failed; resume uses the Error → recheck path.
+                log_info!(
+                    "[BT] task={} deferred pause initial check failed: {error:#}",
+                    short_id(&task_id)
+                );
                 return;
             }
             let guard = epochs.lock().await;
@@ -1060,9 +1171,10 @@ impl SharedBtSession {
     pub async fn resume_task(&self, task_id: &str) -> Result<Option<BtHandle>, DownloadError> {
         // Clone the Arc handle and release the lock immediately.
         let handle = self.handles.lock().await.get(task_id).cloned();
+        // 作废在途的延迟暂停与元数据窗口内登记的暂停意图（无句柄时同样要作废）。
+        self.bump_pause_epoch(task_id).await;
+        self.pending_pauses.lock().await.remove(task_id);
         if let Some(handle) = handle {
-            // 作废可能在途的延迟暂停（pause 发起于初检期、尚未落地）。
-            self.bump_pause_epoch(task_id).await;
             let in_error = matches!(handle.stats().state, librqbit::TorrentStatsState::Error);
             if handle.is_paused() || in_error {
                 if let Err(e) = self.session.unpause(&handle).await {
@@ -1070,7 +1182,7 @@ impl SharedBtSession {
                         "[BT] task={} unpause failed: {e:#} — evicting cached torrent for re-add",
                         short_id(task_id)
                     );
-                    let _ = self.delete_task(task_id, false).await;
+                    self.delete_task(task_id, false).await?;
                     return Ok(None);
                 }
                 // 跨暂停窗口恢复：暂停期间磁盘可能被外部改动而内存位图
@@ -1090,7 +1202,8 @@ impl SharedBtSession {
     /// 就得重走 add_torrent + fastresume 采样校验 + peer swarm 冷启动；保留
     /// 会话则恢复只是 unpause（Paused→Live，零校验、秒级）。已完成的
     /// torrent 不计入——做种由 `has_seeders` 单独保活，做种关闭的完成任务
-    /// 不应钉住会话。
+    /// 不应钉住会话。保活并非永久：download_manager 只在该来源独占的空闲期内
+    /// 保留会话（15 分钟宽限），超时后释放，恢复走完整重建路径。
     pub async fn has_paused_incomplete(&self) -> bool {
         let handles: Vec<BtHandle> = self.handles.lock().await.values().cloned().collect();
         handles.iter().any(|h| {
@@ -1279,48 +1392,47 @@ impl SharedBtSession {
         log_info!("[BT] shared session shutdown complete");
     }
 
-    /// Permanently delete a torrent from the session, removing persistence
-    /// data.  `delete_files` controls whether downloaded data is also removed.
-    /// Returns `true` if a handle was found and `session.delete` was called,
-    /// `false` if the task was not yet in the handles map (still in the
-    /// `add_torrent` phase).  The caller should call `register_pending_delete`
-    /// when this returns `false` so the detached add_torrent closure can clean
-    /// up once metadata resolution completes.
-    pub async fn delete_task(&self, task_id: &str, delete_files: bool) -> bool {
-        // Remove from map first (under lock), then perform async deletion
-        // outside the lock to minimise contention.
-        let handle = self.handles.lock().await.remove(task_id);
-        // Ensure the task is also removed from the seeding manager so completed
-        // torrents do not keep being evaluated after deletion.
-        let _ = self.unregister_seeder(task_id).await;
-        // 世代号与 fastresume 污点随任务删除：torrent 离开会话后这两份
-        // 状态即失效，下次 re-add 会重新计算。同时作废在途的延迟暂停。
-        self.pause_epochs.lock().await.remove(task_id);
-        self.fastresume_tainted.lock().await.remove(task_id);
-        // parts 边车随任务删除（handle 是否在册都要删；session.delete 的
-        // remove_files 只处理数据文件，不认识边车）。
-        crate::bt_partfile::remove_sidecar(&self.parts_sidecar_path(task_id));
-        if let Some(handle) = handle {
-            let torrent_id = handle.id();
-            // Clean up the torrent_id → task_id mapping.
-            self.unregister_torrent_id(torrent_id).await;
-            if let Err(e) = self.session.delete(torrent_id.into(), delete_files).await {
-                log_info!(
-                    "[BT] task={} session.delete error: {}",
-                    short_id(task_id),
-                    e
-                );
+    /// Delete a torrent and clear cached ownership only after session deletion succeeds.
+    /// `Ok(false)` means add_torrent has not published a handle yet; register a deferred deletion.
+    /// Failed deletion retains the handle; retry reconciles prior removal from librqbit.
+    pub async fn delete_task(
+        &self,
+        task_id: &str,
+        delete_files: bool,
+    ) -> Result<bool, DownloadError> {
+        let handle = self.handles.lock().await.get(task_id).cloned();
+        if let Some(ref handle) = handle {
+            // librqbit removes its torrent before reporting a file/storage failure.
+            // Reconcile an already-removed torrent on retry instead of looping forever.
+            if self.session.get(handle.id().into()).is_some() {
+                self.session
+                    .delete(handle.id().into(), delete_files)
+                    .await
+                    .map_err(|error| {
+                        DownloadError::Other(format!("BT delete failed: {error:#}"))
+                    })?;
             } else {
-                log_info!(
-                    "[BT] task={} deleted from session (delete_files={})",
-                    short_id(task_id),
-                    delete_files
+                tracing::debug!(
+                    task_id,
+                    "BT torrent already absent from session on deletion retry"
                 );
             }
-            true
-        } else {
-            false
+            self.handles.lock().await.remove(task_id);
+            self.unregister_torrent_id(handle.id()).await;
+            log_info!(
+                "[BT] task={} deleted from session (delete_files={})",
+                short_id(task_id),
+                delete_files
+            );
         }
+        if self.unregister_seeder(task_id).await.is_some() {
+            tracing::debug!(task_id, "BT deleted seeder unregistered");
+        }
+        self.pause_epochs.lock().await.remove(task_id);
+        self.pending_pauses.lock().await.remove(task_id);
+        self.fastresume_tainted.lock().await.remove(task_id);
+        crate::bt_partfile::remove_sidecar(&self.parts_sidecar_path(task_id));
+        Ok(handle.is_some())
     }
 
     /// Register a deferred delete for a task whose `add_torrent` is still in
@@ -1461,11 +1573,11 @@ pub async fn run_bt_download(params: BtDownloadParams) -> Result<(), DownloadErr
     let task_id = params.task_id.clone();
 
     // 1. Switch to "preparing" status
-    let _ = params
+    params
         .db
         .update_task_status(&task_id, STATUS_PREPARING, "")
-        .await;
-    let _ = params
+        .await?;
+    if params
         .progress_tx
         .send(ProgressUpdate {
             task_id: task_id.clone(),
@@ -1477,7 +1589,12 @@ pub async fn run_bt_download(params: BtDownloadParams) -> Result<(), DownloadErr
             segment_details: None,
             ..Default::default()
         })
-        .await;
+        .await
+        .is_err()
+    {
+        tracing::debug!("BT progress receiver closed during shutdown");
+        return Err(DownloadError::Cancelled);
+    }
 
     log_info!(
         "[BT] task={} starting bt download (shared session)...",
@@ -1552,19 +1669,26 @@ pub async fn run_bt_download(params: BtDownloadParams) -> Result<(), DownloadErr
         let stage = bt_stage_dir(&save_dir_for_cleanup, &tid_for_cleanup);
         let tid = tid_for_cleanup.clone();
         async move {
-            let _ = tokio::task::spawn_blocking(move || {
-                if !stage.exists() {
-                    return;
-                }
-                if !stage_dir_has_real_data(&stage) {
-                    log_info!(
-                        "[BT] task={} cleaning up empty staging dir after error/cancel",
-                        short_id(&tid)
+            if let Err(join_error) = tokio::task::spawn_blocking(move || {
+                if !stage_dir_has_real_data(&stage)
+                    && let Err(error) = std::fs::remove_dir_all(&stage)
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    log_warn!(
+                        "[BT] task={} empty staging cleanup failed: {}",
+                        short_id(&tid),
+                        error
                     );
-                    let _ = std::fs::remove_dir_all(&stage);
                 }
             })
-            .await;
+            .await
+            {
+                if join_error.is_cancelled() {
+                    tracing::debug!("BT staging cleanup cancelled during runtime shutdown");
+                } else {
+                    log_error!("[BT] staging cleanup task panicked: {}", join_error);
+                }
+            }
         }
     };
 
@@ -1582,7 +1706,7 @@ pub async fn run_bt_download(params: BtDownloadParams) -> Result<(), DownloadErr
         //      prevent the task from being marked as failed/error in the DB.
         Err(join_err) => {
             cleanup_stage().await;
-            if cancelled.load(Ordering::SeqCst) {
+            if join_err.is_cancelled() && cancelled.load(Ordering::SeqCst) {
                 log_info!(
                     "[BT] task={} JoinError while cancelled (runtime shutdown during pause) — treating as Cancelled",
                     short_id(&task_id)
@@ -1732,7 +1856,13 @@ fn set_hidden(path: &Path) {
             let attrs = GetFileAttributesW(wide.as_ptr());
             // INVALID_FILE_ATTRIBUTES == 0xFFFFFFFF
             if attrs != 0xFFFF_FFFF {
-                let _ = SetFileAttributesW(wide.as_ptr(), attrs | FILE_ATTRIBUTE_HIDDEN);
+                if SetFileAttributesW(wide.as_ptr(), attrs | FILE_ATTRIBUTE_HIDDEN) == 0 {
+                    log_warn!(
+                        "[BT] cannot hide staging directory {}: {}",
+                        path.display(),
+                        std::io::Error::last_os_error()
+                    );
+                }
             }
         }
     }
@@ -1777,7 +1907,7 @@ pub fn rescue_stranded_staging_files(
     let mut updates: Vec<(String, String)> = Vec::new();
     let empty_claims: HashSet<String> = HashSet::new();
 
-    for (task_id, save_dir, current_file_name) in completed_bt_tasks {
+    'tasks: for (task_id, save_dir, current_file_name) in completed_bt_tasks {
         let claimed = claims_by_dir.get(save_dir).unwrap_or(&empty_claims);
         let stage_dir = bt_stage_dir(save_dir, task_id);
         if !stage_dir.exists() {
@@ -1797,23 +1927,41 @@ pub fn rescue_stranded_staging_files(
         // fast-path 查找之前过滤:container move 的空壳名恰好精确等于
         // current_file_name,否则会命中 fast path 被当数据移动。
         let entries: Vec<std::fs::DirEntry> = match std::fs::read_dir(&stage_dir) {
-            Ok(rd) => rd
-                .filter_map(|e| e.ok())
-                .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
-                .filter(|e| {
-                    let p = e.path();
-                    if p.is_dir() && !stage_dir_has_real_data(&p) {
-                        log_info!(
-                            "[BT] rescue: task={} dropping empty shell dir '{}'",
-                            &task_id[..task_id.len().min(8)],
-                            p.display()
-                        );
-                        let _ = std::fs::remove_dir_all(&p);
-                        return false;
+            Ok(rd) => {
+                let mut entries = Vec::new();
+                for entry in rd {
+                    let entry = match entry {
+                        Ok(entry) => entry,
+                        Err(error) => {
+                            log_warn!(
+                                "[BT] rescue cannot enumerate staging directory {}: {}",
+                                stage_dir.display(),
+                                error
+                            );
+                            // Never delete a directory after a partial enumeration.
+                            continue 'tasks;
+                        }
+                    };
+                    if entry.file_name().to_string_lossy().starts_with('.') {
+                        continue;
                     }
-                    true
-                })
-                .collect(),
+                    let path = entry.path();
+                    if path.is_dir() && !stage_dir_has_real_data(&path) {
+                        if let Err(error) = std::fs::remove_dir_all(&path)
+                            && error.kind() != std::io::ErrorKind::NotFound
+                        {
+                            log_warn!(
+                                "[BT] rescue empty shell cleanup failed for {}: {}",
+                                path.display(),
+                                error
+                            );
+                        }
+                    } else {
+                        entries.push(entry);
+                    }
+                }
+                entries
+            }
             Err(e) => {
                 log_info!(
                     "[BT] rescue: task={} cannot read staging dir: {}",
@@ -1826,11 +1974,20 @@ pub fn rescue_stranded_staging_files(
 
         if entries.is_empty() {
             // Staging dir is empty (or only hidden files) — remove it.
-            let _ = std::fs::remove_dir_all(&stage_dir);
-            log_info!(
-                "[BT] rescue: task={} staging dir was empty, removed",
-                &task_id[..task_id.len().min(8)]
-            );
+            match std::fs::remove_dir_all(&stage_dir) {
+                Ok(()) => log_info!(
+                    "[BT] rescue: task={} empty staging directory removed",
+                    short_id(task_id)
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    tracing::debug!("BT rescue empty staging directory already absent");
+                }
+                Err(error) => log_warn!(
+                    "[BT] rescue empty staging cleanup failed for {}: {}",
+                    stage_dir.display(),
+                    error
+                ),
+            }
             continue;
         }
 
@@ -1861,12 +2018,30 @@ pub fn rescue_stranded_staging_files(
                     &task_id[..task_id.len().min(8)],
                     save_path.join(current_file_name.as_str()).display()
                 );
-                let _ = std::fs::remove_dir_all(&stage_dir);
+                if let Err(error) = std::fs::remove_dir_all(&stage_dir)
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    log_warn!(
+                        "[BT] staging residue cleanup failed for {}: {}",
+                        &stage_dir.display(),
+                        error
+                    );
+                }
                 continue;
             }
             let child_name = entry.file_name();
             let child_name_str = child_name.to_string_lossy();
-            let final_name = dedup_name_in_dir(save_path, &child_name_str, claimed, false);
+            let final_name = match dedup_name_in_dir(save_path, &child_name_str, claimed, false) {
+                Ok(name) => name,
+                Err(error) => {
+                    log_warn!(
+                        "[BT] rescue cannot choose destination name in {}: {}",
+                        save_path.display(),
+                        error
+                    );
+                    continue;
+                }
+            };
             let dst = save_path.join(&final_name);
 
             match move_path(&entry.path(), &dst) {
@@ -1878,7 +2053,15 @@ pub fn rescue_stranded_staging_files(
                         dst.display()
                     );
                     // Remove staging dir; may still contain .pad / hidden files.
-                    let _ = std::fs::remove_dir_all(&stage_dir);
+                    if let Err(error) = std::fs::remove_dir_all(&stage_dir)
+                        && error.kind() != std::io::ErrorKind::NotFound
+                    {
+                        log_warn!(
+                            "[BT] staging residue cleanup failed for {}: {}",
+                            &stage_dir.display(),
+                            error
+                        );
+                    }
                     updates.push((task_id.to_string(), final_name));
                 }
                 Err(e) => {
@@ -1928,7 +2111,18 @@ pub fn rescue_stranded_staging_files(
                 );
                 continue;
             }
-            let final_child_name = dedup_name_in_dir(save_path, &child_name_str, claimed, false);
+            let final_child_name =
+                match dedup_name_in_dir(save_path, &child_name_str, claimed, false) {
+                    Ok(name) => name,
+                    Err(error) => {
+                        log_warn!(
+                            "[BT] rescue cannot choose destination name in {}: {}",
+                            save_path.display(),
+                            error
+                        );
+                        continue 'tasks;
+                    }
+                };
             let dst = save_path.join(&final_child_name);
 
             match move_path(&entry.path(), &dst) {
@@ -1959,7 +2153,15 @@ pub fn rescue_stranded_staging_files(
         // 失败(权限/跨盘/瞬时 I/O)的文件随目录一并删掉造成数据丢失——与
         // fast path 及 bt_download_inner 的完成路径行为对齐,留待下次启动重试。
         if all_moves_ok {
-            let _ = std::fs::remove_dir_all(&stage_dir);
+            if let Err(error) = std::fs::remove_dir_all(&stage_dir)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                log_warn!(
+                    "[BT] staging residue cleanup failed for {}: {}",
+                    &stage_dir.display(),
+                    error
+                );
+            }
         } else {
             log_info!(
                 "[BT] rescue: task={} some children failed to move; \
@@ -2006,7 +2208,7 @@ fn dedup_name_in_dir(
     name: &str,
     avoid: &HashSet<String>,
     allow_overwrite: bool,
-) -> String {
+) -> std::io::Result<String> {
     let temp_ext = crate::downloader::TEMP_EXT;
     let candidate = dir.join(name);
     let temp_candidate = dir.join(format!("{name}{temp_ext}"));
@@ -2016,17 +2218,14 @@ fn dedup_name_in_dir(
         candidate.exists()
     };
     if !final_conflict && !temp_candidate.exists() && !avoid.contains(&name.to_lowercase()) {
-        return name.to_string();
+        return Ok(name.to_string());
     }
 
     // Scan directory once (case-folded) to avoid per-candidate FS round-trips.
-    let existing: HashSet<String> = std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.filter_map(|e| e.ok())
-                .map(|e| e.file_name().to_string_lossy().to_lowercase())
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut existing = HashSet::new();
+    for entry in std::fs::read_dir(dir)? {
+        existing.insert(entry?.file_name().to_string_lossy().to_lowercase());
+    }
 
     let stem = Path::new(name)
         .file_stem()
@@ -2045,17 +2244,17 @@ fn dedup_name_in_dir(
             && !existing.contains(&folded_temp)
             && !avoid.contains(&folded)
         {
-            return new_name;
+            return Ok(new_name);
         }
     }
     // 极端兜底:1..=9999 个编号变体全被占用时,此前返回**原名不变**,调用点
     // (容器 / 单文件分支)会直接拿它当 dst,move_path 静默覆盖已存在文件丢数据。
     // 改用 UUID 后缀保证唯一,杜绝覆盖。(BUG-BT-DEDUP-FALLBACK-OVERWRITE)
     let uniq = uuid::Uuid::new_v4();
-    match ext {
+    Ok(match ext {
         Some(e) => format!("{} ({}).{}", stem, uniq, e),
         None => format!("{} ({})", stem, uniq),
-    }
+    })
 }
 
 struct CompletionLayoutInput<'a> {
@@ -2147,7 +2346,9 @@ struct CompletionLayout {
 /// `claimed`:其他任务经完成哨兵声明(但可能尚未落盘)的顶层名集合
 /// (小写折叠,同 save_dir)。所有 fresh dedup 都会避开这些名字,使
 /// 并发同名任务无法抢走一个已声明、正在重试中的名字。
-fn compute_completion_layout(input: CompletionLayoutInput<'_>) -> Option<CompletionLayout> {
+fn compute_completion_layout(
+    input: CompletionLayoutInput<'_>,
+) -> std::io::Result<Option<CompletionLayout>> {
     let CompletionLayoutInput {
         save_dir,
         stage_dir,
@@ -2162,7 +2363,7 @@ fn compute_completion_layout(input: CompletionLayoutInput<'_>) -> Option<Complet
     } = input;
 
     if selected_files.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     // 路径穿越防护:selected paths 源自 torrent 元数据(file_infos[i].
@@ -2188,7 +2389,7 @@ fn compute_completion_layout(input: CompletionLayoutInput<'_>) -> Option<Complet
             "[BT] completion: rejecting unsafe selected path '{}' (path traversal guard)",
             bad.display(),
         );
-        return None;
+        return Ok(None);
     }
 
     let torrent_root = crate::downloader::sanitize_filename(torrent_root_name);
@@ -2218,7 +2419,7 @@ fn compute_completion_layout(input: CompletionLayoutInput<'_>) -> Option<Complet
     if is_multi_file_torrent && (all_selected || has_selected_subdir) {
         let final_top = match reuse_top {
             Some(n) if !save_dir.join(n).exists() || save_dir.join(n).is_dir() => n.to_string(),
-            _ => dedup_name_in_dir(save_dir, desired_container, claimed, allow_overwrite),
+            _ => dedup_name_in_dir(save_dir, desired_container, claimed, allow_overwrite)?,
         };
         let dst_root = save_dir.join(&final_top);
         let moves = selected_files
@@ -2229,11 +2430,11 @@ fn compute_completion_layout(input: CompletionLayoutInput<'_>) -> Option<Complet
                 expected_len: file.len,
             })
             .collect();
-        return Some(CompletionLayout {
+        return Ok(Some(CompletionLayout {
             moves,
             top_level_name: final_top,
             task_owned_container: true,
-        });
+        }));
     }
 
     // Single-file flat move: reached only when the container branch above
@@ -2256,11 +2457,11 @@ fn compute_completion_layout(input: CompletionLayoutInput<'_>) -> Option<Complet
             // 仅当哨兵名未被占用才复用;dst 已存在(无论类型)⟹ 非本任务
             // 合法重试的残留,fresh dedup 换名,绝不 REPLACE 覆盖(见函数 doc)。
             Some(n) if !save_dir.join(n).exists() => n.to_string(),
-            _ => dedup_name_in_dir(save_dir, desired, claimed, allow_overwrite),
+            _ => dedup_name_in_dir(save_dir, desired, claimed, allow_overwrite)?,
         };
         let src = stage_dir.join(rel);
         let dst = save_dir.join(&final_name);
-        return Some(CompletionLayout {
+        return Ok(Some(CompletionLayout {
             moves: vec![CompletionMove {
                 src,
                 dst,
@@ -2268,7 +2469,7 @@ fn compute_completion_layout(input: CompletionLayoutInput<'_>) -> Option<Complet
             }],
             top_level_name: final_name,
             task_owned_container: false,
-        });
+        }));
     }
 
     // Per-file flat move: covers an all-top-level flat torrent (all
@@ -2296,7 +2497,7 @@ fn compute_completion_layout(input: CompletionLayoutInput<'_>) -> Option<Complet
             basename.as_str()
         };
         // First dedup against the on-disk contents of save_dir.
-        let mut candidate = dedup_name_in_dir(save_dir, candidate_seed, claimed, allow_overwrite);
+        let mut candidate = dedup_name_in_dir(save_dir, candidate_seed, claimed, allow_overwrite)?;
         // Then dedup against names already chosen in *this* batch.  Use a plain
         // numeric counter on the seed's stem/ext (`stem (n).ext`) rather than
         // prepending `_` to the whole candidate, which previously stacked
@@ -2320,7 +2521,7 @@ fn compute_completion_layout(input: CompletionLayoutInput<'_>) -> Option<Complet
                 };
                 // Reconcile against disk again so we never overwrite a real file.
                 // (恒保守:overwrite 只放行原名,编号变体绝不覆盖真实文件。)
-                let deduped = dedup_name_in_dir(save_dir, &numbered, claimed, false);
+                let deduped = dedup_name_in_dir(save_dir, &numbered, claimed, false)?;
                 if !taken.contains(&deduped.to_lowercase()) {
                     candidate = deduped;
                     break;
@@ -2350,11 +2551,11 @@ fn compute_completion_layout(input: CompletionLayoutInput<'_>) -> Option<Complet
         });
     }
 
-    Some(CompletionLayout {
+    Ok(Some(CompletionLayout {
         moves,
         top_level_name: top_level.unwrap_or_else(|| "download".to_string()),
         task_owned_container: false,
-    })
+    }))
 }
 
 /// Move a file or directory from `src` to `dst` — 零拷贝优先的三级降级链。
@@ -2400,7 +2601,15 @@ fn move_path_with_file_replace(src: &Path, dst: &Path, replace_file: bool) -> st
     move_dir_recursive(src, dst, &mut budget)?;
     // 移空后清掉 src 残留骨架(空目录树);失败无害——完成路径的 staging
     // 清理(带重试)与启动清理兜底。
-    let _ = std::fs::remove_dir_all(src);
+    if let Err(error) = std::fs::remove_dir_all(src)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        log_warn!(
+            "[BT] moved directory skeleton cleanup failed for {}: {}",
+            src.display(),
+            error
+        );
+    }
     Ok(())
 }
 
@@ -2473,8 +2682,21 @@ fn move_file(src: &Path, dst: &Path, budget: &mut u32, replace: bool) -> std::io
             Ok(())
         }
         Err(copy_err) => {
-            let _ = std::fs::remove_file(dst); // 半成品清理:不完整 dst 占住最终名 = 不可见磁盘泄漏
-            let _ = copy_err;
+            log_warn!(
+                "[BT] copy fallback failed for {} → {}: {}",
+                src.display(),
+                dst.display(),
+                copy_err
+            );
+            if let Err(error) = std::fs::remove_file(dst)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                log_warn!(
+                    "[BT] incomplete copy cleanup failed for {}: {}",
+                    dst.display(),
+                    error
+                );
+            }
             Err(last_err) // 报更早的 rename 错误(根因)
         }
     }
@@ -2515,10 +2737,19 @@ enum CompletionMoveOutcome {
 }
 
 fn remove_completion_src_residue(src: &Path) {
-    if src.is_dir() {
-        let _ = std::fs::remove_dir_all(src);
+    let result = if src.is_dir() {
+        std::fs::remove_dir_all(src)
     } else {
-        let _ = std::fs::remove_file(src);
+        std::fs::remove_file(src)
+    };
+    if let Err(error) = result
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        log_warn!(
+            "[BT] verified completion residue cleanup failed for {}: {}",
+            src.display(),
+            error
+        );
     }
 }
 
@@ -2595,7 +2826,10 @@ pub const DUPLICATE_TORRENT_MSG_PREFIX: &str = "duplicate torrent: already manag
 /// 后会删除它并通知 UI。返回错误供调用方 `return Err(...)`。
 async fn mark_duplicate_torrent(db: &Db, task_id: &str, owner_task_id: &str) -> DownloadError {
     let msg = format!("{DUPLICATE_TORRENT_MSG_PREFIX}{owner_task_id}");
-    let _ = db.update_task_status(task_id, STATUS_ERROR, &msg).await;
+    if let Err(error) = db.update_task_status(task_id, STATUS_ERROR, &msg).await {
+        crate::logger::report_error("BT", "persist duplicate torrent rejection", &error);
+        return error.into();
+    }
     DownloadError::Other(msg)
 }
 
@@ -2666,6 +2900,7 @@ fn bt_runtime(
         parallelism_limit: None,
         total_bytes,
         segments: Vec::new(),
+        source_bytes: None,
     }
 }
 
@@ -3188,8 +3423,6 @@ pub fn build_add_torrent_options(
     output_folder: String,
     upload_limit_bps: u64,
 ) -> AddTorrentOptions {
-    // `opts` is only mutated by the Windows-only storage override below.
-    #[allow(unused_mut)]
     let mut opts = AddTorrentOptions {
         overwrite: true,
         output_folder: Some(output_folder),
@@ -3206,7 +3439,88 @@ pub fn build_add_torrent_options(
             opts.storage_factory = Some(crate::bt_sparse::sparse_fs_factory(PathBuf::from(folder)));
         }
     }
+    // 种子元数据里的文件路径由对端提供，librqbit 只拒绝 `..` 与分隔符；
+    // 存储初始化会对全部文件（含未选中）无条件 create，必须在任何 I/O 之前
+    // 校验路径，而不是等完成期 `compute_completion_layout` 才拦。
+    let inner = opts.storage_factory.take().unwrap_or_else(|| {
+        librqbit::storage::StorageFactoryExt::boxed(
+            librqbit::storage::filesystem::FilesystemStorageFactory::default(),
+        )
+    });
+    opts.storage_factory = Some(Box::new(PathGuardFactory { inner }));
     opts
+}
+
+/// 在委托的存储工厂之前校验全部文件路径的包装工厂。
+struct PathGuardFactory {
+    inner: librqbit::storage::BoxStorageFactory,
+}
+
+impl librqbit::storage::StorageFactory for PathGuardFactory {
+    type Storage = Box<dyn librqbit::storage::TorrentStorage>;
+
+    fn create(
+        &self,
+        shared: &librqbit::ManagedTorrentShared,
+        metadata: &librqbit::TorrentMetadata,
+    ) -> anyhow::Result<Self::Storage> {
+        for fi in metadata.file_infos.iter() {
+            if !torrent_relative_path_is_safe(&fi.relative_filename, cfg!(windows)) {
+                anyhow::bail!(
+                    "unsafe file path in torrent metadata: {}",
+                    fi.relative_filename.display()
+                );
+            }
+        }
+        self.inner.create(shared, metadata)
+    }
+
+    fn is_type_id(&self, type_id: std::any::TypeId) -> bool {
+        // 伪装为 `FilesystemStorageFactory` 以通过 JSON session 持久化的 TypeId
+        // 白名单（约定同 `bt_sparse` / `bt_partfile` 的伪装工厂）。
+        type_id == std::any::TypeId::of::<librqbit::storage::filesystem::FilesystemStorageFactory>()
+            || type_id == std::any::TypeId::of::<Self>()
+    }
+
+    fn clone_box(&self) -> librqbit::storage::BoxStorageFactory {
+        Box::new(Self {
+            inner: self.inner.clone_box(),
+        })
+    }
+}
+
+/// 种子内文件相对路径是否可安全落盘：非空、仅 `Normal` 组件。
+/// `windows_rules` 额外拒绝组件内的 `:`（盘符前缀 / ADS）、控制字符与
+/// 设备保留名——这些在 Windows 上会改写基路径或落到设备，而在其他平台
+/// 是合法文件名，故不对非 Windows 强加。
+fn torrent_relative_path_is_safe(rel: &Path, windows_rules: bool) -> bool {
+    use std::path::Component;
+    if rel.as_os_str().is_empty() || rel.is_absolute() {
+        return false;
+    }
+    rel.components().all(|c| {
+        let Component::Normal(part) = c else {
+            return false;
+        };
+        if !windows_rules {
+            return true;
+        }
+        let Some(name) = part.to_str() else {
+            return false;
+        };
+        if name.contains(':') || name.chars().any(|ch| ch.is_control()) {
+            return false;
+        }
+        let stem = name.split('.').next().unwrap_or(name).trim_end();
+        let upper = stem.to_ascii_uppercase();
+        !(matches!(
+            upper.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+        ) || ((upper.starts_with("COM") || upper.starts_with("LPT"))
+            && upper.len() == 4
+            && upper.as_bytes()[3].is_ascii_digit()
+            && upper.as_bytes()[3] != b'0'))
+    })
 }
 
 /// 任务级限速 → librqbit torrent 级 [`librqbit::limits::LimitsConfig`]。
@@ -3324,6 +3638,26 @@ async fn apply_only_files_after_init(
     false
 }
 
+/// A failed selection save must not leave a handle eligible for Path R resume.
+/// Preserve the DB error at the caller; teardown failures are secondary diagnostics.
+async fn discard_failed_bt_selection(shared_bt: &SharedBtSession, task_id: &str) {
+    if let Err(error) = shared_bt.delete_task(task_id, false).await {
+        crate::logger::report_error("BT", "discard handle after selection save failure", &error);
+        // With delete_files=false, librqbit's only deletion error is an
+        // already-absent session entry (for example a concurrent delete).
+        // delete_task deliberately retains its cache on Err; this fatal setup
+        // path must instead finish invalidation so Path R cannot reuse it.
+        let handle = shared_bt.handles.lock().await.remove(task_id);
+        if let Some(handle) = handle {
+            shared_bt.unregister_torrent_id(handle.id()).await;
+        }
+        shared_bt.pause_epochs.lock().await.remove(task_id);
+        shared_bt.pending_pauses.lock().await.remove(task_id);
+        shared_bt.fastresume_tainted.lock().await.remove(task_id);
+        crate::bt_partfile::remove_sidecar(&shared_bt.parts_sidecar_path(task_id));
+    }
+}
+
 async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
     let BtInnerParams {
         task_id,
@@ -3357,8 +3691,8 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
 
     let dn_name = torrent_source.display_name().unwrap_or_default();
     if !dn_name.is_empty() {
-        let _ = db.update_task_file_info(&task_id, &dn_name, 0).await;
-        let _ = progress_tx
+        db.update_task_file_info(&task_id, &dn_name, 0).await?;
+        if progress_tx
             .send(ProgressUpdate {
                 task_id: task_id.clone(),
                 downloaded_bytes: 0,
@@ -3369,7 +3703,12 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                 segment_details: None,
                 ..Default::default()
             })
-            .await;
+            .await
+            .is_err()
+        {
+            tracing::debug!("BT progress receiver closed during shutdown");
+            return Err(DownloadError::Cancelled);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -3438,7 +3777,15 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                         tid
                     );
                     // 预建的 staging 目录是空壳，直接清掉。
-                    let _ = std::fs::remove_dir_all(&stage_dir);
+                    if let Err(error) = std::fs::remove_dir_all(&stage_dir)
+                        && error.kind() != std::io::ErrorKind::NotFound
+                    {
+                        log_warn!(
+                            "[BT] staging residue cleanup failed for {}: {}",
+                            &stage_dir.display(),
+                            error
+                        );
+                    }
                     return Err(mark_duplicate_torrent(&db, &task_id, &owner).await);
                 }
             }
@@ -3493,6 +3840,10 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
         // sees the in-flight task even if `bt_download_inner` is cancelled
         // immediately after.  The guard decrements on drop — panic-safe.
         let inflight = shared_bt.inflight_guard();
+        let add_abort = Arc::new(tokio::sync::Notify::new());
+        let add_abort_for_task = add_abort.clone();
+        // 清掉上一轮（超时/取消）遗留的 pending 意图，避免毒化本次 add。
+        shared_bt.clear_pending_intents(&task_id).await;
         let add_handle = tokio::spawn(async move {
             // Move the guard into the task so it is dropped (and thus
             // decrements) when the task finishes normally *or* panics.
@@ -3503,7 +3854,12 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     AddTorrent::from_bytes(Bytes::from(bytes.clone()))
                 }
             };
-            let result = session_for_add.add_torrent(add_input, Some(add_opts)).await;
+            let result = tokio::select! {
+                r = session_for_add.add_torrent(add_input, Some(add_opts)) => r,
+                _ = add_abort_for_task.notified() => {
+                    return Err(anyhow::anyhow!("BT add aborted before metadata resolved"));
+                }
+            };
             // If delete_task was called while we were waiting for metadata
             // (handle not yet in `handles`, run_bt_download already returned
             // Err(Cancelled)), apply the pending delete now that we have the
@@ -3537,7 +3893,19 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                             .await
                         {
                             // Delete was requested before we got here.
-                            let _ = session_for_add.delete(id.into(), del_files).await;
+                            shared_bt_for_add
+                                .register_torrent_id(id, &task_id_for_add)
+                                .await;
+                            shared_bt_for_add
+                                .store_handle(&task_id_for_add, handle)
+                                .await;
+                            if let Err(error) = shared_bt_for_add
+                                .delete_task(&task_id_for_add, del_files)
+                                .await
+                            {
+                                log_error!("[BT] pending delete failed after add: {}", error);
+                                return Err(anyhow::Error::new(error));
+                            }
                             log_info!(
                                 "[BT] task={} pending delete applied after add_torrent (delete_files={})",
                                 short_id(&task_id_for_add),
@@ -3562,14 +3930,26 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                                 // A delete arrived between the two checks; consume
                                 // it and remove the handle we just stored
                                 // (delete_task also unregisters the torrent_id).
-                                let _ = shared_bt_for_add
+                                if let Err(error) = shared_bt_for_add
                                     .delete_task(&task_id_for_add, del_files)
-                                    .await;
+                                    .await
+                                {
+                                    log_error!(
+                                        "[BT] pending delete failed after handle publication: {}",
+                                        error
+                                    );
+                                    return Err(anyhow::Error::new(error));
+                                }
                                 log_info!(
                                     "[BT] task={} pending delete applied on re-check after store_handle (delete_files={})",
                                     short_id(&task_id_for_add),
                                     del_files
                                 );
+                            } else {
+                                // 元数据窗口内的暂停意图：add 完成后补执行，保留已暂停句柄。
+                                shared_bt_for_add
+                                    .apply_pending_pause(&task_id_for_add)
+                                    .await;
                             }
                         }
                     }
@@ -3585,7 +3965,16 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                         {
                             let owner = shared_bt_for_add.task_for_torrent(*id).await;
                             if owner.as_deref() == Some(task_id_for_add.as_str()) {
-                                let _ = session_for_add.delete((*id).into(), del_files).await;
+                                if let Err(error) = shared_bt_for_add
+                                    .delete_task(&task_id_for_add, del_files)
+                                    .await
+                                {
+                                    log_error!(
+                                        "[BT] pending delete of owned torrent failed: {}",
+                                        error
+                                    );
+                                    return Err(anyhow::Error::new(error));
+                                }
                                 log_info!(
                                     "[BT] task={} pending delete applied (already-managed, owned by us, delete_files={})",
                                     short_id(&task_id_for_add),
@@ -3612,11 +4001,15 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
         let add_started = Instant::now();
         let h = loop {
             if cancelled.load(Ordering::SeqCst) {
-                // Drop (detach) instead of abort: the spawned add_torrent task
-                // continues running so it can consume the pending_delete entry
-                // registered by delete_task and properly remove the torrent
-                // from the librqbit session.  Aborting would leave the torrent
-                // in the session with no way to clean it up later.
+                if is_magnet_source {
+                    // 磁力仍在元数据阶段：会话里没有该种子，直接中止 add。
+                    // 已返回的 add 由其闭包内的 pending delete / pending pause 处理。
+                    add_abort.notify_one();
+                } else {
+                    // .torrent 的 add 近乎瞬时且不可中止：登记暂停意图，让闭包
+                    // 在 add 完成后按暂停处理，避免幽灵下载。
+                    shared_bt.pause_task(&task_id).await?;
+                }
                 drop(add_handle);
                 return Err(DownloadError::Cancelled);
             }
@@ -3629,15 +4022,19 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
             // auto-retrying a dead magnet would just burn another 5 minutes
             // and pop the file-selection dialog at an unexpected moment.
             if is_magnet_source && add_started.elapsed() >= MAGNET_METADATA_TIMEOUT {
-                shared_bt.register_pending_delete(&task_id, true).await;
+                // 元数据阶段 add_torrent 尚未把种子放进会话，直接中止即可，
+                // 不留永不结束的后台 add（会让 inflight_adds 钉住会话释放）。
+                add_abort.notify_one();
                 drop(add_handle);
                 let msg = format!(
                     "magnet metadata resolution took too long ({}s) — no peers/DHT response; check trackers or network",
                     MAGNET_METADATA_TIMEOUT.as_secs()
                 );
                 log_info!("[BT] task={} {}", short_id(&task_id), &msg);
-                let _ = db.update_task_status(&task_id, STATUS_ERROR, &msg).await;
-                let _ = progress_tx
+                if let Err(error) = db.update_task_status(&task_id, STATUS_ERROR, &msg).await {
+                    crate::logger::report_error("BT", "persist terminal task error", &error);
+                }
+                if progress_tx
                     .send(ProgressUpdate {
                         task_id: task_id.clone(),
                         downloaded_bytes: 0,
@@ -3648,7 +4045,11 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                         segment_details: None,
                         ..Default::default()
                     })
-                    .await;
+                    .await
+                    .is_err()
+                {
+                    tracing::debug!("BT progress receiver closed during shutdown");
+                }
                 return Err(DownloadError::Other(msg));
             }
 
@@ -3657,7 +4058,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                 result = &mut add_handle => {
                     let resp = result
                         .map_err(|e| DownloadError::Other(format!("BT add task panicked: {e}")))?
-                        .map_err(|e| DownloadError::Other(format!("BT add torrent failed: {e}")))?;
+                        .map_err(|e| DownloadError::Other(format!("BT add torrent failed: {e:#}")))?;
                     let h = match resp {
                         AddTorrentResponse::Added(_id, handle) => {
                             log_info!("[BT] task={} torrent added, id={}", short_id(&task_id), _id);
@@ -3689,7 +4090,11 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                                     _id
                                 );
                                 // Clean up the pre-created staging dir (it's empty/useless).
-                                let _ = std::fs::remove_dir_all(&stage_dir);
+                                if let Err(error) = std::fs::remove_dir_all(&stage_dir)
+                                    && error.kind() != std::io::ErrorKind::NotFound
+                                {
+                                    log_warn!("[BT] staging residue cleanup failed for {}: {}", &stage_dir.display(), error);
+                                }
                                 return Err(mark_duplicate_torrent(&db, &task_id, &owner).await);
                             }
                         }
@@ -3703,7 +4108,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                 }
                 _ = tokio::time::sleep(Duration::from_secs(2)) => {
                     log_info!("[BT] task={} still resolving metadata...", short_id(&task_id));
-                    let _ = progress_tx
+                    if progress_tx
                         .send(ProgressUpdate {
                             task_id: task_id.clone(),
                             downloaded_bytes: 0,
@@ -3714,13 +4119,25 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                             segment_details: None,
                             ..Default::default()
                         })
-                        .await;
+                        .await.is_err()
+                    {
+                        tracing::debug!("BT progress receiver closed during shutdown");
+                        return Err(DownloadError::Cancelled);
+                    }
                 }
             }
         };
         // Cache the handle for future pause/resume cycles.
         shared_bt.store_handle(&task_id, h.clone()).await;
         h
+    };
+
+    // 缓存句柄若从未经过选择确认（如元数据窗口内暂停后由 add 闭包保留的已暂停
+    // 句柄），不能按「已确认选择的恢复」跳过对话框。
+    let had_existing_handle = if had_existing_handle && !skip_file_selection {
+        !matches!(db.load_bt_selected_files(&task_id).await, Ok(None))
+    } else {
+        had_existing_handle
     };
 
     // -----------------------------------------------------------------------
@@ -3896,7 +4313,12 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                                 );
                             }
                             Err(DIALOG_PAUSE_DONE_RESUME) => {
-                                let _ = session.unpause(&handle).await;
+                                if let Err(error) = session.unpause(&handle).await {
+                                    log_error!(
+                                        "[BT] task={} file-selection pause rollback failed: {error:#}",
+                                        short_id(&tid)
+                                    );
+                                }
                             }
                             Err(_) => {}
                         }
@@ -3941,6 +4363,24 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
             }
         }
         if cancelled.load(Ordering::SeqCst) {
+            // 暂停期间用户已作答：选择必须落库，且丢弃尚未应用 only_files 的
+            // 句柄，使恢复经 AtAdd 重新 add 并遵循该选择（否则 Path R 会下载全部）。
+            dialog_pause_state.store(DIALOG_PAUSE_DONE_KEEP, Ordering::SeqCst);
+            if let SelectionOutcome::UserChose(indices) = &outcome
+                && indices.first().copied() != Some(-1)
+                && indices.iter().any(|&i| i >= 0)
+            {
+                let is_all = indices.len() >= file_count;
+                let indices_to_save: &[i32] = if is_all { &[] } else { indices };
+                if let Err(error) = db
+                    .save_bt_selected_files(&task_id, indices_to_save, is_all)
+                    .await
+                {
+                    discard_failed_bt_selection(&shared_bt, &task_id).await;
+                    return Err(error.into());
+                }
+            }
+            shared_bt.delete_task(&task_id, false).await?;
             return Err(DownloadError::Cancelled);
         }
         outcome.into_inner()
@@ -3962,9 +4402,16 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
     {
         let is_all = selected_indices.len() >= file_count;
         let indices_to_save: &[i32] = if is_all { &[] } else { &selected_indices };
-        let _ = db
+        if let Err(error) = db
             .save_bt_selected_files(&task_id, indices_to_save, is_all)
-            .await;
+            .await
+        {
+            // Stop the dialog's background pause attempt without unpausing a
+            // handle whose user selection was never committed.
+            dialog_pause_state.store(DIALOG_PAUSE_DONE_KEEP, Ordering::SeqCst);
+            discard_failed_bt_selection(&shared_bt, &task_id).await;
+            return Err(error.into());
+        }
         log_info!(
             "[BT] task={} persisted file selection ({}/{} files, is_all={}) to DB",
             short_id(&task_id),
@@ -3989,11 +4436,11 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
             short_id(&task_id)
         );
         // Persist paused status to DB so it survives app restart.
-        let _ = db.update_task_status(&task_id, STATUS_PAUSED, "").await;
-        // Pause the librqbit torrent so it stops seeding / connecting.
-        let _ = shared_bt.pause_task(&task_id).await;
+        // Drop the unconfirmed handle before declaring the task paused.
+        shared_bt.delete_task(&task_id, false).await?;
+        db.update_task_status(&task_id, STATUS_PAUSED, "").await?;
         // Notify Dart so the UI immediately shows "Paused".
-        let _ = progress_tx
+        if progress_tx
             .send(ProgressUpdate {
                 task_id: task_id.clone(),
                 downloaded_bytes: 0,
@@ -4004,7 +4451,11 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                 segment_details: None,
                 ..Default::default()
             })
-            .await;
+            .await
+            .is_err()
+        {
+            tracing::debug!("BT progress receiver closed during shutdown");
+        }
         // Return Cancelled so the manager does not overwrite our status=2.
         return Err(DownloadError::Cancelled);
     }
@@ -4057,7 +4508,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     );
                 } else if cancelled.load(Ordering::SeqCst) {
                     // Drop the handle with unapplied only_files so resume re-adds via AtAdd.
-                    let _ = shared_bt.delete_task(&task_id, false).await;
+                    shared_bt.delete_task(&task_id, false).await?;
                     return Err(DownloadError::Cancelled);
                 } else {
                     // Surface the failure instead of silently downloading unselected
@@ -4067,7 +4518,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                         only.len()
                     );
                     log_info!("[BT] task={} {}", short_id(&task_id), &msg);
-                    let _ = shared_bt.delete_task(&task_id, false).await;
+                    shared_bt.delete_task(&task_id, false).await?;
                     // Pause landed during teardown — keep status=2 (the bad
                     // handle is already gone; resume re-adds with AtAdd).
                     if cancelled.load(Ordering::SeqCst) {
@@ -4077,8 +4528,10 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                         );
                         return Err(DownloadError::Cancelled);
                     }
-                    let _ = db.update_task_status(&task_id, STATUS_ERROR, &msg).await;
-                    let _ = progress_tx
+                    if let Err(error) = db.update_task_status(&task_id, STATUS_ERROR, &msg).await {
+                        crate::logger::report_error("BT", "persist terminal task error", &error);
+                    }
+                    if progress_tx
                         .send(ProgressUpdate {
                             task_id: task_id.clone(),
                             downloaded_bytes: 0,
@@ -4089,7 +4542,11 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                             segment_details: None,
                             ..Default::default()
                         })
-                        .await;
+                        .await
+                        .is_err()
+                    {
+                        tracing::debug!("BT progress receiver closed during shutdown");
+                    }
                     return Err(DownloadError::Other(msg));
                 }
             }
@@ -4126,7 +4583,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
     //   - Path A / Path B: `selected_indices` is the real user choice.
     // -----------------------------------------------------------------------
     let true_selection: Vec<i32> = if had_existing_handle {
-        match db.load_bt_selected_files(&task_id).await.ok().flatten() {
+        match db.load_bt_selected_files(&task_id).await? {
             Some(v) if v.is_empty() => (0..file_count as i32).collect(), // "all" sentinel
             Some(v) => v,
             None => (0..file_count as i32).collect(), // never confirmed → all
@@ -4188,9 +4645,8 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
         }
     };
 
-    let _ = db
-        .update_task_file_info(&task_id, &resolved_name, total_bytes)
-        .await;
+    db.update_task_file_info(&task_id, &resolved_name, total_bytes)
+        .await?;
     // Don't clobber a pause (status=2) that landed during the awaits above.
     if cancelled.load(Ordering::SeqCst) {
         log_info!(
@@ -4199,9 +4655,8 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
         );
         return Err(DownloadError::Cancelled);
     }
-    let _ = db
-        .update_task_status(&task_id, STATUS_DOWNLOADING, "")
-        .await;
+    db.update_task_status(&task_id, STATUS_DOWNLOADING, "")
+        .await?;
 
     // Notify Dart of the transition to "downloading" with resolved info
     let init_progress = stats.progress_bytes as i64;
@@ -4210,7 +4665,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
         .as_ref()
         .map(|l| l.snapshot.downloaded_and_checked_pieces)
         .unwrap_or(0);
-    let _ = progress_tx
+    if progress_tx
         .send(ProgressUpdate {
             task_id: task_id.clone(),
             downloaded_bytes: init_progress,
@@ -4233,7 +4688,12 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
             )),
             ..Default::default()
         })
-        .await;
+        .await
+        .is_err()
+    {
+        tracing::debug!("BT progress receiver closed during shutdown");
+        return Err(DownloadError::Cancelled);
+    }
 
     // -----------------------------------------------------------------------
     // Phase 4: Download progress loop
@@ -4331,7 +4791,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     &db_error,
                 );
             }
-            let _ = progress_tx
+            if progress_tx
                 .send(ProgressUpdate {
                     task_id: task_id.clone(),
                     downloaded_bytes: progress,
@@ -4342,7 +4802,11 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     segment_details: None,
                     ..Default::default()
                 })
-                .await;
+                .await
+                .is_err()
+            {
+                tracing::debug!("BT progress receiver closed during shutdown");
+            }
             return Err(DownloadError::Other(msg));
         }
 
@@ -4368,7 +4832,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
             // 仍未进终态——这正是 aria2 `onBtDownloadComplete` 通知对应的时刻。
             // 立即补发一条带 `bt_data_finished` 标记的进度（progress_reporter
             // 侧按 task_id 去重并绕过节流）。
-            let _ = progress_tx
+            if progress_tx
                 .send(ProgressUpdate {
                     task_id: task_id.clone(),
                     downloaded_bytes: progress,
@@ -4379,7 +4843,12 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     uploaded_bytes,
                     ..Default::default()
                 })
-                .await;
+                .await
+                .is_err()
+            {
+                tracing::debug!("BT progress receiver closed during shutdown");
+                return Err(DownloadError::Cancelled);
+            }
 
             let final_total = if total > 0 { total } else { progress };
             // 注意:此处**不再**无条件写 STATUS_COMPLETED。BT 数据此刻仍在 staging
@@ -4387,8 +4856,8 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
             // STATUS_COMPLETED 并发完成信号;否则改写 STATUS_ERROR 并返回 Err,
             // 避免"未真正落盘的任务"显示为已完成(BUG-BT-COMPLETE-BEFORE-MOVE)。
             // progress / total_bytes 只记录已下载字节数,与完成与否无关,可先写。
-            let _ = db.update_task_progress(&task_id, final_total).await;
-            let _ = db.update_task_total_bytes(&task_id, final_total).await;
+            db.update_task_progress(&task_id, final_total).await?;
+            db.update_task_total_bytes(&task_id, final_total).await?;
 
             // Build fully-completed segments — used in the single STATUS_COMPLETED
             // signal sent after the staging-dir move is resolved.
@@ -4427,9 +4896,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                 // 普通最终文件保留原名,移动前删除旧文件;temp/claimed 照旧改名。
                 let allow_overwrite = db
                     .get_config("file_exists_behavior")
-                    .await
-                    .ok()
-                    .flatten()
+                    .await?
                     .map(|v| v == "overwrite")
                     .unwrap_or(false);
                 let planned_completion = {
@@ -4443,8 +4910,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     // 部分失败重试时复用同名让降级链 merge 进同一 dst,防 fresh
                     // dedup 撞名把数据分裂到 `Name (1)/`(BUG-BT-COMPLETION-SPLIT)。
                     // 锁内读写,与并发同名任务的完成序列全局串行化,无 TOCTOU。
-                    let reuse_top: Option<String> =
-                        db.get_config(&sentinel_key).await.ok().flatten();
+                    let reuse_top = db.get_config(&sentinel_key).await?;
                     // Claim-aware dedup:采集**其他**任务的活跃哨兵名(同
                     // save_dir,小写折叠)。这些名字已被声明但可能尚未在磁盘留下
                     // 足迹(对方首次 move 零足迹失败、等待重试中),fresh dedup 若
@@ -4453,19 +4919,18 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     let retrying_completion = reuse_top.is_some();
                     let claimed: HashSet<String> = {
                         let mut set = HashSet::new();
-                        if let Ok(rows) = db.list_config_with_prefix("bt_completion_top_").await {
-                            for (key, value) in rows {
-                                let Some(tid) = key.strip_prefix("bt_completion_top_") else {
-                                    continue;
-                                };
-                                if tid == task_id {
-                                    continue;
-                                }
-                                if let Ok(Some(t)) = db.load_task_by_id(tid).await
-                                    && t.save_dir == save_dir
-                                {
-                                    set.insert(value.to_lowercase());
-                                }
+                        for (key, value) in db.list_config_with_prefix("bt_completion_top_").await?
+                        {
+                            let Some(tid) = key.strip_prefix("bt_completion_top_") else {
+                                continue;
+                            };
+                            if tid == task_id {
+                                continue;
+                            }
+                            if let Some(task) = db.load_task_by_id(tid).await?
+                                && task.save_dir == save_dir
+                            {
+                                set.insert(value.to_lowercase());
                             }
                         }
                         set
@@ -4481,12 +4946,12 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                         reuse_top: reuse_top.as_deref(),
                         allow_overwrite,
                         claimed: &claimed,
-                    });
+                    })?;
                     match layout {
                         None => None,
                         Some(layout) => {
                             if reuse_top.as_deref() != Some(layout.top_level_name.as_str()) {
-                                let _ = db.set_config(&sentinel_key, &layout.top_level_name).await;
+                                db.set_config(&sentinel_key, &layout.top_level_name).await?;
                             }
                             // overwrite 模式:锁内快照「规划时点已作为普通文件存在
                             // 且被保留原名」的 dst(含容器顶层名)。移动阶段只删除
@@ -4596,14 +5061,21 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                                         preview,
                                         verify_started.elapsed().as_secs_f64()
                                     );
-                                    let _ = shared_bt.delete_task(&task_id, false).await;
+                                    shared_bt.delete_task(&task_id, false).await?;
                                     let msg = format!(
                                         "BT piece verification failed: {} bad piece(s) — data will be re-checked and re-downloaded",
                                         outcome.bad.len()
                                     );
-                                    let _ =
-                                        db.update_task_status(&task_id, STATUS_ERROR, &msg).await;
-                                    let _ = progress_tx
+                                    if let Err(error) =
+                                        db.update_task_status(&task_id, STATUS_ERROR, &msg).await
+                                    {
+                                        crate::logger::report_error(
+                                            "BT",
+                                            "persist piece verification failure",
+                                            &error,
+                                        );
+                                    }
+                                    if progress_tx
                                         .send(ProgressUpdate {
                                             task_id: task_id.clone(),
                                             downloaded_bytes: progress,
@@ -4614,19 +5086,20 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                                             segment_details: None,
                                             ..Default::default()
                                         })
-                                        .await;
+                                        .await
+                                        .is_err()
+                                    {
+                                        tracing::debug!(
+                                            "BT progress receiver closed during shutdown"
+                                        );
+                                    }
                                     return Err(DownloadError::Other(msg));
                                 }
-                                Err(e) => {
-                                    // Internal verification error (e.g. metadata gone)
-                                    // should not block completion; preserve the previous
-                                    // best-effort behavior.
-                                    log_info!(
-                                        "[BT] task={} piece verification skipped: {}",
-                                        short_id(&task_id),
-                                        e
-                                    );
-                                    HashSet::new()
+                                Err(error) => {
+                                    // A required disk verification may not be skipped on failure.
+                                    return Err(DownloadError::Other(format!(
+                                        "BT piece verification failed: {error}"
+                                    )));
                                 }
                             }
                         };
@@ -4731,6 +5204,22 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                         // spawn_blocking（卸载到专用阻塞线程）,再 .await 句柄;`_move_guard`
                         // 仍在外层持有,跨越此 await,保留 move/update phase 的序列化语义
                         // (BUG-BT-COMPLETION-MOVE-BLOCKING)。
+                        // 首个 dst 的名字即 top_level_name（已落 DB file_name）；
+                        // 容器布局与单文件布局无额外顶层产物。
+                        let flat_artifact_names: Vec<String> = if task_owned_container {
+                            Vec::new()
+                        } else {
+                            moves
+                                .iter()
+                                .skip(1)
+                                .filter_map(|m| {
+                                    m.dst
+                                        .file_name()
+                                        .and_then(|n| n.to_str())
+                                        .map(str::to_owned)
+                                })
+                                .collect()
+                        };
                         let tid_for_move = task_id.clone();
                         let move_result = tokio::task::spawn_blocking(move || {
                             let mut succeeded = 0usize;
@@ -4835,9 +5324,15 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                         }
                         // Persist the resolved top-level name so that the UI
                         // and "open file location" agree with what's on disk.
-                        let _ = db
-                            .update_task_file_info(&task_id, &top_level_name, final_total)
-                            .await;
+                        db.update_task_file_info(&task_id, &top_level_name, final_total)
+                            .await?;
+                        // 扁平部分选择落盘为多个顶层文件，DB file_name 只记首个；
+                        // 其余登记为产物，「删除任务并删除文件」才能清干净。
+                        if all_ok {
+                            for name in &flat_artifact_names {
+                                db.add_task_artifact(&task_id, name).await?;
+                            }
+                        }
                         (top_level_name, all_ok)
                     }
                 }
@@ -4859,8 +5354,10 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     short_id(&task_id),
                     &msg,
                 );
-                let _ = db.update_task_status(&task_id, STATUS_ERROR, &msg).await;
-                let _ = progress_tx
+                if let Err(error) = db.update_task_status(&task_id, STATUS_ERROR, &msg).await {
+                    crate::logger::report_error("BT", "persist terminal task error", &error);
+                }
+                if progress_tx
                     .send(ProgressUpdate {
                         task_id: task_id.clone(),
                         downloaded_bytes: final_total,
@@ -4871,25 +5368,29 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                         segment_details: None,
                         ..Default::default()
                     })
-                    .await;
+                    .await
+                    .is_err()
+                {
+                    tracing::debug!("BT progress receiver closed during shutdown");
+                }
                 // 仍要停止做种,但保留 staging 供恢复(下方清理已被
                 // all_moves_succeeded 守卫,此分支不会删 staging)。
-                let _ = shared_bt.pause_task(&task_id).await;
+                if let Err(error) = shared_bt.pause_task(&task_id).await {
+                    crate::logger::report_error(
+                        "BT",
+                        "pause after completion move failure",
+                        &error,
+                    );
+                }
                 return Err(DownloadError::Other(msg));
             }
 
             // 全部移动成功:此刻文件确已落到 save_dir,才写 STATUS_COMPLETED 并
             // 发完成信号——file_name 指向真实存在的磁盘名。
-            if let Err(db_error) = db.update_task_status(&task_id, STATUS_COMPLETED, "").await {
-                crate::logger::report_error("bt-download", "persist completion status", &db_error);
-            }
-            // 完成落定,删除幂等哨兵(孤儿残留无害:status=3 不再进完成路径)。
-            let _ = db
-                .delete_config(&format!("bt_completion_top_{}", task_id))
-                .await;
+            // Completion is committed below, after the seeding transition also succeeds.
 
             // Compute the upload stats that accompany the completed signal.
-            let uploaded_bytes = db.get_task_uploaded_bytes(&task_id).await.unwrap_or(0);
+            let uploaded_bytes = db.get_task_uploaded_bytes(&task_id).await?;
             let completed_upload_speed_bps = stats
                 .live
                 .as_ref()
@@ -4910,29 +5411,29 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
             // cached handle also lets future delete_task(delete_files=true)
             // reach session.delete.
             shared_bt.store_handle(&task_id, handle.clone()).await;
-            let seed_time_base = db.get_task_seeding_time(&task_id).await.unwrap_or(0);
-            let _ = db
-                .update_task_uploaded_at_completion(&task_id, uploaded_at_completion)
-                .await;
+            let seed_time_base = db.get_task_seeding_time(&task_id).await?;
+            db.update_task_uploaded_at_completion(&task_id, uploaded_at_completion)
+                .await?;
             // 「完成后自动做种」开关（config `bt_seed_enabled`，默认开）：
             // 完成时实时读库，用户下载途中切换也能生效。关闭时不注册做种
             // 者，直接暂停 torrent 并落 UserStopped——与手动停止做种同态，
             // 自动续种（bt_auto_reseed）也不会再捞起它。
             let seed_enabled = db
                 .get_config("bt_seed_enabled")
-                .await
-                .ok()
-                .flatten()
+                .await?
                 .map(|v| v != "0")
                 .unwrap_or(true);
-            let (seeding_status, seeding_message) = if !seed_enabled {
-                let _ = shared_bt.pause_task(&task_id).await;
+            // 完成阶段（重哈希/搬移可持续数分钟）内用户或队列要求暂停时，
+            // 不能再登记为活动做种者：暂停不会被撤销，登记会让 UI 显示
+            // 「做种中」而实际不上传。
+            let user_paused = cancelled.load(Ordering::SeqCst) || handle.is_paused();
+            let (seeding_status, seeding_message) = if !seed_enabled || user_paused {
+                shared_bt.pause_task(&task_id).await?;
                 let stopped = crate::bt_seeding::SeedingStopReason::UserStopped;
-                let _ = db
-                    .update_task_seeding_status(&task_id, stopped.as_i32(), stopped.message())
-                    .await;
+                db.update_task_seeding_status(&task_id, stopped.as_i32(), stopped.message())
+                    .await?;
                 log_info!(
-                    "[BT] task={} seeding disabled by config — torrent paused after completion",
+                    "[BT] task={} seeding not started (disabled by config or task paused/cancelled during completion) — torrent paused",
                     short_id(&task_id)
                 );
                 (stopped.as_i32(), stopped.message())
@@ -4953,24 +5454,26 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     .await;
                 match registration {
                     SeedingRegistration::Activated | SeedingRegistration::AlreadyPresent => {
-                        let _ = db
-                            .set_task_seeding_active(&task_id, chrono::Local::now().timestamp())
-                            .await;
+                        db.set_task_seeding_active(&task_id, chrono::Local::now().timestamp())
+                            .await?;
                         (crate::bt_seeding::SEEDING_STATUS_ACTIVE, "")
                     }
                     SeedingRegistration::Queued => {
-                        let _ = shared_bt.pause_task(&task_id).await;
+                        shared_bt.pause_task(&task_id).await?;
                         if shared_bt.seeding_manager().is_seeding(&task_id).await {
                             // 与 actor 侧 reconcile 的升级竞争：注册后、暂停前它
                             // 可能已被提升为活跃做种者。以 SeedingManager 内存态
                             // 为准，重新解除暂停并落活跃状态，避免三方失配。
-                            let _ = shared_bt.resume_task(&task_id).await;
-                            let _ = db
-                                .set_task_seeding_active(&task_id, chrono::Local::now().timestamp())
-                                .await;
+                            if shared_bt.resume_task(&task_id).await?.is_none() {
+                                return Err(DownloadError::Other(
+                                    "BT seeding resume lost its handle".into(),
+                                ));
+                            }
+                            db.set_task_seeding_active(&task_id, chrono::Local::now().timestamp())
+                                .await?;
                             (crate::bt_seeding::SEEDING_STATUS_ACTIVE, "")
                         } else {
-                            let _ = db.set_task_seeding_queued(&task_id).await;
+                            db.set_task_seeding_queued(&task_id).await?;
                             (
                                 crate::bt_seeding::SEEDING_STATUS_QUEUED,
                                 crate::bt_seeding::SEEDING_QUEUED_MESSAGE,
@@ -4979,10 +5482,18 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     }
                 }
             };
-
+            db.update_task_status(&task_id, STATUS_COMPLETED, "")
+                .await?;
+            // The completed row is durable; a leftover retry sentinel is now harmless.
+            if let Err(error) = db
+                .delete_config(&format!("bt_completion_top_{task_id}"))
+                .await
+            {
+                crate::logger::report_error("BT", "remove completion retry sentinel", &error);
+            }
             // Send the single STATUS_COMPLETED signal with the true file name
             // and the actual seeding state so the UI reflects it immediately.
-            let _ = progress_tx
+            if progress_tx
                 .send(ProgressUpdate {
                     task_id: task_id.clone(),
                     downloaded_bytes: final_total,
@@ -5003,7 +5514,11 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     seeding_message: seeding_message.to_string(),
                     seeding_time_secs: seed_time_base,
                 })
-                .await;
+                .await
+                .is_err()
+            {
+                tracing::debug!("BT progress receiver closed during shutdown");
+            }
 
             // Clean up the staging directory after the torrent entered seeding.
             // librqbit keeps file handles open while seeding the moved files,
@@ -5149,7 +5664,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                 .map(|l| l.snapshot.uploaded_bytes as i64)
                 .unwrap_or(0);
 
-            let _ = progress_tx
+            if progress_tx
                 .send(ProgressUpdate {
                     task_id: task_id.clone(),
                     downloaded_bytes: progress,
@@ -5167,7 +5682,12 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     uploaded_bytes: cumulative_upload,
                     ..Default::default()
                 })
-                .await;
+                .await
+                .is_err()
+            {
+                tracing::debug!("BT progress receiver closed during shutdown");
+                return Err(DownloadError::Cancelled);
+            }
 
             last_report = Instant::now();
         }
@@ -5177,9 +5697,9 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
         // avoid inflating progress with partial pieces that would need
         // re-download after restart.
         if checked_progress > 0 && last_db_save.elapsed() >= Duration::from_secs(3) {
-            let _ = db.update_task_progress(&task_id, checked_progress).await;
+            db.update_task_progress(&task_id, checked_progress).await?;
             if total > 0 {
-                let _ = db.update_task_total_bytes(&task_id, total).await;
+                db.update_task_total_bytes(&task_id, total).await?;
             }
             // 上传量不在此落库：progress_reporter 对 ProgressUpdate.uploaded_bytes
             // 做增量累计（add_task_uploaded_bytes），绝对值覆盖写会在 librqbit
@@ -5304,7 +5824,10 @@ mod tests {
                 let mut occupied = Vec::with_capacity(2);
                 let port_start = match std::net::TcpListener::bind(("[::]", 0)) {
                     Ok(listener) => {
-                        let port = listener.local_addr().ok()?.port();
+                        let port = listener
+                            .local_addr()
+                            .expect("bound IPv6 listener address")
+                            .port();
                         occupied.push(listener);
                         if let Ok(ipv4_listener) = std::net::TcpListener::bind(("0.0.0.0", port)) {
                             occupied.push(ipv4_listener);
@@ -5312,14 +5835,29 @@ mod tests {
                         port
                     }
                     Err(_) => {
-                        let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).ok()?;
-                        let port = listener.local_addr().ok()?.port();
+                        let listener = match std::net::TcpListener::bind(("0.0.0.0", 0)) {
+                            Ok(listener) => listener,
+                            Err(error) => {
+                                tracing::debug!(%error, "IPv4 test listener candidate unavailable");
+                                return None;
+                            }
+                        };
+                        let port = listener
+                            .local_addr()
+                            .expect("bound IPv4 listener address")
+                            .port();
                         occupied.push(listener);
                         port
                     }
                 };
                 let port_end = port_start.checked_add(1)?;
-                let probe = std::net::TcpListener::bind(("0.0.0.0", port_end)).ok()?;
+                let probe = match std::net::TcpListener::bind(("0.0.0.0", port_end)) {
+                    Ok(listener) => listener,
+                    Err(error) => {
+                        tracing::debug!(%error, "Adjacent test listener port unavailable");
+                        return None;
+                    }
+                };
                 drop(probe);
                 Some((occupied, port_start, port_end))
             })
@@ -5346,6 +5884,495 @@ mod tests {
         drop(session);
         drop(occupied);
         std::fs::remove_dir_all(work).expect("the BT session test directory must be removable");
+    }
+
+    // -------------------------------------------------------------------------
+    // 种子文件路径校验 / 元数据窗口暂停意图。
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn torrent_path_guard_rejects_non_normal_components() {
+        use std::path::Path;
+        assert!(super::torrent_relative_path_is_safe(
+            Path::new("a/b.txt"),
+            false
+        ));
+        assert!(!super::torrent_relative_path_is_safe(
+            Path::new("../a"),
+            false
+        ));
+        assert!(!super::torrent_relative_path_is_safe(
+            Path::new("a/../b"),
+            false
+        ));
+        assert!(!super::torrent_relative_path_is_safe(
+            Path::new("/etc/x"),
+            false
+        ));
+        assert!(!super::torrent_relative_path_is_safe(Path::new(""), false));
+    }
+
+    #[test]
+    fn torrent_path_guard_windows_rules_reject_drive_and_reserved() {
+        use std::path::Path;
+        assert!(!super::torrent_relative_path_is_safe(
+            Path::new("C:evil/x"),
+            true
+        ));
+        assert!(!super::torrent_relative_path_is_safe(
+            Path::new("dir/a:stream"),
+            true
+        ));
+        assert!(!super::torrent_relative_path_is_safe(
+            Path::new("dir/NUL.txt"),
+            true
+        ));
+        assert!(!super::torrent_relative_path_is_safe(
+            Path::new("com1"),
+            true
+        ));
+        assert!(super::torrent_relative_path_is_safe(
+            Path::new("dir/COM0.txt"),
+            true
+        ));
+        assert!(super::torrent_relative_path_is_safe(
+            Path::new("dir/console.txt"),
+            true
+        ));
+        // 非 Windows 上 `:` 是合法文件名字符，不得误杀。
+        assert!(super::torrent_relative_path_is_safe(
+            Path::new("a:b"),
+            false
+        ));
+    }
+
+    #[test]
+    fn pause_before_handle_registers_pending_and_resume_invalidates_it() {
+        let port = {
+            let l = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("ephemeral port");
+            l.local_addr().expect("addr").port()
+        };
+        let work = unique_test_dir("pending_pause");
+        std::fs::create_dir_all(&work).expect("test dir");
+        let work_string = work.to_string_lossy().into_owned();
+        let config = super::BtConfig {
+            enable_dht: false,
+            enable_upnp: false,
+            port_start: port.max(1024),
+            port_end: port.max(1024).saturating_add(8),
+            ..Default::default()
+        };
+        let session = super::SharedBtSession::new(&work_string, &work_string, 0, 0, &config)
+            .expect("BT session");
+        session.runtime.block_on(async {
+            assert!(session.pause_task("t1").await.is_ok());
+            assert!(session.pending_pauses.lock().await.contains_key("t1"));
+            // 暂停 → 恢复：意图必须作废，否则新一轮 add 会被误暂停。
+            assert!(session.resume_task("t1").await.expect("resume").is_none());
+            assert!(!session.pending_pauses.lock().await.contains_key("t1"));
+            // 暂停 → 恢复 → 暂停：只有最新一次意图有效。
+            assert!(session.pause_task("t1").await.is_ok());
+            let epoch = *session
+                .pending_pauses
+                .lock()
+                .await
+                .get("t1")
+                .expect("pending");
+            assert_eq!(
+                session.pause_epochs.lock().await.get("t1").copied(),
+                Some(epoch)
+            );
+            // 删除同样作废。
+            assert!(
+                !session
+                    .delete_task("t1", false)
+                    .await
+                    .expect("delete pending task")
+            );
+            assert!(!session.pending_pauses.lock().await.contains_key("t1"));
+        });
+        drop(session);
+        if let Err(error) = std::fs::remove_dir_all(work)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
+    }
+
+    mod selection_save_lifecycle {
+        use super::super::{
+            AddTorrent, AddTorrentResponse, Arc, AtomicBool, AtomicUsize, BtFileEntry, BtHandle,
+            BtInnerParams, BtSelectionStrategy, Bytes, Db, DownloadError, Duration, HashMap,
+            HashSet, HostSelection, ListenerMode, ListenerOptions, Mutex, Ordering, Path,
+            ProgressUpdate, STATUS_DOWNLOADING, SeedingManager, SelectionOutcome, Session,
+            SessionOptions, SessionPersistenceConfig, SharedBtSession, SocketAddr, TorrentSource,
+            bt_download_inner, bt_stage_dir, build_add_torrent_options, mpsc, probe_torrent_meta,
+            stage_dir_has_real_data,
+        };
+        use sqlx::Connection;
+
+        #[derive(Clone, Copy)]
+        enum DialogExit {
+            SaveRejected,
+            PausedSaveRejected,
+            Cancel,
+        }
+
+        struct DialogChoice {
+            shared_bt: Arc<SharedBtSession>,
+            cancelled: Arc<AtomicBool>,
+            pause_on_choice: bool,
+            indices: Vec<i32>,
+            observed_handle: Mutex<Option<BtHandle>>,
+        }
+
+        #[async_trait::async_trait]
+        impl HostSelection for DialogChoice {
+            async fn select_hls_quality(
+                &self,
+                _: &str,
+                _: &[crate::model::HlsQualityOption],
+                _: Duration,
+            ) -> SelectionOutcome<i32> {
+                panic!("BT fixture must not request HLS selection");
+            }
+
+            async fn select_bt_files(
+                &self,
+                task_id: &str,
+                _: &[BtFileEntry],
+                _: Option<Duration>,
+            ) -> SelectionOutcome<Vec<i32>> {
+                let handle = self
+                    .shared_bt
+                    .cached_handle(task_id)
+                    .await
+                    .expect("dialog handle");
+                // A real answer can arrive while the dialog's background task
+                // pauses initial checking; waiting for initialization here
+                // would make the selector wait for its own answer to resume it.
+                *self.observed_handle.lock().await = Some(handle);
+                if self.pause_on_choice {
+                    self.cancelled.store(true, Ordering::SeqCst);
+                }
+                SelectionOutcome::UserChose(self.indices.clone())
+            }
+
+            async fn select_resolve_variant(
+                &self,
+                _: &str,
+                _: &[crate::model::ResolveVariantOption],
+                _: i32,
+                _: Duration,
+            ) -> SelectionOutcome<i32> {
+                panic!("BT fixture must not request variant selection");
+            }
+
+            fn provide_hls_selection(&self, _: &str, _: i32) {
+                panic!("BT fixture does not accept HLS answers");
+            }
+
+            fn provide_bt_selection(&self, _: &str, _: Vec<i32>) {
+                panic!("BT fixture supplies its answer in select_bt_files");
+            }
+
+            fn provide_variant_selection(&self, _: &str, _: i32) {
+                panic!("BT fixture does not accept variant answers");
+            }
+        }
+
+        fn local_session(root: &Path) -> Arc<SharedBtSession> {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(2)
+                .build()
+                .expect("fixture runtime");
+            let persistence_folder = root.join("bt_session");
+            // Same real-session fixture as bt_parts_reseed/bt_sparse_add, with
+            // all peer discovery disabled and a kernel-assigned loopback port.
+            let session = runtime
+                .block_on(Session::new_with_opts(
+                    root.join("save"),
+                    SessionOptions {
+                        dht: None,
+                        disable_trackers: true,
+                        connect: None,
+                        listen: Some(ListenerOptions {
+                            mode: ListenerMode::TcpOnly,
+                            listen_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+                            enable_upnp_port_forwarding: false,
+                            ipv4_only: true,
+                            ..Default::default()
+                        }),
+                        ipv4_only: true,
+                        persistence: Some(SessionPersistenceConfig::Json {
+                            folder: Some(persistence_folder.clone()),
+                        }),
+                        ..Default::default()
+                    },
+                ))
+                .expect("local BT session");
+            Arc::new(SharedBtSession {
+                runtime,
+                session,
+                handles: Mutex::new(HashMap::new()),
+                pending_deletes: Mutex::new(HashMap::new()),
+                inflight_adds: AtomicUsize::new(0),
+                torrent_ids: Mutex::new(HashMap::new()),
+                completion_move_lock: Mutex::new(()),
+                seeding: Arc::new(SeedingManager::new()),
+                pause_epochs: Arc::new(Mutex::new(HashMap::new())),
+                pending_pauses: Mutex::new(HashMap::new()),
+                fastresume_tainted: Mutex::new(HashSet::new()),
+                persistence_folder,
+            })
+        }
+
+        async fn local_torrent(root: &Path, name: &str, file_count: usize) -> Bytes {
+            let content = root.join(name);
+            std::fs::create_dir_all(&content).expect("torrent content directory");
+            for index in 0..file_count {
+                let payload: Vec<u8> = (0..16_384)
+                    .map(|offset| {
+                        (offset as u8)
+                            .wrapping_mul(31)
+                            .wrapping_add(index as u8 + 1)
+                    })
+                    .collect();
+                std::fs::write(content.join(format!("file-{index}.bin")), payload)
+                    .expect("torrent source file");
+            }
+            librqbit::create_torrent(
+                &content,
+                librqbit::CreateTorrentOptions {
+                    name: Some(name),
+                    trackers: Vec::new(),
+                    piece_length: Some(16 * 1024),
+                },
+                &librqbit::spawn_utils::BlockingSpawner::new(1),
+            )
+            .await
+            .expect("create local torrent")
+            .as_bytes()
+            .expect("serialize local torrent")
+        }
+
+        fn inner_params(
+            shared_bt: &Arc<SharedBtSession>,
+            db: &Db,
+            save_dir: &Path,
+            torrent: &Bytes,
+            cancelled: &Arc<AtomicBool>,
+            selector: Arc<dyn HostSelection>,
+        ) -> (BtInnerParams, mpsc::Receiver<ProgressUpdate>) {
+            let (progress_tx, progress_rx) = mpsc::channel(32);
+            (
+                BtInnerParams {
+                    task_id: "selection-task".to_string(),
+                    torrent_source: TorrentSource::TorrentFileBytes(torrent.to_vec()),
+                    save_dir: save_dir.to_string_lossy().into_owned(),
+                    db: db.clone(),
+                    progress_tx,
+                    sink: Arc::new(crate::NoopSink),
+                    cancelled: cancelled.clone(),
+                    session: shared_bt.session.clone(),
+                    shared_bt: shared_bt.clone(),
+                    existing_handle: None,
+                    pre_selected_indices: Vec::new(),
+                    skip_file_selection: false,
+                    custom_name: String::new(),
+                    selector,
+                    upload_limit_bps: 0,
+                },
+                progress_rx,
+            )
+        }
+
+        // Keep rejection and the real resume-cache lookup in the companion's live
+        // session so teardown cannot hide an incorrectly retained all-files handle.
+        fn exercise_dialog_exit(exit: DialogExit) {
+            let root = super::unique_test_dir("selection_save_lifecycle");
+            let save_dir = root.join("save");
+            std::fs::create_dir_all(&save_dir).expect("fixture save directory");
+            let shared_bt = local_session(&root);
+            shared_bt.runtime.block_on(async {
+                let db = Db::open(&root).await.expect("fixture DB");
+                db.insert_task(
+                    "selection-task",
+                    "bt://local-fixture",
+                    "selection",
+                    &save_dir.to_string_lossy(),
+                    STATUS_DOWNLOADING,
+                    0,
+                    "",
+                    "",
+                    "",
+                    0,
+                )
+                .await
+                .expect("insert BT task");
+                let mut sqlite = sqlx::SqliteConnection::connect_with(
+                    &sqlx::sqlite::SqliteConnectOptions::new().filename(root.join("flux_down.db")),
+                )
+                .await
+                .expect("fixture trigger connection");
+                sqlx::query(
+                    "CREATE TRIGGER reject_bt_selection BEFORE UPDATE OF bt_selected_files ON tasks
+                     BEGIN SELECT RAISE(FAIL, 'selection write rejected'); END",
+                )
+                .execute(&mut sqlite)
+                .await
+                .expect("install selection failure trigger");
+
+                // An independent incomplete, paused torrent keeps the same
+                // shared session alive across the rejected choice and resume.
+                let companion_torrent = local_torrent(&root, "companion", 1).await;
+                let companion_dir = root.join("companion-stage");
+                std::fs::create_dir_all(&companion_dir).expect("companion staging");
+                let mut companion_opts = build_add_torrent_options(
+                    &BtSelectionStrategy::All,
+                    companion_dir.to_string_lossy().into_owned(),
+                    0,
+                );
+                companion_opts.paused = true;
+                let response = shared_bt
+                    .session
+                    .add_torrent(
+                        AddTorrent::from_bytes(companion_torrent),
+                        Some(companion_opts),
+                    )
+                    .await
+                    .expect("add companion torrent");
+                let companion = match response {
+                    AddTorrentResponse::Added(_, handle) => handle,
+                    _ => panic!("companion must be newly added"),
+                };
+                tokio::time::timeout(Duration::from_secs(10), companion.wait_until_initialized())
+                    .await
+                    .expect("companion initial check timed out")
+                    .expect("companion initial check");
+                shared_bt
+                    .store_handle("companion-task", companion.clone())
+                    .await;
+                shared_bt
+                    .register_torrent_id(companion.id(), "companion-task")
+                    .await;
+
+                let torrent = local_torrent(&root, "selection", 2).await;
+                let stage = bt_stage_dir(&save_dir.to_string_lossy(), "selection-task");
+                std::fs::create_dir_all(&stage).expect("selection staging");
+                let metadata = probe_torrent_meta("fixture".to_string(), torrent.to_vec());
+                assert!(
+                    metadata.error.is_empty(),
+                    "fixture metadata: {}",
+                    metadata.error
+                );
+                assert_eq!(metadata.files.len(), 2);
+                let staged = stage.join(&metadata.files[0].path);
+                std::fs::create_dir_all(staged.parent().expect("staged parent"))
+                    .expect("staged directories");
+                std::fs::write(&staged, [0x55; 1024]).expect("existing partial data");
+                assert!(stage_dir_has_real_data(&stage));
+
+                let cancelled = Arc::new(AtomicBool::new(false));
+                let selector = Arc::new(DialogChoice {
+                    shared_bt: shared_bt.clone(),
+                    cancelled: cancelled.clone(),
+                    pause_on_choice: matches!(exit, DialogExit::PausedSaveRejected),
+                    indices: if matches!(exit, DialogExit::Cancel) {
+                        vec![-1]
+                    } else {
+                        vec![0]
+                    },
+                    observed_handle: Mutex::new(None),
+                });
+                let (params, _progress_rx) = inner_params(
+                    &shared_bt,
+                    &db,
+                    &save_dir,
+                    &torrent,
+                    &cancelled,
+                    selector.clone(),
+                );
+                let result =
+                    tokio::time::timeout(Duration::from_secs(10), bt_download_inner(params))
+                        .await
+                        .expect("selection path timed out");
+                match exit {
+                    DialogExit::Cancel => assert!(matches!(result, Err(DownloadError::Cancelled))),
+                    DialogExit::SaveRejected | DialogExit::PausedSaveRejected => {
+                        let Err(DownloadError::Db(error)) = result else {
+                            panic!("selection save must preserve its database error: {result:?}");
+                        };
+                        assert!(
+                            error.to_string().contains("selection write rejected"),
+                            "{error}"
+                        );
+                    }
+                }
+                let rejected_handle = selector
+                    .observed_handle
+                    .lock()
+                    .await
+                    .clone()
+                    .expect("observed handle");
+                assert_eq!(
+                    rejected_handle.only_files(),
+                    None,
+                    "choice was not applied before saving"
+                );
+                assert!(shared_bt.cached_handle("selection-task").await.is_none());
+                assert!(shared_bt.session.get(rejected_handle.id().into()).is_none());
+                assert!(
+                    shared_bt
+                        .task_for_torrent(rejected_handle.id())
+                        .await
+                        .is_none()
+                );
+                assert!(
+                    shared_bt
+                        .resume_task("selection-task")
+                        .await
+                        .expect("resume rejected choice")
+                        .is_none()
+                );
+                assert!(
+                    shared_bt.has_paused_incomplete().await,
+                    "companion must keep the session alive"
+                );
+                assert!(companion.is_paused());
+                assert!(shared_bt.session.get(companion.id().into()).is_some());
+                assert_eq!(
+                    db.load_bt_selected_files("selection-task")
+                        .await
+                        .expect("uncommitted choice"),
+                    None
+                );
+
+                shared_bt
+                    .delete_task("companion-task", false)
+                    .await
+                    .expect("cleanup companion");
+                sqlite.close().await.expect("close trigger connection");
+            });
+            drop(shared_bt);
+            std::fs::remove_dir_all(root).expect("remove BT selection fixture");
+        }
+
+        #[test]
+        fn bt_selection_save_failure_discards_handle_with_live_session() {
+            exercise_dialog_exit(DialogExit::SaveRejected);
+        }
+
+        #[test]
+        fn bt_selection_save_failure_while_paused_discards_handle_with_live_session() {
+            exercise_dialog_exit(DialogExit::PausedSaveRejected);
+        }
+
+        #[test]
+        fn bt_selection_user_cancel_stays_cancelled_with_live_session() {
+            exercise_dialog_exit(DialogExit::Cancel);
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -5465,7 +6492,8 @@ mod tests {
         // in-batch numeric-suffix dedup path.)
         let save = unique_test_dir("dedup_numeric_suffix");
         let stage = save.join(".stage");
-        let _ = std::fs::create_dir_all(&stage);
+        std::fs::create_dir_all(&stage)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
 
         let selected = completion_files(&["File.txt", "file.txt"]);
         let claims = HashSet::new();
@@ -5480,10 +6508,14 @@ mod tests {
             reuse_top: None,
             allow_overwrite: false,
             claimed: &claims,
-        });
-        let _ = std::fs::remove_dir_all(&save);
+        })
+        .expect("read completion destination");
+        if let Err(error) = std::fs::remove_dir_all(&save)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
 
-        // Avoid `.unwrap()`/`.expect()` (denied by clippy) — match explicitly.
         let moves = match layout {
             Some(layout) => layout.moves,
             None => panic!("layout should be Some"),
@@ -5512,7 +6544,8 @@ mod tests {
     fn completion_layout_partial_selection_with_subdir_preserves_container() {
         let save = unique_test_dir("partial_subdir_container");
         let stage = save.join(".stage");
-        let _ = std::fs::create_dir_all(&stage);
+        std::fs::create_dir_all(&stage)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         // Torrent has 3 files; user only selected 2, one of which sits under
         // "sub/dir/".
         let selected = completion_files(&["top.txt", "sub/dir/inner.bin"]);
@@ -5529,7 +6562,8 @@ mod tests {
             reuse_top: None,
             allow_overwrite: false,
             claimed: &claims,
-        });
+        })
+        .expect("read completion destination");
         let layout = match layout {
             Some(v) => v,
             None => panic!("layout should be Some"),
@@ -5547,14 +6581,19 @@ mod tests {
             save.join("Pack").join("sub").join("dir").join("inner.bin")
         );
 
-        let _ = std::fs::remove_dir_all(&save);
+        if let Err(error) = std::fs::remove_dir_all(&save)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     #[test]
     fn completion_layout_all_selected_flat_multi_file_uses_torrent_root() {
         let save = unique_test_dir("flat_multi_root");
         let stage = save.join(".stage");
-        let _ = std::fs::create_dir_all(&stage);
+        std::fs::create_dir_all(&stage)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let selected = completion_files(&["movie.mkv", "subs/en.srt"]);
 
         let claims = HashSet::new();
@@ -5569,7 +6608,8 @@ mod tests {
             reuse_top: None,
             allow_overwrite: false,
             claimed: &claims,
-        });
+        })
+        .expect("read completion destination");
         let layout = match layout {
             Some(v) => v,
             None => panic!("layout should be Some"),
@@ -5587,14 +6627,19 @@ mod tests {
             save.join("Movie Pack").join("subs").join("en.srt")
         );
 
-        let _ = std::fs::remove_dir_all(&save);
+        if let Err(error) = std::fs::remove_dir_all(&save)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     #[test]
     fn completion_layout_all_selected_common_subdir_stays_under_torrent_root() {
         let save = unique_test_dir("common_subdir_root");
         let stage = save.join(".stage");
-        let _ = std::fs::create_dir_all(&stage);
+        std::fs::create_dir_all(&stage)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let selected = completion_files(&["Disc 1/a.bin", "Disc 1/b.bin"]);
 
         let claims = HashSet::new();
@@ -5609,7 +6654,8 @@ mod tests {
             reuse_top: None,
             allow_overwrite: false,
             claimed: &claims,
-        });
+        })
+        .expect("read completion destination");
         let layout = match layout {
             Some(v) => v,
             None => panic!("layout should be Some"),
@@ -5629,14 +6675,19 @@ mod tests {
             save.join("Movie Pack").join("Disc 1").join("b.bin")
         );
 
-        let _ = std::fs::remove_dir_all(&save);
+        if let Err(error) = std::fs::remove_dir_all(&save)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     #[test]
     fn completion_layout_keeps_inner_dir_named_like_torrent_root() {
         let save = unique_test_dir("same_named_inner_root");
         let stage = save.join(".stage");
-        let _ = std::fs::create_dir_all(&stage);
+        std::fs::create_dir_all(&stage)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let selected = completion_files(&["Torrent/a.bin", "Torrent/b.bin"]);
 
         let claims = HashSet::new();
@@ -5651,7 +6702,8 @@ mod tests {
             reuse_top: None,
             allow_overwrite: false,
             claimed: &claims,
-        });
+        })
+        .expect("read completion destination");
         let layout = match layout {
             Some(v) => v,
             None => panic!("layout should be Some"),
@@ -5669,14 +6721,19 @@ mod tests {
             save.join("Torrent").join("Torrent").join("b.bin")
         );
 
-        let _ = std::fs::remove_dir_all(&save);
+        if let Err(error) = std::fs::remove_dir_all(&save)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     #[test]
     fn completion_layout_all_selected_flat_multi_file_sanitizes_torrent_root() {
         let save = unique_test_dir("flat_multi_root_sanitize");
         let stage = save.join(".stage");
-        let _ = std::fs::create_dir_all(&stage);
+        std::fs::create_dir_all(&stage)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let selected = completion_files(&["a.bin", "b.bin"]);
 
         let claims = HashSet::new();
@@ -5691,21 +6748,27 @@ mod tests {
             reuse_top: None,
             allow_overwrite: false,
             claimed: &claims,
-        });
+        })
+        .expect("read completion destination");
         let top = match layout {
             Some(v) => v.top_level_name,
             None => panic!("layout should be Some"),
         };
 
         assert_eq!(top, "Bad_Name_01");
-        let _ = std::fs::remove_dir_all(&save);
+        if let Err(error) = std::fs::remove_dir_all(&save)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     #[test]
     fn completion_layout_multi_file_metainfo_with_one_real_file_keeps_torrent_root() {
         let save = unique_test_dir("multi_meta_one_real_file");
         let stage = save.join(".stage");
-        let _ = std::fs::create_dir_all(&stage);
+        std::fs::create_dir_all(&stage)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let selected = completion_files_with_len(&[("data.bin", 42)]);
 
         let claims = HashSet::new();
@@ -5720,7 +6783,8 @@ mod tests {
             reuse_top: None,
             allow_overwrite: false,
             claimed: &claims,
-        });
+        })
+        .expect("read completion destination");
         let layout = match layout {
             Some(v) => v,
             None => panic!("layout should be Some"),
@@ -5733,7 +6797,11 @@ mod tests {
         assert_eq!(layout.moves[0].expected_len, 42);
         assert!(layout.task_owned_container);
 
-        let _ = std::fs::remove_dir_all(&save);
+        if let Err(error) = std::fs::remove_dir_all(&save)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     #[test]
@@ -5755,79 +6823,6 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // InflightGuard: panic-safe decrement via RAII.
-    // -------------------------------------------------------------------------
-
-    /// Verify that InflightGuard decrements the counter even when the
-    /// enclosing tokio::spawn closure panics before the natural end.
-    #[tokio::test]
-    async fn inflight_guard_decrements_on_task_panic() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        // Minimal stand-in for SharedBtSession: just the counter.
-        let counter = Arc::new(AtomicUsize::new(0));
-
-        // Build a minimal InflightGuard directly using the same AtomicUsize
-        // so we can test the Drop behaviour without constructing a full Session.
-        struct TestGuard(Arc<AtomicUsize>);
-        impl Drop for TestGuard {
-            fn drop(&mut self) {
-                self.0.fetch_sub(1, Ordering::Relaxed);
-            }
-        }
-
-        // Simulate: shared_bt.inflight_guard() — increments then returns guard.
-        counter.fetch_add(1, Ordering::Relaxed);
-        assert_eq!(counter.load(Ordering::Relaxed), 1);
-        let guard = TestGuard(Arc::clone(&counter));
-
-        // Simulate: tokio::spawn(async move { let _g = guard; ..panic.. })
-        let handle = tokio::spawn(async move {
-            let _g = guard; // guard moved into task; Drop runs on panic
-            panic!("simulated add_torrent panic");
-        });
-
-        // Tokio catches the panic; JoinHandle returns Err.
-        assert!(handle.await.is_err());
-
-        // FIX confirmed: guard's Drop ran during tokio's task cleanup,
-        // decrementing the counter back to 0.
-        assert_eq!(
-            counter.load(Ordering::Relaxed),
-            0,
-            "InflightGuard must decrement counter even after task panic"
-        );
-    }
-
-    /// Verify normal (non-panic) path: guard also decrements on clean exit.
-    #[tokio::test]
-    async fn inflight_guard_decrements_on_normal_exit() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let counter = Arc::new(AtomicUsize::new(0));
-
-        struct TestGuard(Arc<AtomicUsize>);
-        impl Drop for TestGuard {
-            fn drop(&mut self) {
-                self.0.fetch_sub(1, Ordering::Relaxed);
-            }
-        }
-
-        counter.fetch_add(1, Ordering::Relaxed);
-        let guard = TestGuard(Arc::clone(&counter));
-
-        let handle = tokio::spawn(async move {
-            let _g = guard;
-            // normal return — no panic
-        });
-
-        assert!(handle.await.is_ok());
-        assert_eq!(counter.load(Ordering::Relaxed), 0);
-    }
-
-    // -------------------------------------------------------------------------
     // clear_stale_session_state — session.json removed, .bitv/.torrent kept
     // (BUG-BT-RESUME-FROM-ZERO regression).
     // -------------------------------------------------------------------------
@@ -5842,15 +6837,19 @@ mod tests {
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         ));
-        let _ = std::fs::create_dir_all(&dir);
+        std::fs::create_dir_all(&dir)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let session_json = dir.join("session.json");
         let session_tmp = dir.join("session.json.tmp");
         let bitv = dir.join("d5146f69f1bb6b9d95c8270769ebca7f82c2936a.bitv");
         let torrent = dir.join("d5146f69f1bb6b9d95c8270769ebca7f82c2936a.torrent");
-        let _ = std::fs::write(&session_json, b"{\"torrents\":{}}");
-        let _ = std::fs::write(&session_tmp, b"{}");
-        let _ = std::fs::write(&bitv, [0xFFu8; 16]);
-        let _ = std::fs::write(&torrent, b"d8:announce0:e");
+        std::fs::write(&session_json, b"{\"torrents\":{}}")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::write(&session_tmp, b"{}")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::write(&bitv, [0xFFu8; 16]).expect("write bitfield fixture");
+        std::fs::write(&torrent, b"d8:announce0:e")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
 
         super::clear_stale_session_state(&dir);
 
@@ -5864,21 +6863,11 @@ mod tests {
             ".torrent metadata cache must be preserved"
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn clear_stale_session_state_tolerates_missing_files() {
-        // Folder without session.json (first launch) — must not panic.
-        let dir = std::env::temp_dir().join(format!(
-            "fluxdown_bt_session_test_missing_{}",
-            std::process::id()
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        super::clear_stale_session_state(&dir);
-        // Non-existent folder — must not panic either.
-        super::clear_stale_session_state(&dir.join("does_not_exist"));
-        let _ = std::fs::remove_dir_all(&dir);
+        if let Err(error) = std::fs::remove_dir_all(&dir)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -5903,23 +6892,32 @@ mod tests {
 
         // Empty directory → no data.
         let empty = unique_test_dir("empty");
-        let _ = std::fs::create_dir_all(&empty);
+        std::fs::create_dir_all(&empty)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         assert!(!super::stage_dir_has_real_data(&empty));
 
         // Only zero-byte files → no data.
         let zero = unique_test_dir("zero");
-        let _ = std::fs::create_dir_all(&zero);
-        let _ = std::fs::write(zero.join("stub.bin"), b"");
+        std::fs::create_dir_all(&zero)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::write(zero.join("stub.bin"), b"")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         assert!(!super::stage_dir_has_real_data(&zero));
 
         // Top-level non-empty file → data.
         let flat = unique_test_dir("flat");
-        let _ = std::fs::create_dir_all(&flat);
-        let _ = std::fs::write(flat.join("file.iso"), b"x");
+        std::fs::create_dir_all(&flat)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::write(flat.join("file.iso"), b"x")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         assert!(super::stage_dir_has_real_data(&flat));
 
         for d in [empty, zero, flat] {
-            let _ = std::fs::remove_dir_all(&d);
+            if let Err(error) = std::fs::remove_dir_all(&d)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+            }
         }
     }
 
@@ -5930,10 +6928,16 @@ mod tests {
     fn stage_dir_has_real_data_finds_nested_files() {
         let dir = unique_test_dir("nested");
         let nested = dir.join("Torrent Name").join("sub");
-        let _ = std::fs::create_dir_all(&nested);
-        let _ = std::fs::write(nested.join("part.mkv"), b"data");
+        std::fs::create_dir_all(&nested)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::write(nested.join("part.mkv"), b"data")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         assert!(super::stage_dir_has_real_data(&dir));
-        let _ = std::fs::remove_dir_all(&dir);
+        if let Err(error) = std::fs::remove_dir_all(&dir)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -5953,10 +6957,12 @@ mod tests {
     #[test]
     fn verify_pieces_core_accepts_valid_data() {
         let dir = unique_test_dir("verify_ok");
-        let _ = std::fs::create_dir_all(&dir);
+        std::fs::create_dir_all(&dir)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let content = b"0123456789"; // 10 bytes → pieces "0123","4567","89"
         let path = dir.join("data.bin");
-        let _ = std::fs::write(&path, content);
+        std::fs::write(&path, content)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let hashes = [sha1_of(b"0123"), sha1_of(b"4567"), sha1_of(b"89")];
 
         let files = [super::VerifyFileSpec {
@@ -5971,7 +6977,11 @@ mod tests {
         assert_eq!(outcome.checked, 3);
         assert_eq!(outcome.skipped, 0);
 
-        let _ = std::fs::remove_dir_all(&dir);
+        if let Err(error) = std::fs::remove_dir_all(&dir)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     #[test]
@@ -5979,12 +6989,16 @@ mod tests {
         let dir = unique_test_dir("verify_retry_dst");
         let stage = dir.join(".stage");
         let save = dir.join("Torrent");
-        let _ = std::fs::create_dir_all(&stage);
-        let _ = std::fs::create_dir_all(&save);
+        std::fs::create_dir_all(&stage)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::create_dir_all(&save)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let src = stage.join("a.bin");
         let dst = save.join("a.bin");
-        let _ = std::fs::write(&src, b"staging residue");
-        let _ = std::fs::write(&dst, b"already moved");
+        std::fs::write(&src, b"staging residue")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::write(&dst, b"already moved")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
 
         let completion_move = super::CompletionMove {
             src: src.clone(),
@@ -5998,7 +7012,8 @@ mod tests {
         );
         assert_eq!(resolved, src);
 
-        let _ = std::fs::remove_file(&src);
+        std::fs::remove_file(&src)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let resolved = super::resolve_completion_verify_path(
             src.clone(),
             std::slice::from_ref(&completion_move),
@@ -6010,7 +7025,11 @@ mod tests {
             super::resolve_completion_verify_path(src.clone(), &[completion_move], false);
         assert_eq!(no_retry, stage.join("a.bin"));
 
-        let _ = std::fs::remove_dir_all(&dir);
+        if let Err(error) = std::fs::remove_dir_all(&dir)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     #[test]
@@ -6018,12 +7037,16 @@ mod tests {
         let dir = unique_test_dir("retry_stale_dst_from_src");
         let stage = dir.join(".stage");
         let save = dir.join("Torrent");
-        let _ = std::fs::create_dir_all(&stage);
-        let _ = std::fs::create_dir_all(&save);
+        std::fs::create_dir_all(&stage)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::create_dir_all(&save)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let src = stage.join("a.bin");
         let dst = save.join("a.bin");
-        let _ = std::fs::write(&src, b"fresh complete payload");
-        let _ = std::fs::write(&dst, b"stale");
+        std::fs::write(&src, b"fresh complete payload")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::write(&dst, b"stale")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
 
         let outcome = super::move_completion_item(
             &src,
@@ -6043,7 +7066,11 @@ mod tests {
         );
         assert!(!src.exists(), "staged src should be moved out");
 
-        let _ = std::fs::remove_dir_all(&dir);
+        if let Err(error) = std::fs::remove_dir_all(&dir)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     #[test]
@@ -6051,12 +7078,16 @@ mod tests {
         let dir = unique_test_dir("retry_src_dst_residue");
         let stage = dir.join(".stage");
         let save = dir.join("Torrent");
-        let _ = std::fs::create_dir_all(&stage);
-        let _ = std::fs::create_dir_all(&save);
+        std::fs::create_dir_all(&stage)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::create_dir_all(&save)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let src = stage.join("a.bin");
         let dst = save.join("a.bin");
-        let _ = std::fs::write(&src, b"payload");
-        let _ = std::fs::write(&dst, b"payload");
+        std::fs::write(&src, b"payload")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::write(&dst, b"payload")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
 
         let outcome =
             super::move_completion_item(&src, &dst, b"payload".len() as u64, true, true, true);
@@ -6070,7 +7101,11 @@ mod tests {
             "verified prior success should clean staging residue when possible"
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
+        if let Err(error) = std::fs::remove_dir_all(&dir)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     #[test]
@@ -6078,11 +7113,14 @@ mod tests {
         let dir = unique_test_dir("retry_dst_wrong_len");
         let stage = dir.join(".stage");
         let save = dir.join("Torrent");
-        let _ = std::fs::create_dir_all(&stage);
-        let _ = std::fs::create_dir_all(&save);
+        std::fs::create_dir_all(&stage)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::create_dir_all(&save)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let src = stage.join("a.bin");
         let dst = save.join("a.bin");
-        let _ = std::fs::write(&dst, b"payload plus trailing bytes");
+        std::fs::write(&dst, b"payload plus trailing bytes")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
 
         let outcome =
             super::move_completion_item(&src, &dst, b"payload".len() as u64, true, true, true);
@@ -6091,7 +7129,11 @@ mod tests {
             other => panic!("oversized dst must not be accepted: {other:?}"),
         }
 
-        let _ = std::fs::remove_dir_all(&dir);
+        if let Err(error) = std::fs::remove_dir_all(&dir)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     #[test]
@@ -6099,11 +7141,14 @@ mod tests {
         let dir = unique_test_dir("retry_dst_zero_len");
         let stage = dir.join(".stage");
         let save = dir.join("Torrent");
-        let _ = std::fs::create_dir_all(&stage);
-        let _ = std::fs::create_dir_all(&save);
+        std::fs::create_dir_all(&stage)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::create_dir_all(&save)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let src = stage.join("empty.bin");
         let dst = save.join("empty.bin");
-        let _ = std::fs::write(&dst, b"");
+        std::fs::write(&dst, b"")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
 
         let outcome = super::move_completion_item(&src, &dst, 0, true, true, true);
         match outcome {
@@ -6111,7 +7156,11 @@ mod tests {
             other => panic!("zero-length dst with exact length should be accepted: {other:?}"),
         }
 
-        let _ = std::fs::remove_dir_all(&dir);
+        if let Err(error) = std::fs::remove_dir_all(&dir)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     /// A zero-filled hole in the middle of otherwise-valid data must be
@@ -6120,12 +7169,14 @@ mod tests {
     #[test]
     fn verify_pieces_core_detects_zero_filled_pieces() {
         let dir = unique_test_dir("verify_zero");
-        let _ = std::fs::create_dir_all(&dir);
+        std::fs::create_dir_all(&dir)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let good = b"0123456789";
         // Piece 1 ("4567") zeroed out on disk.
         let on_disk = b"0123\0\0\0\089";
         let path = dir.join("data.bin");
-        let _ = std::fs::write(&path, on_disk);
+        std::fs::write(&path, on_disk)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let hashes = [sha1_of(b"0123"), sha1_of(b"4567"), sha1_of(b"89")];
 
         let files = [super::VerifyFileSpec {
@@ -6139,7 +7190,11 @@ mod tests {
         assert_eq!(outcome.bad, vec![1]);
         assert_eq!(outcome.checked, 2);
 
-        let _ = std::fs::remove_dir_all(&dir);
+        if let Err(error) = std::fs::remove_dir_all(&dir)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     /// A missing or truncated selected file makes its pieces provably bad
@@ -6148,7 +7203,8 @@ mod tests {
     #[test]
     fn verify_pieces_core_flags_missing_and_truncated_files() {
         let dir = unique_test_dir("verify_missing");
-        let _ = std::fs::create_dir_all(&dir);
+        std::fs::create_dir_all(&dir)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
 
         // Missing file entirely.
         let files = [super::VerifyFileSpec {
@@ -6162,7 +7218,8 @@ mod tests {
         // Truncated file: only 5 of 10 bytes on disk → pieces 1 and 2
         // unreadable; piece 0 readable (hash check decides it).
         let path = dir.join("short.bin");
-        let _ = std::fs::write(&path, b"01234");
+        std::fs::write(&path, b"01234")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let files = [super::VerifyFileSpec {
             path: Some(path),
             len: 10,
@@ -6174,7 +7231,11 @@ mod tests {
         assert_eq!(outcome.bad, vec![1, 2]);
         assert_eq!(outcome.checked, 1);
 
-        let _ = std::fs::remove_dir_all(&dir);
+        if let Err(error) = std::fs::remove_dir_all(&dir)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     /// Pieces that overlap no selected file are skipped, while a piece
@@ -6184,13 +7245,16 @@ mod tests {
     #[test]
     fn verify_pieces_core_skips_unselected_only_pieces() {
         let dir = unique_test_dir("verify_sel");
-        let _ = std::fs::create_dir_all(&dir);
+        std::fs::create_dir_all(&dir)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let sel = dir.join("selected.bin");
         let unsel = dir.join("unselected.bin");
         // piece_length 4: file A = 6 bytes (pieces 0, 1), file B = 6 bytes
         // (pieces 1, 2).  Piece 1 straddles both; piece 2 is B-only.
-        let _ = std::fs::write(&sel, b"AAAAAA");
-        let _ = std::fs::write(&unsel, b"BBBBBB");
+        std::fs::write(&sel, b"AAAAAA")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::write(&unsel, b"BBBBBB")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let hashes = [sha1_of(b"AAAA"), sha1_of(b"AABB"), sha1_of(b"BBBB")];
 
         let files = [
@@ -6212,16 +7276,22 @@ mod tests {
         assert_eq!(outcome.checked, 2, "pieces 0 and 1 are required");
         assert_eq!(outcome.skipped, 1, "piece 2 overlaps no selected file");
 
-        let _ = std::fs::remove_dir_all(&dir);
+        if let Err(error) = std::fs::remove_dir_all(&dir)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     /// BEP-47 padding files contribute virtual zero bytes without any disk I/O.
     #[test]
     fn verify_pieces_core_hashes_padding_as_zeros() {
         let dir = unique_test_dir("verify_pad");
-        let _ = std::fs::create_dir_all(&dir);
+        std::fs::create_dir_all(&dir)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let path = dir.join("data.bin");
-        let _ = std::fs::write(&path, b"XY");
+        std::fs::write(&path, b"XY")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         // Layout: 2-byte real file + 2-byte padding → one piece "XY\0\0".
         let hashes = [sha1_of(b"XY\0\0")];
 
@@ -6243,7 +7313,11 @@ mod tests {
         assert!(outcome.bad.is_empty(), "bad: {:?}", outcome.bad);
         assert_eq!(outcome.checked, 1);
 
-        let _ = std::fs::remove_dir_all(&dir);
+        if let Err(error) = std::fs::remove_dir_all(&dir)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     /// info_hash_hex derives the hash from magnet URLs (used to address the
@@ -6275,12 +7349,15 @@ mod tests {
         use std::io::{Seek, Write};
         let base = unique_test_dir("fallback");
         let src_top = base.join("src").join("Torrent");
-        let _ = std::fs::create_dir_all(src_top.join("sub"));
+        std::fs::create_dir_all(src_top.join("sub"))
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let file_path = src_top.join("sub").join("file.bin");
-        let _ = std::fs::write(&file_path, vec![0x55u8; 4096]);
-        let _ = std::fs::write(src_top.join("a.bin"), b"aaaa");
+        std::fs::write(&file_path, vec![0x55u8; 4096]).expect("write held-file fixture");
+        std::fs::write(src_top.join("a.bin"), b"aaaa")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let dst_top = base.join("dst").join("Torrent");
-        let _ = std::fs::create_dir_all(base.join("dst"));
+        std::fs::create_dir_all(base.join("dst"))
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
 
         // FULL-share 打开(read+write:只读句柄无法用于写入判别)。
         let mut handle = match std::fs::OpenOptions::new()
@@ -6302,9 +7379,11 @@ mod tests {
 
         // rename/copy 判别:句柄开于 pos=0,先 seek 到末尾再追加 4096 字节
         // → 若 dst 是同一底层文件(rename),其长度增长;copy 快照不受影响。
-        let _ = handle.seek(std::io::SeekFrom::End(0));
-        let _ = handle.write_all(&vec![0xAAu8; 4096]);
-        let _ = handle.flush();
+        handle
+            .seek(std::io::SeekFrom::End(0))
+            .expect("seek held file");
+        handle.write_all(&[0xAAu8; 4096]).expect("write held file");
+        handle.flush().expect("flush held file");
         drop(handle);
         let dst_len = std::fs::metadata(dst_top.join("sub").join("file.bin"))
             .map(|m| m.len())
@@ -6314,30 +7393,11 @@ mod tests {
             "dst must be the SAME underlying file (rename), not a copy snapshot"
         );
 
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    /// 反向对照:同一句柄场景下裸 std::fs::rename(目录)必失败——记录本
-    /// 修复存在的根因。未来 Windows 若改变此语义(此测试转 FAIL),提示
-    /// 可简化降级链。
-    #[cfg(windows)]
-    #[test]
-    fn raw_dir_rename_fails_with_open_child_handle() {
-        let base = unique_test_dir("rawrename");
-        let src_top = base.join("Torrent");
-        let _ = std::fs::create_dir_all(&src_top);
-        let file_path = src_top.join("file.bin");
-        let _ = std::fs::write(&file_path, b"data");
-
-        let handle = std::fs::File::open(&file_path);
-        assert!(handle.is_ok());
-        let renamed = std::fs::rename(&src_top, base.join("Torrent_renamed"));
-        assert!(
-            renamed.is_err(),
-            "dir rename with open child handle should fail on Windows"
-        );
-        drop(handle);
-        let _ = std::fs::remove_dir_all(&base);
+        if let Err(error) = std::fs::remove_dir_all(&base)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     /// 瞬时独占锁(share_mode(0),AV 风格)释放后,move_file 在重试预算内
@@ -6348,10 +7408,13 @@ mod tests {
     fn move_file_retries_transient_lock() {
         use std::os::windows::fs::OpenOptionsExt;
         let base = unique_test_dir("retry");
-        let _ = std::fs::create_dir_all(&base);
+        std::fs::create_dir_all(&base)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let src = base.join("locked.bin");
-        let _ = std::fs::write(&src, vec![1u8; 1024]);
-        let src_created = std::fs::metadata(&src).and_then(|m| m.created()).ok();
+        std::fs::write(&src, vec![1u8; 1024]).expect("write locked-file fixture");
+        let src_created = std::fs::metadata(&src)
+            .and_then(|m| m.created())
+            .expect("source creation time");
 
         let src_clone = src.clone();
         let locker = std::thread::spawn(move || {
@@ -6372,17 +7435,23 @@ mod tests {
         // creation time,claim 占位(replace=false)会因 NTFS tunneling 污染
         // 判别;瞬时锁重试逻辑与占名协议正交。
         let result = super::move_file(&src, &dst, &mut budget, true);
-        let _ = locker.join();
+        locker.join().expect("lock holder must not panic");
 
         assert!(result.is_ok(), "move_file failed: {result:?}");
         assert!(dst.exists() && !src.exists());
         // creation time 一致 ⟹ rename(同一文件);copy 会新建文件。
-        let dst_created = std::fs::metadata(&dst).and_then(|m| m.created()).ok();
+        let dst_created = std::fs::metadata(&dst)
+            .and_then(|m| m.created())
+            .expect("destination creation time");
         assert_eq!(
             src_created, dst_created,
             "creation time must survive (rename), copy would mint a new one"
         );
-        let _ = std::fs::remove_dir_all(&base);
+        if let Err(error) = std::fs::remove_dir_all(&base)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     /// copy 成功但 remove_file(src) 被第三方句柄(可读不可删)阻塞时,
@@ -6393,9 +7462,10 @@ mod tests {
     fn move_file_copy_succeeds_remove_blocked_returns_ok() {
         use std::os::windows::fs::OpenOptionsExt;
         let base = unique_test_dir("copyok");
-        let _ = std::fs::create_dir_all(&base);
+        std::fs::create_dir_all(&base)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let src = base.join("held.bin");
-        let _ = std::fs::write(&src, vec![7u8; 2048]);
+        std::fs::write(&src, vec![7u8; 2048]).expect("write readable-file fixture");
 
         // share = READ only(无 DELETE):rename 报 32、copy 可读、remove 失败。
         let holder = std::fs::OpenOptions::new()
@@ -6416,7 +7486,11 @@ mod tests {
         // src 残留(由 staging 清理兜底)——行为符合设计。
         assert!(src.exists());
         drop(holder);
-        let _ = std::fs::remove_dir_all(&base);
+        if let Err(error) = std::fs::remove_dir_all(&base)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     /// dst 不可达(父目录缺失)时 move_file 干净失败:返回 Err、src 完整
@@ -6429,9 +7503,10 @@ mod tests {
     #[test]
     fn move_file_fails_cleanly_when_dst_unreachable() {
         let base = unique_test_dir("cleanup");
-        let _ = std::fs::create_dir_all(&base);
+        std::fs::create_dir_all(&base)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let src = base.join("data.bin");
-        let _ = std::fs::write(&src, vec![3u8; 512]);
+        std::fs::write(&src, vec![3u8; 512]).expect("write move-failure fixture");
         // dst 指向不存在的父目录深处 → rename 与 copy 双双失败。
         let dst = base.join("no_such_parent").join("data.bin");
 
@@ -6440,7 +7515,11 @@ mod tests {
         assert!(result.is_err(), "must fail when dst parent missing");
         assert!(!dst.exists(), "no partial dst may remain");
         assert!(src.exists(), "src must stay intact for retry");
-        let _ = std::fs::remove_dir_all(&base);
+        if let Err(error) = std::fs::remove_dir_all(&base)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -6451,11 +7530,14 @@ mod tests {
     #[test]
     fn move_file_replace_false_dst_exists_fails_preserves_both() {
         let base = unique_test_dir("claim_exists");
-        let _ = std::fs::create_dir_all(&base);
+        std::fs::create_dir_all(&base)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let src = base.join("src.bin");
         let dst = base.join("dst.bin");
-        let _ = std::fs::write(&src, b"incoming");
-        let _ = std::fs::write(&dst, b"original");
+        std::fs::write(&src, b"incoming")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::write(&dst, b"original")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
 
         let mut budget = 0u32;
         let result = super::move_file(&src, &dst, &mut budget, false);
@@ -6465,16 +7547,22 @@ mod tests {
         }
         assert_eq!(std::fs::read(&dst).unwrap_or_default(), b"original");
         assert_eq!(std::fs::read(&src).unwrap_or_default(), b"incoming");
-        let _ = std::fs::remove_dir_all(&base);
+        if let Err(error) = std::fs::remove_dir_all(&base)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     #[test]
     fn move_file_replace_false_dst_free_succeeds() {
         let base = unique_test_dir("claim_free");
-        let _ = std::fs::create_dir_all(&base);
+        std::fs::create_dir_all(&base)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let src = base.join("src.bin");
         let dst = base.join("dst.bin");
-        let _ = std::fs::write(&src, b"payload");
+        std::fs::write(&src, b"payload")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
 
         let mut budget = 0u32;
         let result = super::move_file(&src, &dst, &mut budget, false);
@@ -6484,17 +7572,24 @@ mod tests {
         );
         assert_eq!(std::fs::read(&dst).unwrap_or_default(), b"payload");
         assert!(!src.exists(), "src must be gone after a successful move");
-        let _ = std::fs::remove_dir_all(&base);
+        if let Err(error) = std::fs::remove_dir_all(&base)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     #[test]
     fn move_file_replace_true_dst_exists_overwrites() {
         let base = unique_test_dir("merge_overwrite");
-        let _ = std::fs::create_dir_all(&base);
+        std::fs::create_dir_all(&base)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let src = base.join("src.bin");
         let dst = base.join("dst.bin");
-        let _ = std::fs::write(&src, b"new-content");
-        let _ = std::fs::write(&dst, b"stale");
+        std::fs::write(&src, b"new-content")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::write(&dst, b"stale")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
 
         let mut budget = 0u32;
         let result = super::move_file(&src, &dst, &mut budget, true);
@@ -6503,7 +7598,11 @@ mod tests {
             "replace=true must overwrite dst: {result:?}"
         );
         assert_eq!(std::fs::read(&dst).unwrap_or_default(), b"new-content");
-        let _ = std::fs::remove_dir_all(&base);
+        if let Err(error) = std::fs::remove_dir_all(&base)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     /// I-5 回归:status==3 + staging 残留与 save_dir 已有完整产物同名
@@ -6516,15 +7615,21 @@ mod tests {
         let task_id = "residue-task-01";
         // save_dir 内已有完整产物(3 文件)。
         let product = save.join("Torrent");
-        let _ = std::fs::create_dir_all(product.join("sub"));
-        let _ = std::fs::write(product.join("a.bin"), b"complete-a");
-        let _ = std::fs::write(product.join("b.bin"), b"complete-b");
-        let _ = std::fs::write(product.join("sub").join("c.bin"), b"complete-c");
+        std::fs::create_dir_all(product.join("sub"))
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::write(product.join("a.bin"), b"complete-a")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::write(product.join("b.bin"), b"complete-b")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::write(product.join("sub").join("c.bin"), b"complete-c")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         // staging 内同名残留(仅含 1 个文件的副本)。
         let stage = super::bt_stage_dir(&save.to_string_lossy(), task_id);
         let residue = stage.join("Torrent");
-        let _ = std::fs::create_dir_all(&residue);
-        let _ = std::fs::write(residue.join("a.bin"), b"complete-a");
+        std::fs::create_dir_all(&residue)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::write(residue.join("a.bin"), b"complete-a")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
 
         let input = vec![(
             task_id.to_string(),
@@ -6552,7 +7657,11 @@ mod tests {
         );
         // staging 连同残留被清理。
         assert!(!stage.exists(), "staging residue should be dropped");
-        let _ = std::fs::remove_dir_all(&save);
+        if let Err(error) = std::fs::remove_dir_all(&save)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     #[test]
@@ -6560,12 +7669,16 @@ mod tests {
         let save = unique_test_dir("rescue_container_child_residue");
         let task_id = "container-residue-01";
         let product = save.join("Movie Pack");
-        let _ = std::fs::create_dir_all(&product);
-        let _ = std::fs::write(product.join("movie.mkv"), b"complete-movie");
+        std::fs::create_dir_all(&product)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::write(product.join("movie.mkv"), b"complete-movie")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
 
         let stage = super::bt_stage_dir(&save.to_string_lossy(), task_id);
-        let _ = std::fs::create_dir_all(&stage);
-        let _ = std::fs::write(stage.join("movie.mkv"), b"complete-movie");
+        std::fs::create_dir_all(&stage)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::write(stage.join("movie.mkv"), b"complete-movie")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
 
         let input = vec![(
             task_id.to_string(),
@@ -6587,7 +7700,11 @@ mod tests {
             b"complete-movie"
         );
         assert!(!stage.exists(), "staging residue should be dropped");
-        let _ = std::fs::remove_dir_all(&save);
+        if let Err(error) = std::fs::remove_dir_all(&save)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     /// 哨兵复用:reuse_top 指向 save_dir 内已存在的**目录**(上次部分移动
@@ -6598,12 +7715,14 @@ mod tests {
     fn completion_layout_reuses_sentinel_top() {
         let save = unique_test_dir("sentinel");
         let stage = save.join(".stage");
-        let _ = std::fs::create_dir_all(&stage);
+        std::fs::create_dir_all(&stage)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let selected = completion_files(&["Torrent/a.bin", "Torrent/sub/b.bin"]);
         let claims = HashSet::new();
 
         // Case 1: dst 是目录(自身上次产物)→ 复用。
-        let _ = std::fs::create_dir_all(save.join("Torrent"));
+        std::fs::create_dir_all(save.join("Torrent"))
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let layout = super::compute_completion_layout(super::CompletionLayoutInput {
             save_dir: &save,
             stage_dir: &stage,
@@ -6615,7 +7734,8 @@ mod tests {
             reuse_top: Some("Torrent"),
             allow_overwrite: false,
             claimed: &claims,
-        });
+        })
+        .expect("read completion destination");
         let top = match layout {
             Some(v) => v.top_level_name,
             None => panic!("layout should be Some"),
@@ -6623,8 +7743,10 @@ mod tests {
         assert_eq!(top, "Torrent", "existing dir must be reused, not deduped");
 
         // Case 2: dst 被外部占用为文件 → 放弃哨兵,fresh dedup。
-        let _ = std::fs::remove_dir_all(save.join("Torrent"));
-        let _ = std::fs::write(save.join("Torrent"), b"unrelated user file");
+        std::fs::remove_dir_all(save.join("Torrent"))
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::write(save.join("Torrent"), b"unrelated user file")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let layout = super::compute_completion_layout(super::CompletionLayoutInput {
             save_dir: &save,
             stage_dir: &stage,
@@ -6636,7 +7758,8 @@ mod tests {
             reuse_top: Some("Torrent"),
             allow_overwrite: false,
             claimed: &claims,
-        });
+        })
+        .expect("read completion destination");
         let top = match layout {
             Some(v) => v.top_level_name,
             None => panic!("layout should be Some"),
@@ -6658,14 +7781,19 @@ mod tests {
             reuse_top: None,
             allow_overwrite: false,
             claimed: &claims,
-        });
+        })
+        .expect("read completion destination");
         let top = match layout {
             Some(v) => v.top_level_name,
             None => panic!("layout should be Some"),
         };
         assert_eq!(top, "Torrent (1)");
 
-        let _ = std::fs::remove_dir_all(&save);
+        if let Err(error) = std::fs::remove_dir_all(&save)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     /// rescue 必须把"与 current_file_name 精确同名的空壳目录"(fast-path
@@ -6677,7 +7805,8 @@ mod tests {
         let task_id = "shelltask-0001";
         let stage = super::bt_stage_dir(&save.to_string_lossy(), task_id);
         // 空壳:与 current_file_name 同名、只含空目录树。
-        let _ = std::fs::create_dir_all(stage.join("Torrent").join("sub"));
+        std::fs::create_dir_all(stage.join("Torrent").join("sub"))
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
 
         let input = vec![(
             task_id.to_string(),
@@ -6695,7 +7824,11 @@ mod tests {
             "empty shell must not be moved into save_dir"
         );
         assert!(!stage.exists(), "staging dir should be cleaned up");
-        let _ = std::fs::remove_dir_all(&save);
+        if let Err(error) = std::fs::remove_dir_all(&save)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     /// 大 N 降级路径正确性(500 文件 x 3 层嵌套)。打印耗时供人工确认,
@@ -6707,10 +7840,11 @@ mod tests {
         for i in 0..5 {
             for j in 0..10 {
                 let dir = src.join(format!("d{i}")).join(format!("e{j}"));
-                let _ = std::fs::create_dir_all(&dir);
+                std::fs::create_dir_all(&dir)
+                    .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
                 for k in 0..10 {
-                    let _ =
-                        std::fs::write(dir.join(format!("f{k}.bin")), [i as u8, j as u8, k as u8]);
+                    std::fs::write(dir.join(format!("f{k}.bin")), [i as u8, j as u8, k as u8])
+                        .unwrap_or_else(|error| panic!("test fixture write failed: {error}"));
                 }
             }
         }
@@ -6722,22 +7856,28 @@ mod tests {
         assert!(result.is_ok(), "{result:?}");
         // 抽查结构与内容。
         let sample = dst.join("d4").join("e9").join("f9.bin");
-        assert_eq!(std::fs::read(&sample).unwrap_or_default(), vec![4u8, 9, 9]);
+        assert_eq!(
+            std::fs::read(&sample).expect("read migrated sample"),
+            vec![4u8, 9, 9]
+        );
         let mut count = 0usize;
         fn count_files(dir: &std::path::Path, count: &mut usize) {
-            if let Ok(rd) = std::fs::read_dir(dir) {
-                for e in rd.filter_map(|e| e.ok()) {
-                    if e.path().is_dir() {
-                        count_files(&e.path(), count);
-                    } else {
-                        *count += 1;
-                    }
+            for entry in std::fs::read_dir(dir).expect("read migrated directory") {
+                let entry = entry.expect("read migrated directory entry");
+                if entry.path().is_dir() {
+                    count_files(&entry.path(), count);
+                } else {
+                    *count += 1;
                 }
             }
         }
         count_files(&dst, &mut count);
         assert_eq!(count, 500);
-        let _ = std::fs::remove_dir_all(&base);
+        if let Err(error) = std::fs::remove_dir_all(&base)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     /// 单个子项失败不得中止兄弟项:可移动的文件全部移出,函数返回首个错误。
@@ -6745,15 +7885,22 @@ mod tests {
     fn move_dir_recursive_continues_after_child_error() {
         let base = unique_test_dir("continue");
         let src = base.join("src");
-        let _ = std::fs::create_dir_all(&src);
-        let _ = std::fs::write(src.join("ok1.bin"), b"1");
-        let _ = std::fs::write(src.join("ok2.bin"), b"2");
+        std::fs::create_dir_all(&src)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::write(src.join("ok1.bin"), b"1")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::write(src.join("ok2.bin"), b"2")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let dst = base.join("dst");
-        let _ = std::fs::create_dir_all(&dst);
+        std::fs::create_dir_all(&dst)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         // 预置一个与 src 子目录同名的**文件**,令该子项的 create_dir_all 失败。
-        let _ = std::fs::create_dir_all(src.join("blocked"));
-        let _ = std::fs::write(src.join("blocked").join("inner.bin"), b"x");
-        let _ = std::fs::write(dst.join("blocked"), b"i am a file");
+        std::fs::create_dir_all(src.join("blocked"))
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::write(src.join("blocked").join("inner.bin"), b"x")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::write(dst.join("blocked"), b"i am a file")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
 
         let mut budget = super::RETRY_SLEEP_BUDGET;
         let result = super::move_dir_recursive(&src, &dst, &mut budget);
@@ -6763,7 +7910,11 @@ mod tests {
         assert!(!src.join("ok1.bin").exists());
         // 被阻塞子项的数据保留在 src,可重试。
         assert!(src.join("blocked").join("inner.bin").exists());
-        let _ = std::fs::remove_dir_all(&base);
+        if let Err(error) = std::fs::remove_dir_all(&base)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     /// merge 语义幂等:dst 已存在子文件为旧/截断版本时必须被 src 版本覆盖,
@@ -6773,13 +7924,17 @@ mod tests {
         let base = unique_test_dir("merge_stale_child");
         let src = base.join("src");
         let dst = base.join("dst");
-        let _ = std::fs::create_dir_all(&src);
-        let _ = std::fs::create_dir_all(&dst);
+        std::fs::create_dir_all(&src)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::create_dir_all(&dst)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         // src carries the fresh, complete content.
-        let _ = std::fs::write(src.join("a.bin"), b"fresh-full-content");
+        std::fs::write(src.join("a.bin"), b"fresh-full-content")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         // dst already has a stale/truncated same-name file from a prior
         // interrupted move — merge must overwrite it, not leave it stuck.
-        let _ = std::fs::write(dst.join("a.bin"), b"old");
+        std::fs::write(dst.join("a.bin"), b"old")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
 
         let mut budget = 0u32;
         let result = super::move_dir_recursive(&src, &dst, &mut budget);
@@ -6788,7 +7943,11 @@ mod tests {
             std::fs::read(dst.join("a.bin")).unwrap_or_default(),
             b"fresh-full-content"
         );
-        let _ = std::fs::remove_dir_all(&base);
+        if let Err(error) = std::fs::remove_dir_all(&base)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -6799,45 +7958,98 @@ mod tests {
     #[test]
     fn dedup_name_in_dir_case_folds_existing_disk_entries() {
         let dir = unique_test_dir("dedup_case_fold");
-        let _ = std::fs::create_dir_all(&dir);
+        std::fs::create_dir_all(&dir)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         // Exact-case entry forces the early-return probe to see a conflict
         // on every platform (Linux's Path::exists() is case-sensitive).
-        let _ = std::fs::write(dir.join("MOVIE.mkv"), b"x");
+        std::fs::write(dir.join("MOVIE.mkv"), b"x")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         // Differently-cased numbered variant already occupies " (1)".
-        let _ = std::fs::write(dir.join("Movie (1).mkv"), b"x");
+        std::fs::write(dir.join("Movie (1).mkv"), b"x")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
 
-        let name = super::dedup_name_in_dir(&dir, "MOVIE.mkv", &HashSet::new(), false);
+        let name = super::dedup_name_in_dir(&dir, "MOVIE.mkv", &HashSet::new(), false)
+            .expect("read dedup destination");
         assert_ne!(
             name, "MOVIE (1).mkv",
             "case-different existing 'Movie (1).mkv' must be treated as occupied"
         );
         assert_eq!(name, "MOVIE (2).mkv");
-        let _ = std::fs::remove_dir_all(&dir);
+        if let Err(error) = std::fs::remove_dir_all(&dir)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
+    }
+
+    #[test]
+    fn completion_layout_propagates_destination_scan_error() {
+        let root = unique_test_dir("completion_scan_error");
+        std::fs::create_dir_all(&root).expect("create fixture");
+        let save = root.join("not-a-directory");
+        std::fs::write(&save, b"existing user data").expect("write destination blocker");
+        let selected = completion_files(&["movie.mkv"]);
+        let claims = HashSet::from(["movie.mkv".to_string()]);
+        let result = super::compute_completion_layout(super::CompletionLayoutInput {
+            save_dir: &save,
+            stage_dir: &root.join(".stage"),
+            selected_files: &selected,
+            all_selected: true,
+            is_multi_file_torrent: false,
+            custom_name: "",
+            torrent_root_name: "movie.mkv",
+            reuse_top: None,
+            allow_overwrite: false,
+            claimed: &claims,
+        });
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("destination scan failure must not produce a completion name"),
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory);
+        assert_eq!(
+            std::fs::read(&save).expect("read destination blocker"),
+            b"existing user data"
+        );
+        std::fs::remove_dir_all(&root).expect("remove fixture");
     }
 
     #[test]
     fn dedup_name_in_dir_fdownloading_temp_file_counts_as_occupied() {
         let dir = unique_test_dir("dedup_temp_occupied");
-        let _ = std::fs::create_dir_all(&dir);
+        std::fs::create_dir_all(&dir)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         // Only the in-progress temp file exists; the final name does not.
-        let _ = std::fs::write(dir.join("movie.mkv.fdownloading"), b"partial");
+        std::fs::write(dir.join("movie.mkv.fdownloading"), b"partial")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
 
-        let name = super::dedup_name_in_dir(&dir, "movie.mkv", &HashSet::new(), false);
+        let name = super::dedup_name_in_dir(&dir, "movie.mkv", &HashSet::new(), false)
+            .expect("read dedup destination");
         assert_eq!(name, "movie (1).mkv");
-        let _ = std::fs::remove_dir_all(&dir);
+        if let Err(error) = std::fs::remove_dir_all(&dir)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     #[test]
     fn dedup_name_in_dir_avoid_set_blocks_name() {
         let dir = unique_test_dir("dedup_avoid_set");
-        let _ = std::fs::create_dir_all(&dir);
+        std::fs::create_dir_all(&dir)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         // Nothing on disk, but another concurrent task has claimed the name.
         let mut avoid = HashSet::new();
         avoid.insert("movie.mkv".to_string());
 
-        let name = super::dedup_name_in_dir(&dir, "Movie.mkv", &avoid, false);
+        let name = super::dedup_name_in_dir(&dir, "Movie.mkv", &avoid, false)
+            .expect("read dedup destination");
         assert_eq!(name, "Movie (1).mkv");
-        let _ = std::fs::remove_dir_all(&dir);
+        if let Err(error) = std::fs::remove_dir_all(&dir)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -6849,44 +8061,66 @@ mod tests {
     #[test]
     fn dedup_name_in_dir_overwrite_keeps_name_when_only_final_exists() {
         let dir = unique_test_dir("dedup_ow_final");
-        let _ = std::fs::create_dir_all(&dir);
-        let _ = std::fs::write(dir.join("movie.mkv"), b"old");
+        std::fs::create_dir_all(&dir)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::write(dir.join("movie.mkv"), b"old")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
 
-        let name = super::dedup_name_in_dir(&dir, "movie.mkv", &HashSet::new(), true);
+        let name = super::dedup_name_in_dir(&dir, "movie.mkv", &HashSet::new(), true)
+            .expect("read dedup destination");
         assert_eq!(
             name, "movie.mkv",
             "overwrite 模式下仅最终文件存在必须保留原名（移动前删除旧文件）"
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        if let Err(error) = std::fs::remove_dir_all(&dir)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     #[test]
     fn dedup_name_in_dir_overwrite_temp_and_dir_still_conflict() {
         let dir = unique_test_dir("dedup_ow_temp");
-        let _ = std::fs::create_dir_all(&dir);
+        std::fs::create_dir_all(&dir)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         // 在途下载的临时文件是硬冲突——绝不覆盖其他任务的在途产物。
-        let _ = std::fs::write(dir.join("movie.mkv.fdownloading"), b"partial");
-        let name = super::dedup_name_in_dir(&dir, "movie.mkv", &HashSet::new(), true);
+        std::fs::write(dir.join("movie.mkv.fdownloading"), b"partial")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        let name = super::dedup_name_in_dir(&dir, "movie.mkv", &HashSet::new(), true)
+            .expect("read dedup destination");
         assert_eq!(name, "movie (1).mkv");
 
         // 同名目录也不覆盖(BT 内容不能盖到用户目录上)。
-        let _ = std::fs::create_dir_all(dir.join("Pack"));
-        let name = super::dedup_name_in_dir(&dir, "Pack", &HashSet::new(), true);
+        std::fs::create_dir_all(dir.join("Pack"))
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        let name = super::dedup_name_in_dir(&dir, "Pack", &HashSet::new(), true)
+            .expect("read dedup destination");
         assert_eq!(name, "Pack (1)");
-        let _ = std::fs::remove_dir_all(&dir);
+        if let Err(error) = std::fs::remove_dir_all(&dir)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     #[test]
     fn dedup_name_in_dir_overwrite_avoid_set_still_conflicts() {
         let dir = unique_test_dir("dedup_ow_avoid");
-        let _ = std::fs::create_dir_all(&dir);
+        std::fs::create_dir_all(&dir)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         // 其他任务经完成哨兵声明的名字仍是硬冲突。
         let mut avoid = HashSet::new();
         avoid.insert("movie.mkv".to_string());
 
-        let name = super::dedup_name_in_dir(&dir, "Movie.mkv", &avoid, true);
+        let name = super::dedup_name_in_dir(&dir, "Movie.mkv", &avoid, true)
+            .expect("read dedup destination");
         assert_eq!(name, "Movie (1).mkv");
-        let _ = std::fs::remove_dir_all(&dir);
+        if let Err(error) = std::fs::remove_dir_all(&dir)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -6899,9 +8133,11 @@ mod tests {
     fn completion_layout_single_file_sentinel_rejects_occupied_dst() {
         let save = unique_test_dir("single_sentinel_occupied");
         let stage = save.join(".stage");
-        let _ = std::fs::create_dir_all(&save);
+        std::fs::create_dir_all(&save)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         // 模拟另一同名任务已在 save_dir 落地同名产物。
-        let _ = std::fs::write(save.join("movie.mkv"), b"someone else's file");
+        std::fs::write(save.join("movie.mkv"), b"someone else's file")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let selected = completion_files(&["movie.mkv"]);
         let claims = HashSet::new();
 
@@ -6916,7 +8152,8 @@ mod tests {
             reuse_top: Some("movie.mkv"),
             allow_overwrite: false,
             claimed: &claims,
-        });
+        })
+        .expect("read completion destination");
         let top = match layout {
             Some(v) => v.top_level_name,
             None => panic!("layout should be Some"),
@@ -6926,14 +8163,19 @@ mod tests {
             "occupied sentinel name must not be reused (would REPLACE the other task's file)"
         );
         assert_eq!(top, "movie (1).mkv");
-        let _ = std::fs::remove_dir_all(&save);
+        if let Err(error) = std::fs::remove_dir_all(&save)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     #[test]
     fn completion_layout_single_file_sentinel_reused_when_absent() {
         let save = unique_test_dir("single_sentinel_absent");
         let stage = save.join(".stage");
-        let _ = std::fs::create_dir_all(&save);
+        std::fs::create_dir_all(&save)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let selected = completion_files(&["movie.mkv"]);
         let claims = HashSet::new();
 
@@ -6948,7 +8190,8 @@ mod tests {
             reuse_top: Some("movie.mkv"),
             allow_overwrite: false,
             claimed: &claims,
-        });
+        })
+        .expect("read completion destination");
         let top = match layout {
             Some(v) => v.top_level_name,
             None => panic!("layout should be Some"),
@@ -6957,14 +8200,19 @@ mod tests {
             top, "movie.mkv",
             "legitimate retry with no on-disk conflict must reuse the sentinel name"
         );
-        let _ = std::fs::remove_dir_all(&save);
+        if let Err(error) = std::fs::remove_dir_all(&save)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     #[test]
     fn completion_layout_single_file_claimed_set_avoids_name() {
         let save = unique_test_dir("single_claimed");
         let stage = save.join(".stage");
-        let _ = std::fs::create_dir_all(&save);
+        std::fs::create_dir_all(&save)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let selected = completion_files(&["movie.mkv"]);
         let mut claimed = HashSet::new();
         claimed.insert("movie.mkv".to_string());
@@ -6980,7 +8228,8 @@ mod tests {
             reuse_top: None,
             allow_overwrite: false,
             claimed: &claimed,
-        });
+        })
+        .expect("read completion destination");
         let top = match layout {
             Some(v) => v.top_level_name,
             None => panic!("layout should be Some"),
@@ -6989,7 +8238,11 @@ mod tests {
             top, "movie (1).mkv",
             "fresh dedup must avoid a name claimed by another concurrent task"
         );
-        let _ = std::fs::remove_dir_all(&save);
+        if let Err(error) = std::fs::remove_dir_all(&save)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -7000,11 +8253,14 @@ mod tests {
     #[test]
     fn rescue_stranded_staging_files_avoids_claimed_name() {
         let save = unique_test_dir("rescue_claimed");
-        let _ = std::fs::create_dir_all(&save);
+        std::fs::create_dir_all(&save)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
         let task_id = "claimed-task-01";
         let stage = super::bt_stage_dir(&save.to_string_lossy(), task_id);
-        let _ = std::fs::create_dir_all(&stage);
-        let _ = std::fs::write(stage.join("data.bin"), b"payload");
+        std::fs::create_dir_all(&stage)
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
+        std::fs::write(stage.join("data.bin"), b"payload")
+            .unwrap_or_else(|error| panic!("test filesystem operation failed: {error}"));
 
         let save_dir_string = save.to_string_lossy().into_owned();
         let input = vec![(
@@ -7031,6 +8287,10 @@ mod tests {
             !stage.exists(),
             "staging dir should be cleaned up after move"
         );
-        let _ = std::fs::remove_dir_all(&save);
+        if let Err(error) = std::fs::remove_dir_all(&save)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 }

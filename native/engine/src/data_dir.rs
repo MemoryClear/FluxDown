@@ -26,7 +26,8 @@
 //! - SQLite 三件套（`flux_down.db` / `-wal` / `-shm`）作为原子组迁移，
 //!   WAL 持有未 checkpoint 的事务，绝不与主库分离；
 //! - 失败的条目原地保留并记录到 `<portable_data>/migration_errors.log`
-//!   （GUI 进程无可见 stderr），下次启动自动重试。
+//!   （GUI 进程无可见 stderr），下次启动自动重试；主库 rename 失败时额外写
+//!   `.db_migration_pending` 哨兵，下次启动将本进程自建的空库备份后重试整组。
 
 use std::path::{Path, PathBuf};
 
@@ -191,6 +192,10 @@ const DB_FILE: &str = "flux_down.db";
 const DB_WAL: &str = "flux_down.db-wal";
 #[cfg(any(target_os = "windows", test))]
 const DB_SHM: &str = "flux_down.db-shm";
+/// 主库 rename 失败时写在新目录的哨兵：本进程随后会自建空库，
+/// 下次启动凭它识别「新库是空壳」并重试迁移。
+#[cfg(any(target_os = "windows", test))]
+const DB_MIGRATION_PENDING: &str = ".db_migration_pending";
 
 /// 独立迁移项（不含 DB 三件套——那组走 [`migrate_db_group`] 原子迁移）。
 // KEEP IN SYNC with lib/src/services/platform_utils.dart knownItems
@@ -244,10 +249,22 @@ fn migrate_portable_layout(old_root: &Path, new_dir: &Path) -> Vec<String> {
         failures.push(format!("创建目录失败 {}: {e}", new_dir.display()));
         return failures;
     }
+    let pending = new_dir.join(DB_MIGRATION_PENDING).exists();
     migrate_db_group(old_root, new_dir, &mut failures);
     for name in KNOWN_ITEMS {
         let old_path = old_root.join(name);
         let new_path = new_dir.join(name);
+        if pending && old_path.exists() {
+            // 主库迁移失败那次启动里引擎预建的空目录；remove_dir 只删空目录，非空则保留。
+            if let Err(error) = std::fs::remove_dir(&new_path)
+                && !matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                )
+            {
+                failures.push(format!("清理空目录失败 {}: {error}", new_path.display()));
+            }
+        }
         if old_path.exists()
             && !new_path.exists()
             && let Err(e) = std::fs::rename(&old_path, &new_path)
@@ -258,6 +275,12 @@ fn migrate_portable_layout(old_root: &Path, new_dir: &Path) -> Vec<String> {
                 new_path.display()
             ));
         }
+    }
+    if failures.is_empty()
+        && let Err(error) = std::fs::remove_file(new_dir.join(DB_MIGRATION_PENDING))
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        failures.push(format!("清除迁移哨兵失败 {}: {error}", new_dir.display()));
     }
     failures
 }
@@ -275,8 +298,20 @@ fn migrate_portable_layout(old_root: &Path, new_dir: &Path) -> Vec<String> {
 fn migrate_db_group(old_root: &Path, new_dir: &Path, failures: &mut Vec<String>) {
     let old_db = old_root.join(DB_FILE);
     let new_db = new_dir.join(DB_FILE);
-    if !old_db.exists() || new_db.exists() {
+    let pending = new_dir.join(DB_MIGRATION_PENDING).exists();
+    if !old_db.exists() {
         return;
+    }
+    if new_db.exists() {
+        // 新库存在且无哨兵 → 已迁移（或用户在新布局下使用过），绝不覆盖。
+        // 有哨兵 → 新库是上次主库 rename 失败后本进程自建的空库，备份后重试。
+        if !pending {
+            return;
+        }
+        if let Err(e) = backup_fresh_db(new_dir) {
+            failures.push(e);
+            return;
+        }
     }
     if let Err(e) = std::fs::rename(&old_db, &new_db) {
         failures.push(format!(
@@ -284,6 +319,10 @@ fn migrate_db_group(old_root: &Path, new_dir: &Path, failures: &mut Vec<String>)
             old_db.display(),
             new_db.display()
         ));
+        // 引擎随后会在新目录自建空库；哨兵让下次启动识别并重试。
+        if let Err(error) = std::fs::write(new_dir.join(DB_MIGRATION_PENDING), b"") {
+            failures.push(format!("写迁移哨兵失败 {}: {error}", new_dir.display()));
+        }
         return;
     }
     let old_wal = old_root.join(DB_WAL);
@@ -304,6 +343,9 @@ fn migrate_db_group(old_root: &Path, new_dir: &Path, failures: &mut Vec<String>)
                 old_db.display()
             ));
         }
+        if let Err(error) = std::fs::write(new_dir.join(DB_MIGRATION_PENDING), b"") {
+            failures.push(format!("写迁移哨兵失败 {}: {error}", new_dir.display()));
+        }
         return;
     }
     let old_shm = old_root.join(DB_SHM);
@@ -320,6 +362,23 @@ fn migrate_db_group(old_root: &Path, new_dir: &Path, failures: &mut Vec<String>)
     }
 }
 
+/// 把本进程在迁移失败后新建的空库三件套改名备份，给旧库让位。
+/// 备份而非删除：万一新库里已有用户数据也不会丢。
+#[cfg(any(target_os = "windows", test))]
+fn backup_fresh_db(new_dir: &Path) -> Result<(), String> {
+    let ts = chrono::Local::now().format("%Y%m%d%H%M%S");
+    for name in [DB_FILE, DB_WAL, DB_SHM] {
+        let src = new_dir.join(name);
+        if !src.exists() {
+            continue;
+        }
+        let dst = new_dir.join(format!("{name}.pre_migration_{ts}"));
+        std::fs::rename(&src, &dst)
+            .map_err(|e| format!("备份新库失败 {} → {}: {e}", src.display(), dst.display()))?;
+    }
+    Ok(())
+}
+
 /// 迁移失败信息落盘：`<new_dir>/migration_errors.log`（追加）。
 ///
 /// 放数据目录根层而非 `logs/`——迁移失败时若在此处预创建 `logs/` 目录，
@@ -327,16 +386,23 @@ fn migrate_db_group(old_root: &Path, new_dir: &Path, failures: &mut Vec<String>)
 #[cfg(any(target_os = "windows", test))]
 fn persist_migration_failures(new_dir: &Path, failures: &[String]) {
     use std::io::Write;
-    let Ok(mut file) = std::fs::OpenOptions::new()
+    let path = new_dir.join("migration_errors.log");
+    let mut file = match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(new_dir.join("migration_errors.log"))
-    else {
-        return;
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!("[便携迁移] 打开迁移诊断失败 {}: {error}", path.display());
+            return;
+        }
     };
     let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
     for msg in failures {
-        let _ = writeln!(file, "{ts} [便携迁移] {msg}");
+        if let Err(error) = writeln!(file, "{ts} [便携迁移] {msg}") {
+            eprintln!("[便携迁移] 写迁移诊断失败: {error}; {msg}");
+        }
     }
 }
 
@@ -364,7 +430,14 @@ mod tests {
             "fluxdown_portable_migrate_{name}_{}",
             std::process::id()
         ));
-        let _ = fs::remove_dir_all(&dir);
+
+        if let Err(error) = fs::remove_dir_all(&dir) {
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::NotFound,
+                "clean test path: {error}"
+            );
+        }
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -404,7 +477,12 @@ mod tests {
         assert!(!root.join(DB_FILE).exists());
         assert!(!root.join("icons").exists());
         assert!(root.join("flux_down.exe").exists());
-        let _ = fs::remove_dir_all(&root);
+
+        if let Err(error) = fs::remove_dir_all(&root)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("best-effort test directory cleanup: {error}");
+        }
     }
 
     #[test]
@@ -417,7 +495,12 @@ mod tests {
         let failures = migrate_portable_layout(&root, &new_dir);
         assert!(failures.is_empty(), "{failures:?}");
         assert_eq!(fs::read_to_string(new_dir.join(DB_FILE)).unwrap(), "db");
-        let _ = fs::remove_dir_all(&root);
+
+        if let Err(error) = fs::remove_dir_all(&root)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("best-effort test directory cleanup: {error}");
+        }
     }
 
     #[test]
@@ -437,7 +520,12 @@ mod tests {
             fs::read_to_string(root.join("settings.json")).unwrap(),
             "old"
         );
-        let _ = fs::remove_dir_all(&root);
+
+        if let Err(error) = fs::remove_dir_all(&root)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("best-effort test directory cleanup: {error}");
+        }
     }
 
     #[test]
@@ -451,7 +539,12 @@ mod tests {
         assert!(failures.is_empty(), "{failures:?}");
         assert!(root.join(DB_WAL).exists());
         assert!(!new_dir.join(DB_WAL).exists());
-        let _ = fs::remove_dir_all(&root);
+
+        if let Err(error) = fs::remove_dir_all(&root)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("best-effort test directory cleanup: {error}");
+        }
     }
 
     #[test]
@@ -469,7 +562,37 @@ mod tests {
         assert!(root.join(DB_FILE).exists());
         assert!(root.join(DB_WAL).exists());
         assert!(!new_dir.join(DB_WAL).exists());
-        let _ = fs::remove_dir_all(&root);
+
+        if let Err(error) = fs::remove_dir_all(&root)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("best-effort test directory cleanup: {error}");
+        }
+    }
+
+    #[test]
+    fn fresh_db_left_by_failed_rename_is_replaced_on_retry() {
+        let root = fresh_root("retry_sentinel");
+        let new_dir = root.join("portable_data");
+        write(&root.join(DB_FILE), "old-db");
+        write(&root.join("settings.json"), "old-settings");
+        // 上次启动：主库 rename 失败 → 哨兵，引擎随后自建空库与空目录。
+        write(&new_dir.join(super::DB_MIGRATION_PENDING), "");
+        write(&new_dir.join(DB_FILE), "empty-db");
+        fs::create_dir_all(new_dir.join("plugins")).unwrap();
+        fs::create_dir_all(root.join("plugins")).unwrap();
+        write(&root.join("plugins").join("a.js"), "x");
+        let failures = migrate_portable_layout(&root, &new_dir);
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(fs::read_to_string(new_dir.join(DB_FILE)).unwrap(), "old-db");
+        assert!(new_dir.join("plugins").join("a.js").exists());
+        assert!(!new_dir.join(super::DB_MIGRATION_PENDING).exists());
+
+        if let Err(error) = fs::remove_dir_all(&root)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("best-effort test directory cleanup: {error}");
+        }
     }
 
     #[test]
@@ -482,6 +605,11 @@ mod tests {
         assert!(content.contains("[便携迁移] boom"), "{content}");
         // 不得预创建 logs/ 目录（会让下次启动误判 logs 已迁移）。
         assert!(!new_dir.join("logs").exists());
-        let _ = fs::remove_dir_all(&root);
+
+        if let Err(error) = fs::remove_dir_all(&root)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("best-effort test directory cleanup: {error}");
+        }
     }
 }

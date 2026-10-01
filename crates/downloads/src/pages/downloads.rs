@@ -24,11 +24,12 @@ use crate::{
         DownloadFilter, DownloadStatusFilter, RowKey, SidebarSection, SidebarSelection,
         StatusFolderMotion, TaskState,
         file_rescan::{RescanDecision, RescanThrottle},
+        refresh_gate::{RefreshGate, RefreshPlan, RefreshTrigger},
         view_prefs::{DetailPlacement, VIEW_PREFS_KEY, ViewGroupBy, ViewPrefs},
     },
     pages::new_download::{NewDownloadContext, build_new_download_context},
     pages::task_detail::TaskDetailView,
-    strings::DownloadStrings,
+    strings::{DownloadStrings, error_text},
     submission::{NewDownloadSubmission, SubmitNotice, run_submission},
 };
 use fluxdown_ui_components::{ControlExt as _, FluxIcon};
@@ -147,6 +148,10 @@ pub struct DownloadView {
     pub(crate) content_left: Pixels,
     /// 文件跟踪重扫节流（主窗口获焦触发）。
     file_rescan: RescanThrottle,
+    /// 事件驱动刷新的合并闸门（≤30Hz、同批事件一次刷新）。
+    refresh_gate: RefreshGate,
+    /// 上次刷新时存储的行布局计数；与当前不同说明行 ID 可能已指向别的任务。
+    refreshed_structure: u64,
 }
 
 impl DownloadView {
@@ -253,6 +258,8 @@ impl DownloadView {
             selection_summary: Cell::new(SelectionSummary::default()),
             content_left: px(0.),
             file_rescan: RescanThrottle::default(),
+            refresh_gate: RefreshGate::default(),
+            refreshed_structure: u64::MAX,
         }
     }
 
@@ -365,9 +372,7 @@ impl DownloadView {
         self.reconcile_sidebar_selection();
         self.last_error = (!snapshot.daemon_connected).then(|| self.strings.disconnected.clone());
         self.load_view_prefs(cx);
-        self.sync_delegate_context(cx);
-        self.refresh_tasks(cx);
-        self.sync_detail_panel(cx);
+        self.refresh_from_store(cx);
     }
 
     pub fn apply_event(&mut self, event: &fluxdown_protocol::ServiceEvent, cx: &mut Context<Self>) {
@@ -398,13 +403,12 @@ impl DownloadView {
                         | fluxdown_protocol::AgentEvent::CloudDevicesChanged(_)
                         | fluxdown_protocol::AgentEvent::LinkedDevicesChanged(_)
                         | fluxdown_protocol::AgentEvent::SessionChanged(_)
+                        | fluxdown_protocol::AgentEvent::PreferencesChanged(_)
                 )
             ) {
                 self.reconcile_sidebar_selection();
             }
-            self.sync_delegate_context(cx);
-            self.refresh_tasks(cx);
-            self.sync_detail_panel(cx);
+            self.schedule_table_refresh(cx);
         } else {
             cx.notify();
         }
@@ -422,6 +426,18 @@ impl DownloadView {
                     .any(|queue| &queue.queue_id == queue_id) =>
             {
                 self.selected_item = SidebarSelection::Download(DownloadFilter::ALL);
+            }
+            SidebarSelection::Download(DownloadFilter {
+                status,
+                category: Some(category),
+            }) if !self.controller.categories().rules().is_empty()
+                && !self
+                    .controller
+                    .categories()
+                    .visible()
+                    .any(|rule| rule.dto.id == *category) =>
+            {
+                self.selected_item = SidebarSelection::Download(DownloadFilter::status(*status));
             }
             SidebarSelection::Device(id)
                 if id != SidebarSelection::LOCAL_DEVICE
@@ -545,6 +561,54 @@ impl DownloadView {
         cx.notify();
     }
 
+    /// 任务 / 上下文变化后立即把存储同步进表格、侧栏与详情面板。
+    fn refresh_from_store(&mut self, cx: &mut Context<Self>) {
+        self.sync_delegate_context(cx);
+        self.refresh_tasks(cx);
+        self.sync_detail_panel(cx);
+        self.refreshed_structure = self.controller.store().structure_generation();
+        self.refresh_gate.flushed(Instant::now());
+    }
+
+    /// 事件使表格数据过期：按 [`RefreshGate`] 合并成一次刷新（同批事件之后、≤30Hz），
+    /// 而不是每条事件都全量重算可见行。
+    fn schedule_table_refresh(&mut self, cx: &mut Context<Self>) {
+        let structural = self.controller.store().structure_generation() != self.refreshed_structure;
+        match self.refresh_gate.mark(structural, Instant::now()) {
+            RefreshPlan::Nothing => {}
+            RefreshPlan::Deferred => {
+                let this = cx.weak_entity();
+                cx.defer(move |cx| {
+                    let Ok(()) = this.update(cx, |this, cx| {
+                        this.run_scheduled_refresh(RefreshTrigger::Deferred, cx);
+                    }) else {
+                        // 下载页已释放，结束回调，不再提交请求或刷新状态。
+                        return;
+                    };
+                });
+            }
+            RefreshPlan::After(delay) => {
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(delay).await;
+
+                    let Ok(()) = this.update(cx, |this, cx| {
+                        this.run_scheduled_refresh(RefreshTrigger::Timer, cx);
+                    }) else {
+                        // 下载页已释放，结束回调，不再提交请求或刷新状态。
+                        return;
+                    };
+                })
+                .detach();
+            }
+        }
+    }
+
+    fn run_scheduled_refresh(&mut self, trigger: RefreshTrigger, cx: &mut Context<Self>) {
+        if self.refresh_gate.take(trigger, Instant::now()) {
+            self.refresh_from_store(cx);
+        }
+    }
+
     pub(crate) fn select_sidebar_item(
         &mut self,
         selection: SidebarSelection,
@@ -575,20 +639,6 @@ impl DownloadView {
         cx: &mut Context<Self>,
     ) {
         match event {
-            TableEvent::RightClickedRow(Some(row_ix)) => {
-                // 注意：这里不调用 `set_right_clicked_row(None, ..)`——该方法专为
-                // 「打开表头菜单时抑制同时出现的行菜单」设计（见其文档），若在
-                // 行右键后立即清空，会在 gpui-component 内部 `window.defer` 读取
-                // `right_clicked_row` 构建菜单之前把它清掉，导致右键菜单永远不
-                // 会出现。这里只需要更新选中集合，行高亮 / 菜单锚点交给表格自身
-                // 维护的 `right_clicked_row` 状态。
-                let row_ix = *row_ix;
-                table_state.update(cx, |table, _| {
-                    if let Some(key) = table.delegate().row_key_at(row_ix) {
-                        table.delegate_mut().select_task_for_context_menu(key);
-                    }
-                });
-            }
             TableEvent::ColumnWidthsChanged(widths) => {
                 table_state.update(cx, |table, _| {
                     table.delegate_mut().sync_column_widths(widths);
@@ -677,10 +727,14 @@ impl DownloadView {
             RescanDecision::After(delay) => {
                 cx.spawn(async move |this, cx| {
                     cx.background_executor().timer(delay).await;
-                    let _ = this.update(cx, |this, cx| {
+
+                    let Ok(()) = this.update(cx, |this, cx| {
                         this.file_rescan.trailing_fired(Instant::now());
                         this.send_file_rescan(cx);
-                    });
+                    }) else {
+                        // 下载页已释放，结束回调，不再提交请求或刷新状态。
+                        return;
+                    };
                 })
                 .detach();
             }
@@ -700,7 +754,13 @@ impl DownloadView {
         let future = self.controller.execute(DownloadsCommand::RescanFiles);
         cx.background_executor()
             .spawn(async move {
-                let _ = future.await;
+                if let Err(error) = future.await {
+                    // 后台定时扫描仍会兜底，不覆盖页面现有业务错误。
+                    eprintln!(
+                        "download file rescan request failed: {:?} ({:?})",
+                        error.code, error.reason
+                    );
+                }
             })
             .detach();
     }
@@ -792,7 +852,8 @@ impl DownloadView {
             if marker.get() != generation {
                 return;
             }
-            let _ = this.update(cx, |this, cx| {
+
+            let Ok(()) = this.update(cx, |this, cx| {
                 let value = this.table_state.update(cx, |table, _| {
                     let delegate = table.delegate_mut();
                     let columns = delegate.column_prefs();
@@ -807,11 +868,28 @@ impl DownloadView {
                         key: VIEW_PREFS_KEY,
                         value,
                     });
-                cx.background_spawn(async move {
-                    let _ = future.await;
+                cx.spawn(async move |this, cx| {
+                    if let Err(error) = future.await {
+                        let Ok(()) = this.update(cx, |this, cx| {
+                            if this.prefs_generation.get() == generation {
+                                this.applied_view_prefs = None;
+                            }
+                            this.last_error = Some(SharedString::from(error_text(
+                                this.translator.read(cx),
+                                &error,
+                            )));
+                            cx.notify();
+                        }) else {
+                            // 下载页已关闭，停止回写偏好保存结果。
+                            return;
+                        };
+                    }
                 })
                 .detach();
-            });
+            }) else {
+                // 下载页已释放，结束回调，不再提交请求或刷新状态。
+                return;
+            };
         })
         .detach();
     }
@@ -849,7 +927,8 @@ impl DownloadView {
             if marker.get() != generation {
                 return;
             }
-            let _ = this.update(cx, |this, cx| {
+
+            let Ok(()) = this.update(cx, |this, cx| {
                 let query = input.read(cx).value().to_string();
                 this.table_state.update(cx, |table, cx| {
                     table.delegate_mut().set_query(&query);
@@ -857,7 +936,10 @@ impl DownloadView {
                         table.refresh(cx);
                     }
                 });
-            });
+            }) else {
+                // 下载页已释放，结束回调，不再提交请求或刷新状态。
+                return;
+            };
         })
         .detach();
     }
@@ -948,13 +1030,14 @@ impl DownloadView {
                         return false;
                     }
                     let task_id = task_id.clone();
-                    let _ = this.update(cx, |this, cx| {
+                    // 页面释放后没有提交命令，不能让确认框报告成功。
+                    this.update(cx, |this, cx| {
                         this.execute_commands(
                             vec![DownloadsCommand::Rename { task_id, file_name }],
                             cx,
                         );
-                    });
-                    true
+                    })
+                    .is_ok()
                 })
         });
         input.update(cx, |state, cx| state.focus(window, cx));
@@ -986,13 +1069,14 @@ impl DownloadView {
                 ))
                 .on_ok(move |_, _, cx| {
                     let task_id = task_id.clone();
-                    let _ = this.update(cx, |this, cx| {
+                    // 页面释放后没有提交命令，不能让确认框报告成功。
+                    this.update(cx, |this, cx| {
                         this.execute_commands(
                             vec![DownloadsCommand::IgnorePluginRetry { task_id }],
                             cx,
                         );
-                    });
-                    true
+                    })
+                    .is_ok()
                 })
         });
     }
@@ -1114,7 +1198,8 @@ impl DownloadView {
                 ))
                 .on_ok(move |_, _, cx| {
                     let group_id = group_id.clone();
-                    let _ = this.update(cx, |this, cx| {
+                    // 页面释放后没有提交命令，不能让确认框报告成功。
+                    this.update(cx, |this, cx| {
                         this.execute_commands(
                             vec![DownloadsCommand::GroupDelete {
                                 group_id,
@@ -1122,8 +1207,8 @@ impl DownloadView {
                             }],
                             cx,
                         );
-                    });
-                    true
+                    })
+                    .is_ok()
                 })
         });
     }
@@ -1139,8 +1224,9 @@ impl DownloadView {
         }
     }
 
-    /// 拖放导入：`.torrent` 直接建任务；`.txt`/`.url`/`.list`（≤1MB）按行提取
-    /// 受支持的链接后打开新建下载窗口预填；其他文件类型提示不支持。
+    /// 拖放导入：`.torrent` 按用户主动打开处理（走 BT 文件选择后建任务）；
+    /// `.txt`/`.url`/`.list`（≤1MB）按行提取
+    /// 受支持的链接后打开新建下载窗口预填（窗口已开则追加进表单）；其他文件类型提示不支持。
     fn on_paths_dropped(
         &mut self,
         paths: &ExternalPaths,
@@ -1156,9 +1242,7 @@ impl DownloadView {
                 .and_then(|ext| ext.to_str())
                 .map(str::to_ascii_lowercase);
             match ext.as_deref() {
-                Some("torrent") => torrent_commands.push(DownloadsCommand::SubmitTorrentFile {
-                    path: path.display().to_string(),
-                }),
+                Some("torrent") => torrent_commands.push(DownloadsCommand::open_torrent_file(path)),
                 Some("txt" | "url" | "list") => match read_drop_text_file(path) {
                     Some(text) => urls.extend(parse_drop_urls(&text)),
                     None => unsupported = true,
@@ -1286,11 +1370,12 @@ impl DownloadView {
                     cx,
                 ))
                 .on_ok(move |_, _, cx| {
-                    let _ = this.update(cx, |this, cx| {
+                    // 页面释放后没有提交命令，不能让确认框报告成功。
+                    this.update(cx, |this, cx| {
                         let commands = this.delete_commands(&keys, true);
                         this.execute_commands(commands, cx);
-                    });
-                    true
+                    })
+                    .is_ok()
                 })
         });
     }
@@ -1480,11 +1565,13 @@ impl DownloadView {
                         .and_then(|ext| ext.to_str())
                         .is_some_and(|ext| ext.eq_ignore_ascii_case("torrent"))
                 })
-                .map(|path| DownloadsCommand::SubmitTorrentFile {
-                    path: path.display().to_string(),
-                })
+                .map(|path| DownloadsCommand::open_torrent_file(&path))
                 .collect();
-            let _ = this.update(cx, |this, cx| this.execute_commands(commands, cx));
+
+            let Ok(()) = this.update(cx, |this, cx| this.execute_commands(commands, cx)) else {
+                // 下载页已释放，结束回调，不再提交请求或刷新状态。
+                return;
+            };
         })
         .detach();
     }

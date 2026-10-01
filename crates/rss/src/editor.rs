@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use fluxdown_protocol::{
-    QueueDto, RpcErrorData, RssSourceDto, RssValidateRequest, RssValidateResponse, method,
+    ApplicationErrorCode, QueueDto, RpcErrorData, RssSourceDto, RssValidateRequest,
+    RssValidateResponse, method,
 };
 use fluxdown_ui_components::{
     ControlExt as _, FluxIcon, card, dialog_scroll_body, dialog_title, field_error, field_hint,
@@ -289,7 +290,8 @@ impl Editor {
         let future = self.port.call(method::DAEMON_RSS_VALIDATE, params);
         cx.spawn(async move |this, cx| {
             let result = future.await;
-            let _ = this.update(cx, |this, cx| {
+
+            let Ok(()) = this.update(cx, |this, cx| {
                 this.validating = false;
                 // 编辑过程中即使旧请求晚到，也不接受与当前输入不同的结果。
                 if !same_request(&this.request(cx), &request) {
@@ -309,10 +311,15 @@ impl Editor {
                         Ok(response) => this.error = Some(response.error),
                         Err(error) => this.error = Some(error.to_string()),
                     },
-                    Err(error) => this.error = Some(rpc_error(&error)),
+                    Err(error) => {
+                        this.error = Some(rpc_error(this.translator.read(cx), &error));
+                    }
                 }
                 cx.notify();
-            });
+            }) else {
+                // 订阅视图已释放，结束回调，不再提交后续操作。
+                return;
+            };
         })
         .detach();
     }
@@ -435,16 +442,20 @@ impl Editor {
         let future = self.port.call(method, params);
         cx.spawn_in(window, async move |this, cx| {
             let result = future.await;
-            let _ = this.update_in(cx, |this, window, cx| {
+
+            let Ok(()) = this.update_in(cx, |this, window, cx| {
                 this.saving = false;
                 match result {
                     Ok(_) => window.close_dialog(cx),
                     Err(error) => {
-                        this.error = Some(rpc_error(&error));
+                        this.error = Some(rpc_error(this.translator.read(cx), &error));
                         cx.notify();
                     }
                 }
-            });
+            }) else {
+                // 编辑器或窗口已释放，停止回写异步结果。
+                return;
+            };
         })
         .detach();
     }
@@ -466,14 +477,18 @@ impl Editor {
                 Ok(Ok(Some(paths))) => paths.first().map(|path| path.display().to_string()),
                 _ => None,
             };
-            let _ = this.update_in(cx, |this, window, cx| {
+
+            let Ok(()) = this.update_in(cx, |this, window, cx| {
                 this.picking_dir = false;
                 if let Some(path) = picked {
                     this.save_dir
                         .update(cx, |input, cx| input.set_value(path, window, cx));
                 }
                 cx.notify();
-            });
+            }) else {
+                // 编辑器或窗口已释放，停止回写异步结果。
+                return;
+            };
         })
         .detach();
     }
@@ -537,10 +552,14 @@ impl Editor {
                     let value = value.clone();
                     menu.item(PopupMenuItem::new(label.clone()).on_click(move |_, _, cx| {
                         let value = value.clone();
-                        let _ = this.update(cx, |this, cx| {
+
+                        let Ok(()) = this.update(cx, |this, cx| {
                             on_select(this, value);
                             cx.notify();
-                        });
+                        }) else {
+                            // 订阅视图已释放，结束回调，不再提交后续操作。
+                            return;
+                        };
                     }))
                 })
             })
@@ -559,10 +578,14 @@ impl Editor {
                 let Some(tab) = TABS.get(index).copied() else {
                     return;
                 };
-                let _ = this.update(cx, |this, cx| {
+
+                let Ok(()) = this.update(cx, |this, cx| {
                     this.tab = tab;
                     cx.notify();
-                });
+                }) else {
+                    // 订阅视图已释放，结束回调，不再提交后续操作。
+                    return;
+                };
             },
             cx,
         )
@@ -691,7 +714,7 @@ impl Editor {
                 },
                 cx,
             ),
-            None,
+            Some(self.t("rssIntervalHint", cx)),
             cx,
         );
         let queue_field = form_field(
@@ -923,10 +946,22 @@ fn same_request(a: &RssValidateRequest, b: &RssValidateRequest) -> bool {
         && a.proxy_url == b.proxy_url
 }
 
-fn rpc_error(error: &RpcErrorData) -> String {
+fn rpc_error(translator: &Translator, error: &RpcErrorData) -> String {
+    // agent 端口不透传服务端 message：按错误码给本地化文案，字段错误附带字段名。
+    let key = match error.code {
+        ApplicationErrorCode::Unavailable | ApplicationErrorCode::Timeout => {
+            "localServiceDisconnected"
+        }
+        ApplicationErrorCode::InvalidArgument | ApplicationErrorCode::NotFound => {
+            "localServiceInvalidArgument"
+        }
+        ApplicationErrorCode::Conflict => "localServiceConflict",
+        _ => "localServiceActionFailed",
+    };
+    let text = translator.text(key);
     match &error.field {
-        Some(field) => format!("{:?}: {field}", error.code),
-        None => format!("{:?}", error.code),
+        Some(field) => format!("{text} ({field})"),
+        None => text.to_owned(),
     }
 }
 

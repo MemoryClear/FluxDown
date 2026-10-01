@@ -21,6 +21,9 @@ export const METHOD = {
   DAEMON_TASK_RESUME_ALL: 'daemon.task.resumeAll',
   DAEMON_TASK_RESCAN: 'daemon.task.rescan',
   DAEMON_TASK_SET_SEED_LIMITS: 'daemon.task.setSeedLimits',
+  DAEMON_TASK_PAUSE_MANY: 'daemon.task.pauseMany',
+  DAEMON_TASK_RESUME_MANY: 'daemon.task.resumeMany',
+  DAEMON_TASK_DELETE_MANY: 'daemon.task.deleteMany',
 
   DAEMON_QUEUE_LIST: 'daemon.queue.list',
   DAEMON_QUEUE_CREATE: 'daemon.queue.create',
@@ -99,6 +102,10 @@ export const METHOD = {
   DAEMON_ED2K_SERVER_SUBSCRIPTION_REFRESH: 'daemon.ed2k.serverSubscription.refresh',
   DAEMON_DIAGNOSTICS_DESCRIBE: 'daemon.diagnostics.describe',
   DAEMON_DIAGNOSTICS_PREPARE_LOG_EXPORT: 'daemon.diagnostics.prepareLogExport',
+  /** agent Doctor 专用：daemon 内真实写入下载 / 数据目录并运行外部组件。 */
+  DAEMON_DIAGNOSTICS_PROBE: 'daemon.diagnostics.probe',
+  /** agent Doctor 专用：补上托管组件缺失的执行权限并重新探测。 */
+  DAEMON_DIAGNOSTICS_FIX_COMPONENT: 'daemon.diagnostics.fixComponent',
   DAEMON_MIGRATION_LINK_EXPORT: 'daemon.migration.linkExport',
   DAEMON_MIGRATION_LINK_ACK: 'daemon.migration.linkAck',
   DAEMON_MIGRATION_GATEWAY_EXPORT: 'daemon.migration.gatewayExport',

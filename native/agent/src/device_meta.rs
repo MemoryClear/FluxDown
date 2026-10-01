@@ -96,7 +96,7 @@ impl DeviceMetaService {
         DeviceMeta {
             default_save_dir: effective_default_dir(configured.as_deref(), os_download_dir),
             path_style: PathStyle::current(),
-            app_version: env!("CARGO_PKG_VERSION"),
+            app_version: fluxdown_protocol::APP_VERSION,
         }
     }
 
@@ -227,9 +227,7 @@ mod tests {
         let app = Router::new()
             .route("/api/v1/devices/current", patch(record))
             .with_state(reports.clone());
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
 
         let dir = std::env::temp_dir().join(format!(
             "fluxdown_device_meta_{}_{}",
@@ -273,7 +271,7 @@ mod tests {
 
         let first = reports_reach(&reports, 1).await;
         assert_eq!(first[0]["defaultSaveDir"], "/srv/first");
-        assert_eq!(first[0]["appVersion"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(first[0]["appVersion"], fluxdown_protocol::APP_VERSION);
         assert!(matches!(
             first[0]["pathStyle"].as_str(),
             Some("windows" | "posix")
@@ -295,7 +293,17 @@ mod tests {
 
         cancel.cancel();
         worker.await.expect("join worker");
+        server.abort();
+        match server.await {
+            Ok(result) => result.expect("device metadata mock server completes successfully"),
+            Err(error) if error.is_cancelled() => {
+                tracing::debug!("device metadata mock server stopped")
+            }
+            Err(error) => panic!("device metadata mock server panicked: {error}"),
+        }
         drop(store);
-        let _ = tokio::fs::remove_dir_all(dir).await;
+        if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
+            tracing::warn!(path = %dir.display(), %error, "device metadata test cleanup failed");
+        }
     }
 }

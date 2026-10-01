@@ -43,6 +43,12 @@ impl DaemonEventHub {
         }
     }
 
+    /// 只订阅增量广播（不克隆快照）；滞后时接收者自行按 [`Self::snapshot`] 复核。
+    #[must_use]
+    pub fn subscribe(&self) -> broadcast::Receiver<EventFrame> {
+        self.events.subscribe()
+    }
+
     /// 先订阅广播，再原子克隆快照；调用方丢弃不大于快照 sequence 的帧。
     #[must_use]
     pub fn subscribe_and_snapshot(&self) -> (broadcast::Receiver<EventFrame>, Snapshot) {
@@ -86,6 +92,17 @@ impl DaemonEventHub {
         }
     }
 
+    /// 更新「等待自动重试」任务数；数值不变不发布。
+    pub fn set_retry_pending_tasks(&self, count: u32) {
+        let mut state = lock_or_recover(&self.state);
+        if state.snapshot.runtime_stats.retry_pending_tasks == count {
+            return;
+        }
+        let mut stats = state.snapshot.runtime_stats.clone();
+        stats.retry_pending_tasks = count;
+        self.publish_locked(&mut state, DaemonEvent::RuntimeStatsChanged(stats));
+    }
+
     fn publish_locked(&self, state: &mut EventState, event: DaemonEvent) -> EventFrame {
         apply_daemon_event(&mut state.snapshot, &event);
         apply_runtime_stats(state, &event);
@@ -96,7 +113,10 @@ impl DaemonEventHub {
             event: ServiceEvent::Daemon(event),
         };
         // 与序号递增处于同一临界区，接收者不会收到乱序帧。
-        let _ = self.events.send(frame.clone());
+        // 无订阅者是正常空闲状态，不克隆帧或逐条记录进度日志。
+        if self.events.receiver_count() != 0 && self.events.send(frame.clone()).is_err() {
+            tracing::trace!("daemon event subscribers disconnected before publish");
+        }
         frame
     }
 
@@ -207,6 +227,10 @@ impl fluxdown_engine::events::EventSink for DaemonEngineEventSink {
                 self.0.publish(DaemonEvent::TaskActivityAdded(
                     fluxdown_engine_protocol::task_activity_to_dto(activity),
                 ));
+                return;
+            }
+            EngineEvent::RetryPendingChanged { count } => {
+                self.0.set_retry_pending_tasks(count);
                 return;
             }
             _ => {}
@@ -568,6 +592,36 @@ mod tests {
             panic!("deliveries must use the domain event consumed by live settings");
         };
         assert_eq!(deliveries[0].delivery_id, "delivery-1");
+    }
+
+    #[test]
+    fn retry_pending_count_reaches_runtime_stats_once_per_change() {
+        let hub = DaemonEventHub::new(DaemonSnapshot::default(), 8);
+        let (mut subscriber, _) = hub.subscribe_and_snapshot();
+        let sink = DaemonEngineEventSink(hub.clone());
+        sink.emit(EngineEvent::RetryPendingChanged { count: 2 });
+        sink.emit(EngineEvent::RetryPendingChanged { count: 2 });
+        let frame = subscriber.try_recv().expect("a changed count is published");
+        let fluxdown_protocol::ServiceEvent::Daemon(DaemonEvent::RuntimeStatsChanged(stats)) =
+            frame.event
+        else {
+            panic!("retry-pending count travels in the runtime stats projection");
+        };
+        assert_eq!(stats.retry_pending_tasks, 2);
+        assert!(
+            subscriber.try_recv().is_err(),
+            "an unchanged count must not be republished"
+        );
+        let SnapshotBody::Daemon(snapshot) = hub.snapshot().body else {
+            panic!("daemon snapshot expected");
+        };
+        assert_eq!(snapshot.runtime_stats.retry_pending_tasks, 2);
+
+        sink.emit(EngineEvent::RetryPendingChanged { count: 0 });
+        let SnapshotBody::Daemon(snapshot) = hub.snapshot().body else {
+            panic!("daemon snapshot expected");
+        };
+        assert_eq!(snapshot.runtime_stats.retry_pending_tasks, 0);
     }
 
     #[test]

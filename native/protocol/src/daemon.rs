@@ -90,6 +90,11 @@ pub struct DaemonRuntimeStatsDto {
     pub total_upload_bps: i64,
     pub disk_free_bytes: Option<u64>,
     pub save_dir: String,
+    /// 「等待自动重试」的任务数：自动重试 / 备用链路 / 插件重试已排程、尚未重新派发。
+    /// 这些任务在任务表里仍是失败状态，`activeTasks` / `pendingTasks` 看不到它们；
+    /// 「完成后关机」「空闲退出」等联动必须把它们算作仍有工作。
+    #[serde(default)]
+    pub retry_pending_tasks: u32,
 }
 
 /// daemon 托管组件标识。
@@ -138,6 +143,30 @@ pub struct DaemonCreateTaskParams {
     pub torrent_blob_id: Option<String>,
     #[serde(default)]
     pub unattended: bool,
+    /// 调用方已知的文件大小（字节，`>0` 才生效；缺省 / 非正数 = 未知）。
+    /// 浏览器扩展对一次性 URL 已拿到 Content-Length 时透传，引擎据此创建任务。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint_file_size: Option<i64>,
+}
+
+/// 批量任务操作参数（`daemon.task.pauseMany` / `daemon.task.resumeMany`）。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct DaemonTaskIdsParams {
+    #[serde(default)]
+    pub task_ids: Vec<String>,
+}
+
+/// `daemon.task.deleteMany` 参数。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct DaemonDeleteTasksParams {
+    #[serde(default)]
+    pub task_ids: Vec<String>,
+    #[serde(default)]
+    pub delete_files: bool,
 }
 
 /// CDN 样本的持久化租约。
@@ -342,6 +371,9 @@ pub struct TaskDto {
     /// 候选来源后缀 `:system`/`:manual`）；空 = 非 Auto 模式。
     #[serde(default)]
     pub auto_route: String,
+    /// 加速来源累计字节（多 CDN / 智能代理 / 多网卡）；源站 = 已下载 − 三者之和。
+    #[serde(default)]
+    pub source_bytes: crate::TaskSourceBytesDto,
     /// 队列内启动顺序（0 = 未显式排序，按创建时间；>0 = 显式顺序）。
     #[serde(default)]
     pub queue_order: i32,
@@ -374,6 +406,9 @@ pub struct TaskDto {
     /// 任务级不活跃做种时长上限（分钟）。哨兵语义同上。
     #[serde(default = "default_seed_limit_inherit")]
     pub seed_inactive_time_limit_minutes: i64,
+    /// 任务级做种上传限速（字节/秒），0 = 未设置（跟随全局）。
+    #[serde(default)]
+    pub seed_upload_limit_bps: i64,
 }
 
 /// 命名队列信息（`GET /api/v1/queues` 响应）。
@@ -748,6 +783,10 @@ pub struct MarketEntryDto {
 #[serde(rename_all = "camelCase")]
 pub struct MarketInstallRequest {
     pub plugin_id: String,
+    /// 用户确认权限时看到的版本；最新可装版本与之不一致时拒绝安装（`Conflict`），
+    /// 由客户端刷新目录后重新确认。缺省 = 不钉版本。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -927,17 +966,25 @@ pub struct LinkPingInfo {
 }
 
 /// 配对 `hello` 请求（发起方 → 响应方）。全部密钥/签名字段为 base64。
+///
+/// 配对协议版本 2：发起方在这一步只交出临时公钥与随机数的**承诺**，临时公钥本身
+/// 要等响应方回出自己的临时值之后才在 `pair/reveal` 里揭示。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct LinkPairHelloRequest {
+    /// 发起方的配对协议版本。旧版发起方没有这个字段（按 0 处理），与响应方版本不一致
+    /// 一律以版本不兼容拒绝。
+    #[serde(default)]
+    pub protocol_version: u32,
     /// 一次性配对码（响应方 UI 展示、用户手输）。
     pub code: String,
-    /// 发起方临时 X25519 公钥（base64）。
-    pub initiator_eph_pub: String,
     /// 发起方 Ed25519 身份公钥（base64）。
     pub initiator_id_pub: String,
-    /// 发起方对握手转录的 Ed25519 签名（base64）。
+    /// 发起方临时 X25519 公钥与随机数的承诺 `sha256(eph_pub || nonce)`（base64）。
+    #[serde(default)]
+    pub initiator_commit: String,
+    /// 发起方对 hello（码、身份公钥、承诺、自报信息）的 Ed25519 签名（base64）。
     pub initiator_sig: String,
     /// 发起方展示名。
     pub name: String,
@@ -952,22 +999,48 @@ pub struct LinkPairHelloRequest {
     pub initiator_addrs: Vec<String>,
 }
 
-/// 配对 `hello` 回复（响应方 → 发起方）。
+/// 配对 `hello` 回复（响应方 → 发起方）：本次会话全新的临时公钥与随机数。不含 SAS
+/// 与签名——响应方此刻还看不到发起方的临时公钥，两者都在 `pair/reveal` 之后才产生。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct LinkPairHelloResponse {
+    /// 响应方的配对协议版本。
+    pub protocol_version: u32,
     pub session_id: String,
+    /// 响应方本次会话的临时 X25519 公钥（base64）。
     pub responder_eph_pub: String,
+    /// 响应方本次会话的随机数（base64）。
+    pub responder_nonce: String,
     pub responder_id_pub: String,
-    pub responder_sig: String,
     pub name: String,
     #[serde(default)]
     pub platform: String,
     #[serde(default)]
     pub app_version: String,
-    /// 供响应方本地展示的 SAS（应与发起方计算一致）。
-    pub sas: String,
+}
+
+/// 配对 `reveal` 请求（发起方 → 响应方）：揭示 `hello` 里承诺过的临时公钥与随机数。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct LinkPairRevealRequest {
+    /// `pair/hello` 回复里的会话 id。
+    pub session_id: String,
+    /// 发起方临时 X25519 公钥（base64）。
+    pub initiator_eph_pub: String,
+    /// 发起方随机数（base64）。
+    pub initiator_nonce: String,
+}
+
+/// 配对 `reveal` 回复（响应方 → 发起方）：响应方对完整握手转录的 Ed25519 签名。SAS
+/// 不上线，两端各自在本机屏幕上展示。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct LinkPairRevealResponse {
+    /// 响应方对完整转录的 Ed25519 签名（base64）。
+    pub responder_sig: String,
 }
 
 /// 配对 `confirm` 请求：SAS 核对后确认/拒绝。
@@ -1644,7 +1717,7 @@ pub enum WsServerMsg {
     /// 只在 approve 的 onSuccess 里 refetch 名册会读到还没写入新设备的
     /// 陈旧快照，且没有其它机制能纠正它，靠这条消息触发前端重新拉取。
     LinkDevicesChanged {},
-    /// 投递日志快照（新→旧，最多 100 条）。任务真完成时的投递、以及
+    /// 投递日志增量（新→旧，单次最多 100 条，按 `deliveryId` 合并）。任务真完成时的投递、以及
     /// 「模拟一次下载完成」都发生在前端拉过快照之后——没有这条推送，打开着
     /// 的日志面板就停在打开时的样子。引擎侧已按 500ms 节流。
     WebhookDeliveriesChanged { deliveries: Vec<WebhookDeliveryDto> },
@@ -2070,6 +2143,134 @@ pub struct InstallFfmpegRequest {
 }
 
 // ---------------------------------------------------------------------------
+// Doctor 动态探测（`daemon.diagnostics.probe`）
+// ---------------------------------------------------------------------------
+
+/// 存储探测目录的用途。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StorageProbeRole {
+    /// 全局默认保存目录（`default_save_dir`；未配置时为系统下载目录）。
+    DefaultSaveDir,
+    /// 队列的默认保存目录。
+    Queue,
+    /// RSS 源的保存目录。
+    Rss,
+    /// 分类保存目录（agent 偏好，经 [`DiagnosticsProbeParams::extra_dirs`] 传入）。
+    Category,
+    /// daemon 数据目录（下载数据库、BT 会话、托管组件、日志）。
+    DataDir,
+}
+
+/// 待探测的目录。daemon 自己持有的目录（默认 / 队列 / RSS / 数据目录）由 daemon 收集，
+/// 调用方只追加 daemon 不知道的目录。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageProbeTarget {
+    pub role: StorageProbeRole,
+    /// 展示用名称（队列名 / RSS 源名 / 分类名）；默认目录与数据目录为空。
+    #[serde(default)]
+    pub label: String,
+    pub path: String,
+}
+
+/// `daemon.diagnostics.probe` 参数。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticsProbeParams {
+    #[serde(default)]
+    pub extra_dirs: Vec<StorageProbeTarget>,
+}
+
+/// 存储探测失败的分类（由 IO 错误种类归并，决定 UI 给出的处理建议）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StorageProbeFailure {
+    /// 无权限（含 macOS 隐私授权 / TCC 拒绝、ACL、属主不符）。
+    PermissionDenied,
+    /// 只读文件系统 / 只读挂载。
+    ReadOnly,
+    /// 磁盘或配额已满。
+    NoSpace,
+    /// 路径及其所有上级目录都不存在（如未挂载的移动硬盘 / 网络盘）。
+    Missing,
+    /// 路径（或最近的已存在上级）不是目录。
+    NotDirectory,
+    /// 探测在时限内未完成（常见于失联的网络挂载）。
+    Timeout,
+    /// 其它 IO 错误或读回内容不一致。
+    Other,
+}
+
+/// 单个目录的动态写入探测结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageProbeDto {
+    pub role: StorageProbeRole,
+    #[serde(default)]
+    pub label: String,
+    pub path: String,
+    /// 目标目录已存在；不存在时在最近的已存在上级目录上探测（首次下载时会自动创建）。
+    pub exists: bool,
+    /// 实际执行写入探测的目录；找不到可用上级时为空。
+    #[serde(default)]
+    pub probed_dir: String,
+    /// 失败的步骤（`create` / `write` / `sync` / `read` / `rename` / `remove` / `stat`）；通过时为空。
+    #[serde(default)]
+    pub failed_step: String,
+    /// 通过时为 `None`。
+    #[serde(default)]
+    pub failure: Option<StorageProbeFailure>,
+    /// 原始错误描述；通过时为空。
+    #[serde(default)]
+    pub error: String,
+    /// 探测目录所在卷的可用空间；无法获取时为 `None`。
+    #[serde(default)]
+    pub available_bytes: Option<u64>,
+    /// 失败时的系统错误码（`EACCES`=13 / `EPERM`=1 / Windows `ERROR_ACCESS_DENIED`=5 …）；
+    /// 同为「无权限」时据此区分属主 / ACL 问题与 macOS 隐私授权（TCC）拒绝。
+    #[serde(default)]
+    pub os_error: Option<i32>,
+}
+
+/// 外部组件（ffmpeg / ffprobe / yt-dlp）的实际运行探测结果。只报告已解析到路径的组件。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentProbeDto {
+    /// `ffmpeg` / `ffprobe` / `yt-dlp`。
+    pub name: String,
+    pub path: String,
+    /// 版本输出首行；失败时为空。
+    #[serde(default)]
+    pub output: String,
+    /// 启动被拒（`permissionDenied`）等失败的根因描述；可运行时为空。
+    #[serde(default)]
+    pub error: String,
+    /// 启动被系统拒绝（无执行权限、noexec 挂载、隔离属性 / 安全软件拦截）。
+    #[serde(default)]
+    pub permission_denied: bool,
+    /// 生效路径位于 daemon 数据目录内（托管安装），daemon 可就地修复其执行权限。
+    #[serde(default)]
+    pub managed: bool,
+}
+
+/// `daemon.diagnostics.fixComponent` 参数：把托管组件的执行权限还给当前用户。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentRepairParams {
+    /// [`ComponentProbeDto::name`]（`ffmpeg` / `ffprobe` / `yt-dlp`）。
+    pub name: String,
+}
+
+/// `daemon.diagnostics.probe` 结果。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticsProbeResult {
+    pub storage: Vec<StorageProbeDto>,
+    pub components: Vec<ComponentProbeDto>,
+}
+
+// ---------------------------------------------------------------------------
 // Webhook 任务事件推送（免费自托管）
 // ---------------------------------------------------------------------------
 
@@ -2116,7 +2317,7 @@ pub struct WebhookPresetDto {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct WebhookDeliveriesResponse {
-    /// 新的在前，最多 100 条（内存环形缓冲，不落盘）。
+    /// 新的在前，最多 [`crate::WEBHOOK_DELIVERY_LIMIT`] 条（引擎落盘环形缓冲，重启回灌）。
     pub deliveries: Vec<WebhookDeliveryDto>,
     pub presets: Vec<WebhookPresetDto>,
     /// 可用占位符清单（`{task.fileName}` 等）。

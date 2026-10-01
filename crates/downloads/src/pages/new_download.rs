@@ -30,7 +30,9 @@ use crate::{
         },
     },
     strings::NewDownloadStrings,
-    submission::{CapturedTask, NewDownloadSubmission, RemoteItem, RemoteSubmission},
+    submission::{
+        CapturedTask, NewDownloadSubmission, RemoteItem, RemoteSubmission, TorrentFileOptions,
+    },
 };
 use fluxdown_protocol::{
     AgentSnapshot, CloudDevice, LinkDeviceInfo, PendingCaptureDto, QueueDto, SiteAuthCredentialDto,
@@ -205,7 +207,8 @@ struct AuthAutofill {
 
 /// 独立窗口承载的「新建下载」表单。
 ///
-/// 提交或取消都会关闭自身所在窗口；任务创建失败的提示由宿主展示。视图释放时仍未确认的
+/// 提交或取消都会关闭自身所在窗口（「打开种子文件」只提交种子：表单里还有待处理链接时
+/// 窗口保留，链接原样留在表单中）；任务创建失败的提示由宿主展示。视图释放时仍未确认的
 /// 外部捕获由宿主经 [`Self::take_captures`] 取走并忽略。
 pub struct NewDownloadView {
     strings: NewDownloadStrings,
@@ -464,6 +467,24 @@ impl NewDownloadView {
         self.refresh_entries(window, cx);
     }
 
+    /// 宿主在窗口已打开时追加链接（如拖入链接文件）：原文逐字保留，已存在的 URL 跳过。
+    pub fn append_urls(&mut self, urls: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.urls.read(cx).value().to_string();
+        let text = append_entries(
+            &current,
+            urls.into_iter().map(|url| UrlEntry {
+                url,
+                ..UrlEntry::default()
+            }),
+        );
+        if text == current.trim_end() {
+            return;
+        }
+        self.urls
+            .update(cx, |input, cx| input.set_value(text, window, cx));
+        self.refresh_entries(window, cx);
+    }
+
     /// 只保留 agent 仍在等待确认的捕获（其余已在别处处理 / agent 重启丢失）；对应链接行
     /// 保留为普通链接。
     pub fn retain_captures(
@@ -542,7 +563,8 @@ impl NewDownloadView {
                 }
                 _ => None,
             };
-            let _ = this.update_in(cx, |this, window, cx| {
+
+            let Ok(()) = this.update_in(cx, |this, window, cx| {
                 if this.auth_autofill.dirty
                     || this.auth_autofill.target.as_deref() != Some(url.as_str())
                 {
@@ -559,7 +581,10 @@ impl NewDownloadView {
                     }
                     None => this.clear_autofilled_auth(window, cx),
                 }
-            });
+            }) else {
+                // 表单或窗口已释放，不再回写异步结果。
+                return;
+            };
         })
         .detach();
     }
@@ -791,15 +816,31 @@ impl NewDownloadView {
                     .collect::<Vec<_>>(),
                 _ => Vec::new(),
             };
-            let _ = this.update_in(cx, |this, window, cx| {
+
+            let Ok(()) = this.update_in(cx, |this, window, cx| {
                 this.picking = false;
                 cx.notify();
                 if paths.is_empty() {
                     return;
                 }
-                (this.on_submit)(NewDownloadSubmission::TorrentFiles(paths), window, cx);
-                window.remove_window();
-            });
+                let options = TorrentFileOptions {
+                    save_dir: this.save_dir.read(cx).value().trim().to_owned(),
+                    queue_id: this.context.queue_id.clone(),
+                    start_paused: false,
+                };
+                (this.on_submit)(
+                    NewDownloadSubmission::TorrentFiles { paths, options },
+                    window,
+                    cx,
+                );
+                // 只提交了种子：表单里尚未提交的链接留给用户继续处理，没有待处理链接才关窗。
+                if this.entries.is_empty() {
+                    window.remove_window();
+                }
+            }) else {
+                // 表单或窗口已释放，不再回写异步结果。
+                return;
+            };
         })
         .detach();
     }
@@ -836,7 +877,8 @@ impl NewDownloadView {
                         .collect::<Vec<_>>()
                 })
                 .await;
-            let _ = this.update_in(cx, |this, window, cx| {
+
+            let Ok(()) = this.update_in(cx, |this, window, cx| {
                 this.picking = false;
                 cx.notify();
                 if cancelled {
@@ -858,7 +900,10 @@ impl NewDownloadView {
                     Notification::success(this.strings.format_import_found(count)),
                     cx,
                 );
-            });
+            }) else {
+                // 表单或窗口已释放，不再回写异步结果。
+                return;
+            };
         })
         .detach();
     }
@@ -928,14 +973,18 @@ impl NewDownloadView {
                 Ok(Ok(Some(paths))) => paths.first().map(|path| path.display().to_string()),
                 _ => None,
             };
-            let _ = this.update_in(cx, |this, window, cx| {
+
+            let Ok(()) = this.update_in(cx, |this, window, cx| {
                 this.picking = false;
                 if let Some(path) = picked {
                     this.save_dir
                         .update(cx, |input, cx| input.set_value(path, window, cx));
                 }
                 cx.notify();
-            });
+            }) else {
+                // 表单或窗口已释放，不再回写异步结果。
+                return;
+            };
         })
         .detach();
     }
@@ -1059,9 +1108,13 @@ impl NewDownloadView {
                             .disabled(*disabled)
                             .on_click(move |_, window, cx| {
                                 let value = value.clone();
-                                let _ = this.update(cx, |this, cx| {
+
+                                let Ok(()) = this.update(cx, |this, cx| {
                                     on_pick(this, value, window, cx);
-                                });
+                                }) else {
+                                    // 视图已释放，结束这次回调而不再更新状态。
+                                    return;
+                                };
                             }),
                     )
                 })
@@ -1094,9 +1147,13 @@ impl NewDownloadView {
                 menu.item(
                     PopupMenuItem::new(label.clone()).on_click(move |_, window, cx| {
                         let queue_id = queue_id.clone();
-                        let _ = this.update(cx, |this, cx| {
+
+                        let Ok(()) = this.update(cx, |this, cx| {
                             this.submit(later, Some(queue_id), window, cx);
-                        });
+                        }) else {
+                            // 视图已释放，结束这次回调而不再更新状态。
+                            return;
+                        };
                     }),
                 )
             })

@@ -8,7 +8,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use fluxdown_protocol::{AgentEvent, PowerStatusDto};
+use fluxdown_protocol::{AgentEvent, DaemonRuntimeStatsDto, PowerStatusDto};
 use tokio_util::sync::CancellationToken;
 
 use crate::event_hub::AgentEventHub;
@@ -54,10 +54,9 @@ impl PowerService {
                 _ = cancel.cancelled() => return,
                 _ = interval.tick() => {}
             }
-            let (active, pending) = self.events.inspect(|snapshot| {
-                let stats = &snapshot.daemon.runtime_stats;
-                (stats.active_tasks, stats.pending_tasks)
-            });
+            let (active, pending) = self
+                .events
+                .inspect(|snapshot| work_counts(&snapshot.daemon.runtime_stats));
             let fired = self.lock().advance(active, pending, Instant::now());
             self.publish();
             if fired {
@@ -143,6 +142,17 @@ impl ShutdownState {
     }
 }
 
+/// `(活跃任务数, 仍在等待的任务数)`：等待 = 排队 + 已排程自动重试、尚未重新派发的任务，
+/// 后者在任务表里是失败状态，不计入就会在重试间隙被误判为「全部完成」。
+fn work_counts(stats: &DaemonRuntimeStatsDto) -> (u32, u32) {
+    (
+        stats.active_tasks,
+        stats
+            .pending_tasks
+            .saturating_add(stats.retry_pending_tasks),
+    )
+}
+
 /// 平台关机命令；`FLUXDOWN_SHUTDOWN_DRY_RUN` 设置时只记日志，便于 QA 验证不真的关机。
 fn execute_shutdown() {
     if std::env::var_os("FLUXDOWN_SHUTDOWN_DRY_RUN").is_some() {
@@ -151,30 +161,33 @@ fn execute_shutdown() {
     }
     tracing::info!("all downloads finished: powering off");
     #[cfg(target_os = "windows")]
-    {
+    let result = {
         use std::os::windows::process::CommandExt as _;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let _ = Command::new("shutdown")
+        Command::new("shutdown")
             .args(["/s", "/f", "/t", "0"])
             .creation_flags(CREATE_NO_WINDOW)
-            .status();
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = Command::new("osascript")
-            .args(["-e", "tell app \"System Events\" to shut down"])
-            .status();
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let systemd_ok = Command::new("systemctl")
-            .arg("poweroff")
             .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-        if !systemd_ok {
-            let _ = Command::new("loginctl").arg("poweroff").status();
+    };
+    #[cfg(target_os = "macos")]
+    let result = Command::new("osascript")
+        .args(["-e", "tell app \"System Events\" to shut down"])
+        .status();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let result = {
+        match Command::new("systemctl").arg("poweroff").status() {
+            Ok(status) if status.success() => return,
+            Ok(status) => tracing::warn!(%status, "systemctl poweroff failed; trying loginctl"),
+            Err(error) => {
+                tracing::warn!(%error, "could not run systemctl poweroff; trying loginctl")
+            }
         }
+        Command::new("loginctl").arg("poweroff").status()
+    };
+    match result {
+        Ok(status) if status.success() => tracing::info!("power-off request accepted"),
+        Ok(status) => tracing::error!(%status, "power-off request failed"),
+        Err(error) => tracing::error!(%error, "could not run power-off command"),
     }
 }
 
@@ -234,6 +247,25 @@ mod tests {
         let mut state = ShutdownState::new();
         state.arm(Duration::ZERO, 1);
         assert!(state.advance(0, 0, Instant::now()));
+    }
+
+    #[test]
+    fn auto_retry_gap_keeps_the_countdown_from_starting() {
+        let stats = |retry_pending_tasks| DaemonRuntimeStatsDto {
+            retry_pending_tasks,
+            ..DaemonRuntimeStatsDto::default()
+        };
+        let mut state = ShutdownState::new();
+        state.arm(Duration::ZERO, 1);
+        let now = Instant::now();
+        // 最后一个任务在重试间隙：活跃 / 排队都是 0，但仍有重试待定，不得触发关机。
+        let (active, waiting) = work_counts(&stats(1));
+        assert!(!state.advance(active, waiting, now));
+        assert_eq!(state.status(now).countdown_remaining_secs, None);
+        // 重试重新派发后任务活跃，仍不关机；全部结束后才到点。
+        assert!(!state.advance(1, 0, now));
+        let (active, waiting) = work_counts(&stats(0));
+        assert!(state.advance(active, waiting, now));
     }
 
     #[test]

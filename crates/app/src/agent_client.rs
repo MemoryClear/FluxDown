@@ -35,6 +35,8 @@ pub enum AgentClientEvent {
     Snapshot(Box<Snapshot>),
     Event(Box<EventFrame>),
     Stale,
+    /// 本进程刚拉起了 agent（后台服务冷启动）：首个快照要等 agent 装配完成。
+    ServiceStarting,
     Fatal(RpcErrorData),
     /// agent 执行了完全退出（`system.shutdown`）：不再重连，界面随之退出。
     ServiceStopped,
@@ -165,7 +167,9 @@ async fn run_client(
                     Ok(SessionEnd::ServiceQuit) => {
                         log::info!("agent closed the connection with service-quit (full shutdown)");
                         bootstrap.stop();
-                        let _ = events.send(AgentClientEvent::ServiceStopped).await;
+                        if events.send(AgentClientEvent::ServiceStopped).await.is_err() {
+                            log::debug!("agent event receiver closed during desktop shutdown");
+                        }
                         return;
                     }
                     Err(()) => {
@@ -179,13 +183,25 @@ async fn run_client(
             Err(error @ (ConnectError::NoBearer | ConnectError::Refused)) => {
                 let probe_listener = matches!(error, ConnectError::NoBearer);
                 link_log.failed(&error);
-                if let Err(bootstrap_error) = bootstrap
+                match bootstrap
                     .ensure_running(&config.rpc_url, probe_listener)
                     .await
                 {
-                    log::warn!("could not start fluxdown-agent: {bootstrap_error}");
-                    if events.send(AgentClientEvent::Stale).await.is_err() {
-                        return;
+                    Ok(true) => {
+                        if events
+                            .send(AgentClientEvent::ServiceStarting)
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(bootstrap_error) => {
+                        log::warn!("could not start fluxdown-agent: {bootstrap_error}");
+                        if events.send(AgentClientEvent::Stale).await.is_err() {
+                            return;
+                        }
                     }
                 }
             }
@@ -203,17 +219,31 @@ async fn run_client(
                     continue;
                 }
                 log::error!("incompatible agent refused to shut down; giving up");
-                let _ = events.send(AgentClientEvent::Fatal(protocol_error())).await;
+                if events
+                    .send(AgentClientEvent::Fatal(protocol_error()))
+                    .await
+                    .is_err()
+                {
+                    log::debug!("agent event receiver closed during desktop shutdown");
+                }
                 return;
             }
             Err(ConnectError::Incompatible) => {
                 log::error!("agent protocol still incompatible after replacement; giving up");
-                let _ = events.send(AgentClientEvent::Fatal(protocol_error())).await;
+                if events
+                    .send(AgentClientEvent::Fatal(protocol_error()))
+                    .await
+                    .is_err()
+                {
+                    log::debug!("agent event receiver closed during desktop shutdown");
+                }
                 return;
             }
             Err(ConnectError::Fatal(error)) => {
                 log::error!("fatal agent connection error: {:?}", error.code);
-                let _ = events.send(AgentClientEvent::Fatal(error)).await;
+                if events.send(AgentClientEvent::Fatal(error)).await.is_err() {
+                    log::debug!("agent event receiver closed during desktop shutdown");
+                }
                 return;
             }
             Err(error @ ConnectError::Transient(_)) => {
@@ -317,7 +347,13 @@ async fn open_socket(config: &AgentClientConfig) -> Result<Socket, ConnectError>
     request
         .headers_mut()
         .insert(header::AUTHORIZATION, authorization);
-    let (socket, _) = tokio_tungstenite::connect_async(request)
+    // 先自行完成 TCP 连接：回环端口无人监听时按超时判定，不等 Windows 约 2s 的拒绝。
+    let stream = match crate::service_bootstrap::connect_listener(&config.rpc_url).await {
+        Ok(Some(stream)) => stream,
+        Ok(None) => return Err(ConnectError::Refused),
+        Err(error) => return Err(ConnectError::Transient(format!("connect: {error}"))),
+    };
+    let (socket, _) = tokio_tungstenite::client_async(request, MaybeTlsStream::Plain(stream))
         .await
         .map_err(classify_connect_error)?;
     Ok(socket)
@@ -330,7 +366,7 @@ async fn connect(
     let mut buffered = Vec::new();
     let hello = serde_json::json!({
         "clientName": "fluxdown-desktop",
-        "clientVersion": env!("CARGO_PKG_VERSION"),
+        "clientVersion": fluxdown_protocol::APP_VERSION,
         "minProtocolVersion": fluxdown_protocol::MIN_PROTOCOL_VERSION,
         "maxProtocolVersion": fluxdown_protocol::PROTOCOL_VERSION,
         "requestedRole": "agent",
@@ -412,7 +448,9 @@ async fn run_connected(
                         if frame.reason.as_str() == CLOSE_REASON_SERVICE_QUIT =>
                     {
                         for (_, ack) in pending.drain() {
-                            let _ = ack.send(Err(unavailable_error()));
+                            if ack.send(Err(unavailable_error())).is_err() {
+                                log::trace!("agent request receiver released before service shutdown");
+                            }
                         }
                         return Ok(SessionEnd::ServiceQuit);
                     }
@@ -433,16 +471,20 @@ async fn run_connected(
                     RpcResponse::Success(success) => {
                         if let RequestId::Integer(id) = success.id {
                             preference_writes.settle(id, Some(&success.result));
-                            if let Some(ack) = pending.remove(&id) {
-                                let _ = ack.send(Ok(success.result));
+                            if let Some(ack) = pending.remove(&id)
+                                && ack.send(Ok(success.result)).is_err()
+                            {
+                                log::trace!("agent request receiver released before success reply");
                             }
                         }
                     }
                     RpcResponse::Failure(failure) => {
                         if let Some(RequestId::Integer(id)) = failure.id {
                             preference_writes.settle(id, None);
-                            if let Some(ack) = pending.remove(&id) {
-                                let _ = ack.send(Err(failure.error.data.unwrap_or_else(internal_error)));
+                            if let Some(ack) = pending.remove(&id)
+                                && ack.send(Err(failure.error.data.unwrap_or_else(internal_error))).is_err()
+                            {
+                                log::trace!("agent request receiver released before failure reply");
                             }
                         }
                     }
@@ -451,7 +493,9 @@ async fn run_connected(
         }
     }
     for (_, ack) in pending {
-        let _ = ack.send(Err(unavailable_error()));
+        if ack.send(Err(unavailable_error())).is_err() {
+            log::trace!("agent request response receiver already released");
+        }
     }
     Err(())
 }
@@ -535,18 +579,10 @@ async fn call_on_socket(
 
 fn classify_connect_error(error: tokio_tungstenite::tungstenite::Error) -> ConnectError {
     match &error {
-        tokio_tungstenite::tungstenite::Error::Io(io)
-            if matches!(
-                io.kind(),
-                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
-            ) =>
-        {
-            ConnectError::Refused
-        }
         tokio_tungstenite::tungstenite::Error::Http(response) if response.status() == 401 => {
             ConnectError::Fatal(RpcErrorData::new(ApplicationErrorCode::Unauthorized, false))
         }
-        _ => ConnectError::Transient(format!("connect: {error}")),
+        _ => ConnectError::Transient(format!("handshake: {error}")),
     }
 }
 

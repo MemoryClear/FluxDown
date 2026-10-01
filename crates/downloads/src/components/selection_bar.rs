@@ -83,16 +83,19 @@ impl DownloadView {
                             .size(icon_size)
                             .text_color(destructive),
                     )
-                    .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
+                    .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
                         menu.item(
                             PopupMenuItem::new(delete_task.clone())
                                 .icon(FluxIcon::Trash2)
                                 .on_click({
                                     let view = view.clone();
                                     move |_, _, cx| {
-                                        let _ = view.update(cx, |this, cx| {
+                                        let Ok(()) = view.update(cx, |this, cx| {
                                             this.execute_toolbar(ToolbarCommand::Delete, cx);
-                                        });
+                                        }) else {
+                                            // 视图已释放，结束这次回调而不再更新状态。
+                                            return;
+                                        };
                                     }
                                 }),
                         )
@@ -102,9 +105,12 @@ impl DownloadView {
                                 .on_click({
                                     let view = view.clone();
                                     move |_, window, cx| {
-                                        let _ = view.update(cx, |this, cx| {
+                                        let Ok(()) = view.update(cx, |this, cx| {
                                             this.delete_selected_with_files(window, cx);
-                                        });
+                                        }) else {
+                                            // 视图已释放，结束这次回调而不再更新状态。
+                                            return;
+                                        };
                                     }
                                 }),
                         )
@@ -118,7 +124,10 @@ impl DownloadView {
     pub(crate) fn render_selection_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let selection = self.table_state.read(cx).delegate().selection_summary();
         self.selection_summary.set(selection);
-        if selection.count == 0 {
+        // 详情面板已打开且只选中一项时，面板本身就在展示该任务，不再叠加选择条。
+        let detail_shows_selection =
+            selection.count == 1 && self.table_state.read(cx).delegate().prefs().detail_open;
+        if selection.count == 0 || detail_shows_selection {
             return None;
         }
 

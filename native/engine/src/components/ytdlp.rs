@@ -123,23 +123,7 @@ pub async fn resolve_ytdlp(db: &Db, data_dir: &Path) -> Option<PathBuf> {
 
 /// 运行 `<path> --version` 解析版本串（yt-dlp 首行即版本，如 `2026.07.04`）。
 pub async fn probe_ytdlp_version(path: &Path) -> Option<String> {
-    let mut cmd = tokio::process::Command::new(path);
-    crate::proc::no_console_window(&mut cmd);
-    let output = cmd
-        .arg("--version")
-        .stdin(std::process::Stdio::null())
-        .output()
-        .await
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let first_line = stdout.lines().next()?.trim();
-    if first_line.is_empty() {
-        return None;
-    }
-    Some(first_line.to_string())
+    super::exec_probe(path, "--version", None).await.ok()
 }
 
 /// 完整状态探测（设置页用）：解析生效路径 + 版本 + 系统路径展示。
@@ -222,6 +206,10 @@ mod install {
     const RELEASES_API: &str = "https://api.github.com/repos/yt-dlp/yt-dlp/releases?per_page=30";
     const RELEASE_TAG_API: &str = "https://api.github.com/repos/yt-dlp/yt-dlp/releases/tags/";
     const RELEASE_LATEST_API: &str = "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest";
+    /// 资产与校验文件必须位于此上游 release 下载前缀内。
+    const UPSTREAM_DOWNLOAD_PREFIX: &str = "https://github.com/yt-dlp/yt-dlp/releases/download/";
+    /// yt-dlp 每个 release 附带的 sha256sum 格式校验文件。
+    const CHECKSUM_ASSET: &str = "SHA2-256SUMS";
 
     /// 可安装版本列表（近期 Release 的日期 tag，降序）。
     #[derive(Debug, Clone)]
@@ -285,51 +273,81 @@ mod install {
             .to_string();
         let empty = Vec::new();
         let assets = release["assets"].as_array().unwrap_or(&empty);
-        let dl_url = assets
-            .iter()
-            .find(|a| a["name"].as_str() == Some(asset))
-            .and_then(|a| a["browser_download_url"].as_str())
-            .ok_or_else(|| ComponentError::NotFound(format!("asset {asset} ({chosen_ver})")))?
-            .to_string();
+        let asset_url = |name: &str| -> Option<String> {
+            assets
+                .iter()
+                .find(|a| a["name"].as_str() == Some(name))
+                .and_then(|a| a["browser_download_url"].as_str())
+                .map(str::to_string)
+        };
+        let dl_url = asset_url(asset)
+            .ok_or_else(|| ComponentError::NotFound(format!("asset {asset} ({chosen_ver})")))?;
+        let sums_url = asset_url(CHECKSUM_ASSET).ok_or_else(|| {
+            ComponentError::NotFound(format!("asset {CHECKSUM_ASSET} ({chosen_ver})"))
+        })?;
+        // 版本 JSON 可能经镜像而来：资产与校验文件都必须落在上游发布路径下。
+        super::super::require_upstream_asset_url(&dl_url, UPSTREAM_DOWNLOAD_PREFIX)?;
+        super::super::require_upstream_asset_url(&sums_url, UPSTREAM_DOWNLOAD_PREFIX)?;
+        let expected_sha256 =
+            super::super::fetch_expected_sha256(client, &sums_url, &mirror_base, asset).await?;
 
-        // 单文件二进制：流式下载到 bin/ 下临时文件，验证后原子替换目标。
+        // 单文件二进制：流式下载到 bin/ 下临时文件，哈希 + 探版都通过后才原子替换
+        // 目标，失败不碰原有托管二进制。Windows 上临时文件须保留 `.exe` 才能探版。
         let bin_dir = data_dir.join("bin");
         tokio::fs::create_dir_all(&bin_dir)
             .await
             .map_err(|e| ComponentError::Io(e.to_string()))?;
         let target = managed_ytdlp_path(data_dir);
-        let tmp = bin_dir.join("yt-dlp.download");
-        super::super::download_to_file(client, &dl_url, &mirror_base, &tmp, progress).await?;
+        let tmp = bin_dir.join(if cfg!(windows) {
+            "yt-dlp.download.exe"
+        } else {
+            "yt-dlp.download"
+        });
+        super::super::download_to_file(
+            client,
+            &dl_url,
+            &mirror_base,
+            &tmp,
+            &expected_sha256,
+            progress,
+        )
+        .await?;
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o755);
             if let Err(e) = tokio::fs::set_permissions(&tmp, perms).await {
-                let _ = tokio::fs::remove_file(&tmp).await;
+                if let Err(error) = tokio::fs::remove_file(&tmp).await
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    crate::logger::report_warning("components", "remove_ytdlp_download", &error);
+                }
                 return Err(ComponentError::Io(e.to_string()));
             }
         }
-        match tokio::fs::rename(&tmp, &target).await {
-            Ok(()) => {}
-            Err(_) => {
-                // 跨设备 rename 失败时回退 copy（同目录一般不会命中）。
-                let copy_res = tokio::fs::copy(&tmp, &target).await;
-                let _ = tokio::fs::remove_file(&tmp).await;
-                copy_res.map_err(|e| ComponentError::Io(e.to_string()))?;
-            }
-        }
 
-        // 安装后验证：能跑 `--version` 才算成功。
-        let probed = super::probe_ytdlp_version(&target).await;
-        if probed.is_none() {
-            let _ = tokio::fs::remove_file(&target).await;
+        // 安装前验证：临时文件能跑 `--version` 才算成功。
+        if super::probe_ytdlp_version(&tmp).await.is_none() {
+            if let Err(error) = tokio::fs::remove_file(&tmp).await
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                crate::logger::report_warning("components", "remove_unverified_ytdlp", &error);
+            }
             return Err(ComponentError::Verify(
                 "downloaded yt-dlp failed to run; the binary may be incompatible with \
                  this system — install yt-dlp via your system package manager (or pip) \
                  and set a manual path"
                     .to_string(),
             ));
+        }
+        if let Err(e) = tokio::fs::rename(&tmp, &target).await {
+            if let Err(error) = tokio::fs::remove_file(&tmp).await
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                crate::logger::report_warning("components", "remove_ytdlp_download", &error);
+            }
+            return Err(ComponentError::Io(e.to_string()));
         }
         db.set_config(CONFIG_YTDLP_MANAGED_VERSION, &chosen_ver)
             .await

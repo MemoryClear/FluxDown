@@ -6,14 +6,17 @@ pub mod agent;
 pub mod capture_link;
 pub mod daemon;
 pub mod daemon_config;
+mod digest;
 pub mod error;
 pub mod event;
+pub mod handshake;
 pub mod method;
 pub mod rpc;
 pub mod settings;
 pub mod task_activity;
 pub use task_activity::{
     TaskActivityDto, TaskActivityPage, TaskActivityQuery, TaskRuntimeDto, TaskSegmentDto,
+    TaskSourceBytesDto,
 };
 
 pub use agent::{
@@ -38,19 +41,21 @@ pub use agent::{
 pub use daemon::{
     ApiInfo, BtFileDto, CdnConfigApplyParams, CdnNodeDto, CdnReportAckParams, CdnReportLeaseDto,
     ChangeTaskUrlParams, ComponentFfmpegStatus, ComponentInstallParams, ComponentKind,
-    ComponentParams, ComponentStatusDto, ComponentVersions, ComponentYtdlpStatus,
-    ConnPolicySummaryDto, CreateGroupRequest, CreateGroupResponse, CreateQueueRequest,
-    CreateTaskRequest, CreatedTask, DaemonConfigPatch, DaemonConfigSnapshot,
-    DaemonCreateTaskParams, DaemonRuntimeStatsDto, DownloadRequest, Ed2kServerSubRefreshResponse,
-    FileMissingUpdateDto, FsEntry, FsListResponse, GatewayMigrationExport, GroupDto,
-    GroupItemRequest, HlsQualityOptionDto, InstallFfmpegRequest, InstallPluginDevRequest,
-    InstalledPlugin, LATER_QUEUE_ID, LinkAuth, LinkCodeResponse, LinkDeviceInfo,
-    LinkDeviceTaskRequest, LinkDevicesResponse, LinkDiscoveredPeer, LinkDiscoveredResponse,
-    LinkDiscoveryRequest, LinkMigrationExport, LinkOkResponse, LinkPairApproveRequest,
-    LinkPairBeginRequest, LinkPairBeginResponse, LinkPairConfirmOutcome, LinkPairConfirmRequest,
-    LinkPairFinishRequest, LinkPairFinishResponse, LinkPairHelloRequest, LinkPairHelloResponse,
-    LinkPingInfo, LinkProbeRequest, LinkTaskRequest, LogFileDto, LogsResponse, MAIN_QUEUE_ID,
-    MarketEntryDto, MarketInstallRequest, MigrationAckParams, MoveQueueRequest, PluginAuthRequest,
+    ComponentParams, ComponentProbeDto, ComponentRepairParams, ComponentStatusDto,
+    ComponentVersions, ComponentYtdlpStatus, ConnPolicySummaryDto, CreateGroupRequest,
+    CreateGroupResponse, CreateQueueRequest, CreateTaskRequest, CreatedTask, DaemonConfigPatch,
+    DaemonConfigSnapshot, DaemonCreateTaskParams, DaemonDeleteTasksParams, DaemonRuntimeStatsDto,
+    DaemonTaskIdsParams, DiagnosticsProbeParams, DiagnosticsProbeResult, DownloadRequest,
+    Ed2kServerSubRefreshResponse, FileMissingUpdateDto, FsEntry, FsListResponse,
+    GatewayMigrationExport, GroupDto, GroupItemRequest, HlsQualityOptionDto, InstallFfmpegRequest,
+    InstallPluginDevRequest, InstalledPlugin, LATER_QUEUE_ID, LinkAuth, LinkCodeResponse,
+    LinkDeviceInfo, LinkDeviceTaskRequest, LinkDevicesResponse, LinkDiscoveredPeer,
+    LinkDiscoveredResponse, LinkDiscoveryRequest, LinkMigrationExport, LinkOkResponse,
+    LinkPairApproveRequest, LinkPairBeginRequest, LinkPairBeginResponse, LinkPairConfirmOutcome,
+    LinkPairConfirmRequest, LinkPairFinishRequest, LinkPairFinishResponse, LinkPairHelloRequest,
+    LinkPairHelloResponse, LinkPairRevealRequest, LinkPairRevealResponse, LinkPingInfo,
+    LinkProbeRequest, LinkTaskRequest, LogFileDto, LogsResponse, MAIN_QUEUE_ID, MarketEntryDto,
+    MarketInstallRequest, MigrationAckParams, MoveQueueRequest, PluginAuthRequest,
     PluginAuthResponse, PluginDto, PreviewItemDto, PreviewVariantDto, ProxyTestRequest,
     ProxyTestResponse, QueueDto, QueuePositionDto, QueueScheduleRequest, RenameTaskRequest,
     ReorderQueueRequest, RequestBody, ResolvePreviewRequest, ResolvePreviewResponse,
@@ -59,10 +64,10 @@ pub use daemon::{
     SelectionRequestDto, SelectionResolutionDto, SetPluginEnabledRequest, SettingFieldDto,
     SettingOptionDto, SetupRequest, SetupStatusResponse, SiteAuthCredentialDto,
     SiteAuthDeleteParams, SiteAuthEntryDto, SiteAuthGetParams, SiteAuthMatchParams,
-    SiteAuthSaveRequest, StatsResponse, SystemProxyDto, TaskDto, TokenResponse,
-    TrackerSubRefreshResponse, UpdateQueueRequest, WebhookDeliveriesResponse, WebhookDeliveryDto,
-    WebhookPresetDto, WebhookSimulateResponse, WebhookTestRequest, WebhookTestResponse,
-    WsClientMsg, WsServerMsg,
+    SiteAuthSaveRequest, StatsResponse, StorageProbeDto, StorageProbeFailure, StorageProbeRole,
+    StorageProbeTarget, SystemProxyDto, TaskDto, TokenResponse, TrackerSubRefreshResponse,
+    UpdateQueueRequest, WebhookDeliveriesResponse, WebhookDeliveryDto, WebhookPresetDto,
+    WebhookSimulateResponse, WebhookTestRequest, WebhookTestResponse, WsClientMsg, WsServerMsg,
 };
 pub use daemon_config::{
     BT_MSE_MODES, BT_SEED_LIMIT_OPERATORS, BT_SEED_THEN_ACTIONS, BT_SEED_TIME_UNITS,
@@ -78,10 +83,11 @@ pub use error::{
 };
 pub use event::{
     AgentEvent, AgentSnapshot, DaemonEvent, DaemonSnapshot, EventFrame, ServiceEvent, Snapshot,
-    SnapshotBody, accepted_runtime_status, apply_agent_event, apply_daemon_event,
+    SnapshotBody, WEBHOOK_DELIVERY_LIMIT, accepted_runtime_status, apply_agent_event,
+    apply_daemon_event, merge_webhook_deliveries,
 };
 pub use rpc::{
-    CLOSE_REASON_SERVICE_QUIT, ClientHello, JSONRPC_VERSION, MIN_PROTOCOL_VERSION,
+    APP_VERSION, CLOSE_REASON_SERVICE_QUIT, ClientHello, JSONRPC_VERSION, MIN_PROTOCOL_VERSION,
     PROTOCOL_VERSION, RequestId, RpcFailureResponse, RpcIncoming, RpcNotification, RpcRequest,
     RpcResponse, RpcSuccessResponse, ServiceHello, ServiceRole, negotiate_protocol,
     validate_first_request,

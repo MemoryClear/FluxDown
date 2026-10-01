@@ -40,6 +40,19 @@ const TIME_MENU_MAX_HEIGHT: gpui::Pixels = px(280.);
 /// 分钟下拉的步长。
 const MINUTE_STEP: u16 = 5;
 
+/// 队列默认线程数上限（与 `download.default_segments` 的 0..=64 范围一致）。
+const MAX_SEGMENTS: i32 = 64;
+
+/// 空串 → 0；否则须为 `0..=max` 内的整数，非法（非数字 / 负数 / 溢出 / 超限）→ `None`。
+fn parse_non_negative(input: &str, max: i32) -> Option<i32> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Some(0);
+    }
+    let value = i32::try_from(input.parse::<i64>().ok()?).ok()?;
+    (0..=max).contains(&value).then_some(value)
+}
+
 /// 星期位掩码单日切换：`bit_index` 0 = 周一 … 6 = 周日。
 fn toggle_day_bit(days: i32, bit: i32, checked: bool) -> i32 {
     if checked { days | bit } else { days & !bit }
@@ -166,12 +179,21 @@ impl QueueForm {
     }
 }
 
+/// 新建队列后待补发的定时设置。
+struct PendingSchedule {
+    known_ids: Vec<String>,
+    start_time: String,
+    stop_time: String,
+    days: i32,
+}
+
 /// 队列管理页面；实现 [`crate::session`]（app 侧）期望的三方法供 `attach` 驱动。
 pub struct QueueManagerView {
     translator: Entity<Translator>,
     port: Arc<dyn DownloadsPort>,
     queues: Vec<QueueDto>,
     form: Option<QueueForm>,
+    pending_schedule: Option<PendingSchedule>,
     error: Option<SharedString>,
     stale: bool,
 }
@@ -190,6 +212,7 @@ impl QueueManagerView {
             port,
             queues: Vec::new(),
             form: None,
+            pending_schedule: None,
             error: None,
             stale: true,
         }
@@ -205,6 +228,7 @@ impl QueueManagerView {
         match event {
             ServiceEvent::Agent(AgentEvent::Daemon(DaemonEvent::QueuesChanged(queues))) => {
                 self.absorb_queues(queues.clone());
+                self.flush_pending_schedule(cx);
                 cx.notify();
             }
             ServiceEvent::Agent(AgentEvent::DaemonSnapshotReplaced(snapshot))
@@ -223,7 +247,35 @@ impl QueueManagerView {
 
     pub fn mark_stale(&mut self, cx: &mut Context<Self>) {
         self.stale = true;
+        self.pending_schedule = None;
         cx.notify();
+    }
+
+    fn flush_pending_schedule(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = &self.pending_schedule else {
+            return;
+        };
+        let Some(queue_id) = self
+            .queues
+            .iter()
+            .find(|queue| !pending.known_ids.contains(&queue.queue_id))
+            .map(|queue| queue.queue_id.clone())
+        else {
+            return;
+        };
+        let Some(pending) = self.pending_schedule.take() else {
+            return;
+        };
+        self.run_command(
+            DownloadsCommand::QueueSchedule {
+                queue_id,
+                enabled: true,
+                start_time: pending.start_time,
+                stop_time: pending.stop_time,
+                days: pending.days,
+            },
+            cx,
+        );
     }
 
     fn absorb_queues(&mut self, mut queues: Vec<QueueDto>) {
@@ -278,7 +330,11 @@ impl QueueManagerView {
         let future = self.port.execute(command);
         cx.spawn(async move |this, cx| {
             if future.await.is_err() {
-                let _ = this.update(cx, |this, cx| this.fail("localServiceActionFailed", cx));
+                let Ok(()) = this.update(cx, |this, cx| this.fail("localServiceActionFailed", cx))
+                else {
+                    // 视图已释放，结束回调而不再更新状态。
+                    return;
+                };
             }
         })
         .detach();
@@ -303,8 +359,9 @@ impl QueueManagerView {
         cx.notify();
     }
 
-    fn parse_int(input: &Entity<InputState>, cx: &App) -> i64 {
-        input.read(cx).value().trim().parse().unwrap_or(0)
+    /// 解析队列表单数字：空 → 0；否则必须是不超过 `max` 的非负整数。
+    fn parse_int(input: &Entity<InputState>, max: i32, cx: &App) -> Option<i32> {
+        parse_non_negative(input.read(cx).value().trim(), max)
     }
 
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -316,13 +373,22 @@ impl QueueManagerView {
         }
         let start = format_time(form.schedule_start);
         let stop = format_time(form.schedule_stop);
+        let (Some(speed_limit), Some(upload_limit), Some(max_concurrent), Some(segments)) = (
+            Self::parse_int(&form.speed_limit, i32::MAX, cx),
+            Self::parse_int(&form.upload_limit, i32::MAX, cx),
+            Self::parse_int(&form.max_concurrent, i32::MAX, cx),
+            Self::parse_int(&form.segments, MAX_SEGMENTS, cx),
+        ) else {
+            self.fail("queueInvalidNumber", cx);
+            return;
+        };
         let fields = QueueFields {
             name,
-            speed_limit_kbps: Self::parse_int(&form.speed_limit, cx),
-            upload_limit_kbps: Self::parse_int(&form.upload_limit, cx),
-            max_concurrent: Self::parse_int(&form.max_concurrent, cx) as i32,
+            speed_limit_kbps: i64::from(speed_limit),
+            upload_limit_kbps: i64::from(upload_limit),
+            max_concurrent,
             default_save_dir: form.save_dir.read(cx).value().trim().to_owned(),
-            default_segments: Self::parse_int(&form.segments, cx) as i32,
+            default_segments: segments,
             default_user_agent: form.user_agent.read(cx).value().trim().to_owned(),
         };
         let schedule_enabled = form.schedule_enabled;
@@ -348,6 +414,16 @@ impl QueueManagerView {
                 );
             }
             None => {
+                if schedule_enabled {
+                    // QueueCreate 不带定时字段也不返回 id：记下创建前的队列集合，
+                    // 等队列列表回流后取新出现的那个再补发定时（与 web 一致）。
+                    self.pending_schedule = Some(PendingSchedule {
+                        known_ids: self.queues.iter().map(|q| q.queue_id.clone()).collect(),
+                        start_time: start,
+                        stop_time: stop,
+                        days: schedule_days,
+                    });
+                }
                 self.run_command(DownloadsCommand::QueueCreate(fields), cx);
                 self.form = None;
             }
@@ -396,7 +472,8 @@ impl QueueManagerView {
                     cx,
                 ))
                 .on_ok(move |_, _, cx| {
-                    let _ = view.update(cx, |this, cx| {
+                    // 队列页释放后没有提交删除，确认框不能报告成功。
+                    view.update(cx, |this, cx| {
                         this.run_command(
                             DownloadsCommand::QueueDelete {
                                 queue_id: queue_id.clone(),
@@ -405,8 +482,8 @@ impl QueueManagerView {
                         );
                         this.form = None;
                         cx.notify();
-                    });
-                    true
+                    })
+                    .is_ok()
                 })
         });
     }
@@ -430,7 +507,8 @@ impl QueueManagerView {
                 Ok(Ok(Some(paths))) => paths.first().map(|path| path.display().to_string()),
                 _ => None,
             };
-            let _ = this.update_in(cx, |this, window, cx| {
+
+            let Ok(()) = this.update_in(cx, |this, window, cx| {
                 if let Some(form) = &mut this.form {
                     form.picking_dir = false;
                     if let Some(path) = picked {
@@ -439,7 +517,10 @@ impl QueueManagerView {
                     }
                 }
                 cx.notify();
-            });
+            }) else {
+                // 视图或窗口已释放，停止回写异步结果。
+                return;
+            };
         })
         .detach();
     }
@@ -701,9 +782,12 @@ impl QueueManagerView {
                     PopupMenuItem::new(unset_item.clone())
                         .checked(hour.is_none())
                         .on_click(move |_, _, cx| {
-                            let _ = clear.update(cx, |this, cx| {
+                            let Ok(()) = clear.update(cx, |this, cx| {
                                 this.set_schedule_time(slot, None, cx);
-                            });
+                            }) else {
+                                // 视图已释放，结束回调而不再更新状态。
+                                return;
+                            };
                         }),
                 );
                 (0..24u16).fold(menu, |menu, h| {
@@ -712,9 +796,12 @@ impl QueueManagerView {
                         PopupMenuItem::new(SharedString::from(format!("{h:02}")))
                             .checked(hour == Some(h))
                             .on_click(move |_, _, cx| {
-                                let _ = this.update(cx, |this, cx| {
+                                let Ok(()) = this.update(cx, |this, cx| {
                                     this.set_schedule_time(slot, Some(h * 60 + minute), cx);
-                                });
+                                }) else {
+                                    // 视图已释放，结束回调而不再更新状态。
+                                    return;
+                                };
                             }),
                     )
                 })
@@ -741,9 +828,12 @@ impl QueueManagerView {
                         PopupMenuItem::new(SharedString::from(format!("{m:02}")))
                             .checked(m == minute)
                             .on_click(move |_, _, cx| {
-                                let _ = this.update(cx, |this, cx| {
+                                let Ok(()) = this.update(cx, |this, cx| {
                                     this.set_schedule_time(slot, Some(hour * 60 + m), cx);
-                                });
+                                }) else {
+                                    // 视图已释放，结束回调而不再更新状态。
+                                    return;
+                                };
                             }),
                     )
                 })
@@ -795,12 +885,15 @@ impl QueueManagerView {
                 days & bit != 0,
                 SharedString::from(label.to_owned()),
                 move |checked, _, cx| {
-                    let _ = this.update(cx, |this, cx| {
+                    let Ok(()) = this.update(cx, |this, cx| {
                         if let Some(form) = &mut this.form {
                             form.schedule_days = toggle_day_bit(form.schedule_days, bit, checked);
                         }
                         cx.notify();
-                    });
+                    }) else {
+                        // 视图已释放，结束回调而不再更新状态。
+                        return;
+                    };
                 },
                 cx,
             ));
@@ -1008,7 +1101,25 @@ impl Render for QueueManagerView {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_time, minute_choices, parse_time, toggle_day_bit};
+    use super::{format_time, minute_choices, parse_non_negative, parse_time, toggle_day_bit};
+
+    #[test]
+    fn parse_non_negative_accepts_empty_and_in_range_values() {
+        assert_eq!(parse_non_negative("", 64), Some(0));
+        assert_eq!(parse_non_negative("0", 64), Some(0));
+        assert_eq!(parse_non_negative("64", 64), Some(64));
+        assert_eq!(parse_non_negative("2147483647", i32::MAX), Some(i32::MAX));
+    }
+
+    #[test]
+    fn parse_non_negative_rejects_invalid_input() {
+        assert_eq!(parse_non_negative("-1", 64), None);
+        assert_eq!(parse_non_negative("abc", 64), None);
+        assert_eq!(parse_non_negative("1.5", 64), None);
+        assert_eq!(parse_non_negative("65", 64), None);
+        assert_eq!(parse_non_negative("2147483648", i32::MAX), None);
+        assert_eq!(parse_non_negative("99999999999999999999", i32::MAX), None);
+    }
 
     #[test]
     fn parse_time_round_trips_wire_format() {
