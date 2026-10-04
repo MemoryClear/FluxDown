@@ -5,7 +5,7 @@ use fluxdown_ui_components::{
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     App, AppContext as _, ClickEvent, Context, Entity, IntoElement, ParentElement, Render,
-    SharedString, Styled, Window, prelude::FluentBuilder as _, px,
+    SharedString, Styled, Window, prelude::FluentBuilder as _,
 };
 use gpui_component::{
     Disableable as _, WindowExt as _,
@@ -107,7 +107,7 @@ pub(crate) fn open(host: &Entity<AccountHost>, window: &mut Window, cx: &mut App
             let content = view.clone();
             dialog
                 .title(dialog_title(title, cx))
-                .w(px(480.))
+                .w(active_theme(cx).text_extent(480.))
                 .close_button(!busy)
                 .keyboard(!busy)
                 .overlay_closable(!busy)

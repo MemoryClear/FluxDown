@@ -11,7 +11,7 @@ use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     App, AppContext as _, ClickEvent, Context, Entity, FontWeight, IntoElement, ParentElement,
-    Render, SharedString, Styled, Window, div, prelude::FluentBuilder as _, px,
+    Render, SharedString, Styled, Window, div, prelude::FluentBuilder as _,
 };
 use gpui_component::{
     Disableable as _, WindowExt as _,
@@ -56,7 +56,7 @@ pub(crate) fn open(
         let view = view.clone();
         dialog
             .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
-            .w(px(520.))
+            .w(active_theme(cx).text_extent(520.))
             .content(move |content, _, _| content.min_h_0().child(view.clone()))
     });
     email_input.update(cx, |input, cx| input.focus(window, cx));
@@ -85,7 +85,7 @@ pub(crate) fn open_resume(
         let view = view.clone();
         dialog
             .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
-            .w(px(520.))
+            .w(active_theme(cx).text_extent(520.))
             .content(move |content, _, _| content.min_h_0().child(view.clone()))
     });
 }

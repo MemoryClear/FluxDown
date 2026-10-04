@@ -11,7 +11,7 @@ use fluxdown_ui_components::{
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     AppContext as _, Context, Div, Entity, InteractiveElement as _, IntoElement, ParentElement,
-    SharedString, StatefulInteractiveElement as _, Styled, Window, prelude::FluentBuilder as _, px,
+    SharedString, StatefulInteractiveElement as _, Styled, Window, prelude::FluentBuilder as _,
 };
 use gpui_component::{
     Disableable as _, Icon, WindowExt as _,
@@ -1310,7 +1310,7 @@ impl ExtensionsView {
             let form_for_save = form.clone();
             dialog
                 .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
-                .w(px(560.))
+                .w(active_theme(cx).text_extent(560.))
                 .overlay_closable(!is_saving)
                 // min_h_0：窗口矮于对话框时让内容区收缩，交给表单内部滚动。
                 .content(move |content, _, _| content.min_h_0().child(form_for_content.clone()))
@@ -1363,7 +1363,7 @@ impl ExtensionsView {
             let dialog_for_cancel = dialog_for_cancel.clone();
             dialog_view
                 .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
-                .w(px(520.))
+                .w(active_theme(cx).text_extent(520.))
                 .on_cancel(move |_, _, cx| {
                     dialog_for_cancel.update(cx, |this, cx| this.cancel_session(cx));
                     true

@@ -114,7 +114,18 @@ impl FluxThemeState {
         self.appearance.ui_scale_percent
     }
 
-    /// 完整运行时主题（已按界面缩放）。
+    /// 字体大小百分比（80 ~ 150）。
+    pub fn font_scale_percent(&self) -> u16 {
+        self.appearance.font_scale_percent
+    }
+
+    /// 随文字宽度伸缩的固定尺寸（标签列宽、按字符数估算的列宽等），按界面缩放 × 字体大小换算
+    /// `base`（100% 下的 px）。高度不要用它：行高另含字体度量抬升，应由排版 / 密度 token 推导。
+    pub fn text_extent(&self, base: f32) -> gpui::Pixels {
+        gpui::px(base * self.appearance.ui_scale() * self.appearance.font_scale())
+    }
+
+    /// 完整运行时主题（已按界面缩放与字体大小适配）。
     pub fn resolved(&self) -> &ResolvedTheme {
         &self.theme
     }
@@ -265,7 +276,8 @@ fn set_appearance(appearance: AppearancePreferences, window: Option<&mut Window>
 
 /// 偏好快照 → 外观。读取 `appearance.theme_mode` / `appearance.dark_theme` /
 /// `appearance.light_theme` / `appearance.color_scheme` / `appearance.custom_color` /
-/// `ui_scale`；与当前状态一致时不做任何事，可在每次快照/偏好事件上幂等调用。
+/// `ui_scale` / `desktop.font_family` / `desktop.font_scale`；与当前状态一致时不做任何事，
+/// 可在每次快照/偏好事件上幂等调用。
 pub fn apply_appearance_preferences(values: &BTreeMap<String, Value>, cx: &mut App) {
     let appearance = AppearancePreferences::from_values(values);
     if cx
@@ -312,6 +324,11 @@ fn install(
             &crate::available_font_families(cx),
         );
     }
+    // 行高下限取界面字体与等宽字体中较高的自然行高：两者都会出现在同一套行高 token 下。
+    let typography = &theme.base.typography;
+    let line_ratio = crate::fonts::natural_line_ratio(&typography.sans, cx)
+        .max(crate::fonts::natural_line_ratio(&typography.mono, cx));
+    crate::fonts::fit_text(&mut theme, appearance.font_scale(), line_ratio);
     let tokens = &theme.base;
     let extended = &theme.extended;
 

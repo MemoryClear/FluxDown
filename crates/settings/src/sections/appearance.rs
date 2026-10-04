@@ -1,4 +1,4 @@
-//! 外观：语言、明暗模式、主题（内置 + 已导入，含导入 / 导出 / 删除）、强调色、界面缩放。
+//! 外观：语言、明暗模式、主题（内置 + 已导入，含导入 / 导出 / 删除）、强调色、界面缩放、字体与字体大小。
 //!
 //! 控件只写偏好（走 `agent.preferences.patch`），不直接改主题 / 语言：app 观察设置存储的偏好
 //! 视图（含未回执的本地编辑），经 `fluxdown_ui_theme::apply_appearance_preferences` 与语言切换
@@ -7,9 +7,10 @@
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::{
     AccentScheme, AppearancePreferences, BuiltinThemeId, COLOR_SCHEME_KEY, CUSTOM_COLOR_KEY,
-    ColorTokens, DARK_THEME_KEY, ExportMode, ExtendedTokens, LIGHT_THEME_KEY, THEME_MODE_KEY,
-    ThemeMode, ThemePreference, ThemeSelection, UI_SCALE_KEY, UI_SCALE_PERCENTS, active_theme,
-    argb_color, color_argb, foreground_for, normalize_ui_scale_percent,
+    ColorTokens, DARK_THEME_KEY, ExportMode, ExtendedTokens, FONT_SCALE_KEY, FONT_SCALE_PERCENTS,
+    LIGHT_THEME_KEY, THEME_MODE_KEY, ThemeMode, ThemePreference, ThemeSelection, UI_SCALE_KEY,
+    UI_SCALE_PERCENTS, active_theme, argb_color, color_argb, foreground_for,
+    normalize_ui_scale_percent,
 };
 use gpui::{
     Anchor, App, AppContext as _, Entity, Hsla, InteractiveElement as _, IntoElement as _,
@@ -82,7 +83,8 @@ pub(crate) fn page(ctx: &SectionContext, _cx: &mut App) -> SettingsPage {
                 "fontFamily",
                 Some("fontFamilyDesktopHint"),
                 super::font_family::field(ctx),
-            )),
+            ))
+            .row(ctx.item("fontScale", Some("fontScaleDesc"), font_scale_field(ctx))),
     ])
 }
 
@@ -158,6 +160,7 @@ fn theme_cards_field(ctx: &SectionContext) -> Control {
             let selected = state.appearance().theme(mode).clone();
             let tokens = state.tokens().clone();
             let extended = state.extended().clone();
+            let card_width = state.text_extent(THEME_CARD_WIDTH);
             let group_label = if mode.is_dark() {
                 dark_label.clone()
             } else {
@@ -183,6 +186,7 @@ fn theme_cards_field(ctx: &SectionContext) -> Control {
                     disabled,
                     &tokens,
                     &extended,
+                    card_width,
                     move |cx| select_theme(ThemeSelection::Builtin(id), &store, cx),
                     None,
                 )
@@ -210,6 +214,7 @@ fn theme_cards_field(ctx: &SectionContext) -> Control {
                         disabled,
                         &tokens,
                         &extended,
+                        card_width,
                         move |cx| select_theme(selection.clone(), &select_store, cx),
                         Some(CardDelete {
                             label: delete_label.clone(),
@@ -312,6 +317,7 @@ fn theme_card(
     disabled: bool,
     tokens: &fluxdown_ui_theme::SemanticThemeTokens,
     extended: &ExtendedTokens,
+    width: gpui::Pixels,
     on_select: impl Fn(&mut App) + 'static,
     delete: Option<CardDelete>,
 ) -> impl gpui::IntoElement {
@@ -387,7 +393,7 @@ fn theme_card(
 
     div()
         .id(element_id)
-        .w(px(THEME_CARD_WIDTH))
+        .w(width)
         .p(tokens.spacing.sm)
         .rounded(tokens.radius.lg)
         .border_1()
@@ -808,10 +814,41 @@ fn custom_color_picker(
     )
 }
 
-// ───────────────────────── 界面缩放 ─────────────────────────
+// ───────────────────────── 界面缩放 / 字体大小 ─────────────────────────
 
 fn ui_scale_field(ctx: &SectionContext) -> Control {
-    let options: Vec<(SharedString, SharedString)> = UI_SCALE_PERCENTS
+    percent_dropdown(
+        ctx,
+        &UI_SCALE_PERCENTS,
+        |cx| active_theme(cx).ui_scale_percent(),
+        |appearance, percent| {
+            appearance.ui_scale_percent = percent;
+            (UI_SCALE_KEY, appearance.ui_scale_pref_value())
+        },
+    )
+}
+
+/// 本机文字大小：只放大文字与承载文字的行 / 控件高度，与界面缩放相乘。
+fn font_scale_field(ctx: &SectionContext) -> Control {
+    percent_dropdown(
+        ctx,
+        &FONT_SCALE_PERCENTS,
+        |cx| active_theme(cx).font_scale_percent(),
+        |appearance, percent| {
+            appearance.font_scale_percent = percent;
+            (FONT_SCALE_KEY, appearance.font_scale_pref_value())
+        },
+    )
+}
+
+/// 百分比档位下拉：选中后按 `apply` 更新外观副本并写入它返回的 `(键, 倍率)` 偏好。
+fn percent_dropdown(
+    ctx: &SectionContext,
+    percents: &[u16],
+    current: fn(&App) -> u16,
+    apply: fn(&mut AppearancePreferences, u16) -> (&'static str, f64),
+) -> Control {
+    let options: Vec<(SharedString, SharedString)> = percents
         .iter()
         .map(|percent| {
             (
@@ -823,16 +860,15 @@ fn ui_scale_field(ctx: &SectionContext) -> Control {
     let store = ctx.store();
     Control::dropdown(
         options,
-        move |cx: &App| SharedString::from(active_theme(cx).ui_scale_percent().to_string()),
+        move |cx: &App| SharedString::from(current(cx).to_string()),
         move |value: SharedString, cx: &mut App| {
             let Ok(percent) = value.parse::<u16>() else {
                 return;
             };
             let mut appearance = active_theme(cx).appearance().clone();
-            appearance.ui_scale_percent = normalize_ui_scale_percent(percent);
-            let scale = appearance.ui_scale_pref_value();
+            let (key, scale) = apply(&mut appearance, normalize_ui_scale_percent(percent));
             store.update(cx, |store, cx| {
-                store.set_pref(UI_SCALE_KEY, serde_json::Value::from(scale), cx);
+                store.set_pref(key, serde_json::Value::from(scale), cx);
             });
         },
     )

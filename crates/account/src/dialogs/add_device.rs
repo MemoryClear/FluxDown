@@ -68,7 +68,7 @@ pub fn open(host: &Entity<AccountHost>, window: &mut Window, cx: &mut App) {
         let closing = closing.clone();
         dialog
             .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
-            .w(px(560.))
+            .w(active_theme(cx).text_extent(560.))
             .content(move |content, _, _| content.min_h_0().child(view.clone()))
             .on_close(move |_, _, cx| {
                 closing.update(cx, |this, cx| this.shutdown(cx));

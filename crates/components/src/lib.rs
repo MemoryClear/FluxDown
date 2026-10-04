@@ -21,7 +21,6 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, Div, ElementId, FontFeatures, FontWeight, Hsla, InteractiveElement, IntoElement,
     ParentElement, Pixels, SharedString, StatefulInteractiveElement as _, Styled, div, px,
-    relative,
 };
 pub use gpui_base::Button;
 use gpui_component::Sizable as _;
@@ -87,7 +86,7 @@ fn text_button_frame(id: impl Into<ElementId>, variant: ButtonVariant, cx: &App)
     Button::new(id)
         .h(theme.density().control)
         .px(tokens.spacing.sm + tokens.spacing.xxs)
-        .line_height(relative(1.))
+        .line_height(tokens.typography.sm.line_height)
         .flex()
         .items_center()
         .justify_center()
@@ -155,7 +154,7 @@ pub fn choice_chip(
     Button::new(id)
         .h(theme.density().control)
         .px(tokens.spacing.sm + tokens.spacing.xxs)
-        .line_height(relative(1.))
+        .line_height(tokens.typography.sm.line_height)
         .flex()
         .items_center()
         .justify_center()
@@ -256,7 +255,7 @@ pub fn primary_icon_button(
     Button::new(id)
         .h(theme.density().control)
         .px(tokens.spacing.sm + tokens.spacing.xxs)
-        .line_height(relative(1.))
+        .line_height(tokens.typography.sm.line_height)
         .flex()
         .items_center()
         .justify_center()
@@ -390,7 +389,9 @@ pub fn sidebar_navigation_button(
         .h(theme.density().nav_row)
         .w_full()
         .px(tokens.spacing.sm)
-        .line_height(relative(1.))
+        // 行高须容纳回退字体的 ascent+descent：Linux 下 Noto Sans CJK 约 1.45em，
+        // 行高=字号时基线下移，配合标签 `truncate` 会裁掉「序」等字的下伸笔画。
+        .line_height(tokens.typography.sm.line_height)
         .flex()
         .items_center()
         .justify_between()

@@ -892,6 +892,8 @@
   "fontFamilySaveFailed": "字体设置已在当前会话生效，但无法保存到浏览器，刷新后可能丢失。",
   "uiScale": "界面缩放",
   "uiScaleDesc": "调整界面整体缩放比例",
+  "fontScale": "字体大小",
+  "fontScaleDesc": "调整本机界面文字大小，行高与控件随之适配；与界面缩放叠加生效",
   "appIcon": "应用图标",
   "appIconDesc": "自定义窗口、任务栏与托盘使用的应用图标",
   "appIconDefault": "默认",

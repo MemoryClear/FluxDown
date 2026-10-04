@@ -102,7 +102,7 @@ pub(super) fn open_editor(
         let editor = editor.clone();
         dialog
             .title(dialog_title(title.clone(), cx))
-            .w(px(640.))
+            .w(active_theme(cx).text_extent(640.))
             .overlay_closable(false)
             .keyboard(false)
             .close_button(false)

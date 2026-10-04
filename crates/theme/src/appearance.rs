@@ -1,5 +1,5 @@
 //! 外观偏好：与 Flutter `theme_provider.dart` / `sync_catalog.dart` 同基线的
-//! 内置主题 ID、强调色方案、界面缩放，以及偏好快照的解析。
+//! 内置主题 ID、强调色方案、界面缩放，以及偏好快照的解析；另含桌面专属的字体 / 字号偏好。
 
 use std::collections::BTreeMap;
 
@@ -204,7 +204,7 @@ pub fn color_argb(color: Hsla) -> u32 {
     0xFF00_0000 | (channel(rgba.r) << 16) | (channel(rgba.g) << 8) | channel(rgba.b)
 }
 
-/// 把缩放百分比限制到 Flutter 允许范围（80 ~ 150）并按 10 取整。
+/// 把缩放百分比限制到 Flutter 允许范围（80 ~ 150）并按 10 取整。界面缩放与字体大小共用此规则。
 #[must_use]
 pub fn normalize_ui_scale_percent(percent: u16) -> u16 {
     let clamped = percent.clamp(UI_SCALE_MIN, UI_SCALE_MAX);
@@ -268,6 +268,8 @@ pub struct AppearancePreferences {
     pub custom_color: u32,
     /// 80 ~ 150，步进 10。
     pub ui_scale_percent: u16,
+    /// 本机文字大小百分比（80 ~ 150，步进 10）：只放大排版与承载文字的行高，与界面缩放相乘。
+    pub font_scale_percent: u16,
 }
 
 impl Default for AppearancePreferences {
@@ -280,6 +282,7 @@ impl Default for AppearancePreferences {
             color_scheme: AccentScheme::Blue,
             custom_color: DEFAULT_CUSTOM_COLOR,
             ui_scale_percent: 100,
+            font_scale_percent: 100,
         }
     }
 }
@@ -312,8 +315,12 @@ impl AppearancePreferences {
                 .unwrap_or(defaults.custom_color),
             ui_scale_percent: values
                 .get(UI_SCALE_KEY)
-                .and_then(parse_ui_scale_percent)
+                .and_then(parse_scale_percent)
                 .unwrap_or(defaults.ui_scale_percent),
+            font_scale_percent: values
+                .get(crate::FONT_SCALE_KEY)
+                .and_then(parse_scale_percent)
+                .unwrap_or(defaults.font_scale_percent),
         }
     }
 
@@ -333,6 +340,18 @@ impl AppearancePreferences {
     #[must_use]
     pub fn ui_scale_pref_value(&self) -> f64 {
         f64::from(self.ui_scale_percent) / 100.
+    }
+
+    /// 文字缩放倍率（`font_scale_percent / 100`）。
+    #[must_use]
+    pub fn font_scale(&self) -> f32 {
+        f32::from(self.font_scale_percent) / 100.
+    }
+
+    /// 写入 [`FONT_SCALE_KEY`](crate::FONT_SCALE_KEY) 的值（与界面缩放同为 `double` 倍率）。
+    #[must_use]
+    pub fn font_scale_pref_value(&self) -> f64 {
+        f64::from(self.font_scale_percent) / 100.
     }
 
     /// 指定槽位当前选中的主题。
@@ -423,8 +442,8 @@ pub fn rgb_hex(argb: u32) -> String {
     format!("{:06X}", argb & 0x00FF_FFFF)
 }
 
-/// 接受倍率数字（`1.2`）或其字符串形式（KvStore）。
-fn parse_ui_scale_percent(value: &Value) -> Option<u16> {
+/// 接受倍率数字（`1.2`）或其字符串形式（KvStore）；界面缩放与字体大小共用。
+fn parse_scale_percent(value: &Value) -> Option<u16> {
     let scale = match value {
         Value::Number(number) => number.as_f64()?,
         Value::String(text) => text.trim().parse::<f64>().ok()?,

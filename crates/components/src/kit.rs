@@ -52,6 +52,7 @@ impl ControlExt for Button {
             .h(theme.density().control)
             .px(tokens.spacing.sm + tokens.spacing.xxs)
             .text_size(tokens.typography.sm.size)
+            .line_height(tokens.typography.sm.line_height)
     }
 }
 
@@ -135,6 +136,7 @@ pub fn segmented_tabs(
                 .items_center()
                 .rounded(tab_radius)
                 .text_size(tokens.typography.sm.size)
+                .line_height(tokens.typography.sm.line_height)
                 .cursor_pointer()
                 .map(|this| {
                     if active {
@@ -179,6 +181,7 @@ pub fn check_row(
         .rounded(tokens.radius.md)
         .cursor_pointer()
         .text_size(tokens.typography.sm.size)
+        .line_height(tokens.typography.sm.line_height)
         .text_color(tokens.colors.foreground)
         .border_1()
         .border_color(gpui::transparent_black())

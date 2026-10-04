@@ -892,6 +892,8 @@
   "fontFamilySaveFailed": "The font setting is applied for this session, but could not be saved in this browser. It may be lost after reloading.",
   "uiScale": "Interface Scale",
   "uiScaleDesc": "Adjust the overall interface scale",
+  "fontScale": "Font Size",
+  "fontScaleDesc": "Adjust the size of interface text on this computer; rows and controls grow to fit. Combines with interface scale",
   "appIcon": "App Icon",
   "appIconDesc": "Customize the icon used by the window, taskbar and tray",
   "appIconDefault": "Default",

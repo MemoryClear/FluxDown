@@ -8,7 +8,7 @@ use fluxdown_ui_components::{ControlExt as _, field_error, field_hint};
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     App, AppContext as _, ClickEvent, Context, Entity, FontWeight, Global, IntoElement,
-    ParentElement, Render, SharedString, Styled, Window, div, prelude::FluentBuilder as _, px,
+    ParentElement, Render, SharedString, Styled, Window, div, prelude::FluentBuilder as _,
 };
 use gpui_component::{
     Disableable as _, WindowExt as _,
@@ -69,7 +69,7 @@ fn open_now(host: &Entity<AccountHost>, session_id: &str, window: &mut Window, c
         let view = view.clone();
         dialog
             .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
-            .w(px(480.))
+            .w(active_theme(cx).text_extent(480.))
             .close_button(false)
             .overlay_closable(false)
             .keyboard(false)

@@ -18,7 +18,7 @@ use gpui_component::{
 };
 
 use crate::{
-    components::task_table::{SELECTION_COLUMN_WIDTH, TABLE_HEADER_HEIGHT, ToolbarCommand},
+    components::task_table::{SELECTION_COLUMN_WIDTH, ToolbarCommand, table_header_height},
     model::{RowKey, TaskState, TaskStore},
     pages::downloads::DownloadView,
 };
@@ -301,7 +301,7 @@ impl DownloadView {
                 .left(px(SELECTION_COLUMN_WIDTH))
                 .right_0()
                 // 留出表头底部分隔线。
-                .h(px(TABLE_HEADER_HEIGHT) - stroke)
+                .h(table_header_height(cx) - stroke)
                 .pl(spacing.sm)
                 .gap(spacing.xxs)
                 .items_center()
