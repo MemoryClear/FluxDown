@@ -7,9 +7,9 @@
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::{
     AccentScheme, AppearancePreferences, BuiltinThemeId, COLOR_SCHEME_KEY, CUSTOM_COLOR_KEY,
-    ColorTokens, DARK_THEME_KEY, ExportMode, ExtendedTokens, FONT_SCALE_KEY, FONT_SCALE_PERCENTS,
-    LIGHT_THEME_KEY, THEME_MODE_KEY, ThemeMode, ThemePreference, ThemeSelection, UI_SCALE_KEY,
-    UI_SCALE_PERCENTS, active_theme, argb_color, color_argb, foreground_for,
+    ColorTokens, DARK_THEME_KEY, ExportMode, ExtendedTokens, FONT_SIZE_KEY, FONT_SIZE_RANGE,
+    FONT_SIZES, LIGHT_THEME_KEY, THEME_MODE_KEY, ThemeMode, ThemePreference, ThemeSelection,
+    UI_SCALE_KEY, UI_SCALE_PERCENTS, active_theme, argb_color, color_argb, foreground_for,
     normalize_ui_scale_percent,
 };
 use gpui::{
@@ -84,7 +84,7 @@ pub(crate) fn page(ctx: &SectionContext, _cx: &mut App) -> SettingsPage {
                 Some("fontFamilyDesktopHint"),
                 super::font_family::field(ctx),
             ))
-            .row(ctx.item("fontScale", Some("fontScaleDesc"), font_scale_field(ctx))),
+            .row(ctx.item("fontSize", Some("fontSizeDesc"), font_size_field(ctx))),
     ])
 }
 
@@ -817,38 +817,7 @@ fn custom_color_picker(
 // ───────────────────────── 界面缩放 / 字体大小 ─────────────────────────
 
 fn ui_scale_field(ctx: &SectionContext) -> Control {
-    percent_dropdown(
-        ctx,
-        &UI_SCALE_PERCENTS,
-        |cx| active_theme(cx).ui_scale_percent(),
-        |appearance, percent| {
-            appearance.ui_scale_percent = percent;
-            (UI_SCALE_KEY, appearance.ui_scale_pref_value())
-        },
-    )
-}
-
-/// 本机文字大小：只放大文字与承载文字的行 / 控件高度，与界面缩放相乘。
-fn font_scale_field(ctx: &SectionContext) -> Control {
-    percent_dropdown(
-        ctx,
-        &FONT_SCALE_PERCENTS,
-        |cx| active_theme(cx).font_scale_percent(),
-        |appearance, percent| {
-            appearance.font_scale_percent = percent;
-            (FONT_SCALE_KEY, appearance.font_scale_pref_value())
-        },
-    )
-}
-
-/// 百分比档位下拉：选中后按 `apply` 更新外观副本并写入它返回的 `(键, 倍率)` 偏好。
-fn percent_dropdown(
-    ctx: &SectionContext,
-    percents: &[u16],
-    current: fn(&App) -> u16,
-    apply: fn(&mut AppearancePreferences, u16) -> (&'static str, f64),
-) -> Control {
-    let options: Vec<(SharedString, SharedString)> = percents
+    let options: Vec<(SharedString, SharedString)> = UI_SCALE_PERCENTS
         .iter()
         .map(|percent| {
             (
@@ -860,16 +829,54 @@ fn percent_dropdown(
     let store = ctx.store();
     Control::dropdown(
         options,
-        move |cx: &App| SharedString::from(current(cx).to_string()),
+        move |cx: &App| SharedString::from(active_theme(cx).ui_scale_percent().to_string()),
         move |value: SharedString, cx: &mut App| {
             let Ok(percent) = value.parse::<u16>() else {
                 return;
             };
             let mut appearance = active_theme(cx).appearance().clone();
-            let (key, scale) = apply(&mut appearance, normalize_ui_scale_percent(percent));
+            appearance.ui_scale_percent = normalize_ui_scale_percent(percent);
+            let scale = appearance.ui_scale_pref_value();
             store.update(cx, |store, cx| {
-                store.set_pref(key, serde_json::Value::from(scale), cx);
+                store.set_pref(UI_SCALE_KEY, serde_json::Value::from(scale), cx);
             });
+        },
+    )
+}
+
+/// 下拉中「跟随主题」项的值；写入偏好时为 `null`（清除本机字号）。
+const FONT_SIZE_THEME: &str = "theme";
+
+/// 本机正文字号（px）：其余文字与承载文字的行 / 控件高度同比适配，再与界面缩放相乘。
+fn font_size_field(ctx: &SectionContext) -> Control {
+    let mut options = vec![(
+        SharedString::from(FONT_SIZE_THEME),
+        ctx.t("fontSizeFollowTheme"),
+    )];
+    options.extend(FONT_SIZES.iter().map(|size| {
+        (
+            SharedString::from(size.to_string()),
+            SharedString::from(format!("{size} px")),
+        )
+    }));
+    let store = ctx.store();
+    Control::dropdown(
+        options,
+        move |cx: &App| {
+            active_theme(cx)
+                .appearance()
+                .font_size
+                .map_or(SharedString::from(FONT_SIZE_THEME), |size| {
+                    SharedString::from(size.to_string())
+                })
+        },
+        move |value: SharedString, cx: &mut App| {
+            let pref = match value.parse::<u16>() {
+                Ok(size) if FONT_SIZE_RANGE.contains(&size) => serde_json::Value::from(size),
+                Ok(_) => return,
+                Err(_) => serde_json::Value::Null,
+            };
+            store.update(cx, |store, cx| store.set_pref(FONT_SIZE_KEY, pref, cx));
         },
     )
 }

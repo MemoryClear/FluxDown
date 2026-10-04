@@ -5,12 +5,15 @@ use crate::ResolvedTheme;
 /// 设备本地偏好，不进入主题文档或云同步目录。
 pub const FONT_FAMILY_KEY: &str = "desktop.font_family";
 
-/// 设备本地偏好：界面文字大小倍率（`double`，`0.8` ~ `1.5`，按 0.1 取整，与 `ui_scale` 同编码）；
+/// 设备本地偏好：正文字号（整数 px，界面缩放前，如 `14`）；缺失时沿用主题正文字号。
 /// 不进入主题文档或云同步目录。
-pub const FONT_SCALE_KEY: &str = "desktop.font_scale";
+pub const FONT_SIZE_KEY: &str = "desktop.font_size";
 
-/// 设置页提供的字体大小档位（百分比）。
-pub const FONT_SCALE_PERCENTS: [u16; 8] = [80, 90, 100, 110, 120, 130, 140, 150];
+/// 可接受的正文字号范围（px）。
+pub const FONT_SIZE_RANGE: std::ops::RangeInclusive<u16> = 10..=24;
+
+/// 设置页提供的正文字号档位（px）。
+pub const FONT_SIZES: [u16; 10] = [11, 12, 13, 14, 15, 16, 17, 18, 20, 22];
 
 /// GPUI 当前平台字体后端可用的字体族；不推测或硬编码系统字体。
 #[must_use]
@@ -97,7 +100,7 @@ pub(crate) fn fit_text(theme: &mut ResolvedTheme, scale: f32, line_ratio: f32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{FONT_FAMILY_KEY, FONT_SCALE_KEY, apply_font_family, fit_text, normalize_names};
+    use super::{FONT_FAMILY_KEY, FONT_SIZE_KEY, apply_font_family, fit_text, normalize_names};
     use crate::{AppearancePreferences, BuiltinThemeId, ThemeDocument, ThemeMode, resolve};
     use gpui::px;
     use serde_json::json;
@@ -159,20 +162,22 @@ mod tests {
     }
 
     #[test]
-    fn font_scale_preference_parses_like_ui_scale() {
+    fn font_size_preference_is_px_relative_to_theme_body() {
         let parse = |value| {
-            AppearancePreferences::from_values(&[(FONT_SCALE_KEY.into(), value)].into())
-                .font_scale_percent
+            AppearancePreferences::from_values(&[(FONT_SIZE_KEY.into(), value)].into()).font_size
         };
-        assert_eq!(parse(json!(1.2)), 120);
-        assert_eq!(parse(json!("1.44")), 140);
-        for invalid in [json!(3.0), json!(0.1), json!("big"), json!(null)] {
-            assert_eq!(parse(invalid), 100);
+        assert_eq!(parse(json!(14)), Some(14));
+        assert_eq!(parse(json!("16")), Some(16));
+        for invalid in [json!(9), json!(40), json!("big"), json!(null)] {
+            assert_eq!(parse(invalid), None);
         }
-        let prefs =
-            AppearancePreferences::from_values(&[(FONT_SCALE_KEY.into(), json!(1.3))].into());
+        // 超出范围的值视为未设置，回到主题字号。
+        let prefs = AppearancePreferences::from_values(&[(FONT_SIZE_KEY.into(), json!(26))].into());
+        assert_eq!(prefs.font_scale(13.), 1.);
+        let prefs = AppearancePreferences::from_values(&[(FONT_SIZE_KEY.into(), json!(19))].into());
         assert!(prefs.same_palette(&AppearancePreferences::default()));
-        assert_eq!(prefs.font_scale_pref_value(), 1.3);
+        assert!((prefs.font_scale(13.) - 19. / 13.).abs() < f32::EPSILON);
+        assert_eq!(AppearancePreferences::default().font_scale(13.), 1.);
     }
 
     #[test]
