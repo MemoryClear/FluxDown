@@ -125,6 +125,8 @@ pub const AGENT_AUTH_SEND_CODE: &str = "agent.auth.sendCode";
 pub const AGENT_AUTH_VERIFY_CODE: &str = "agent.auth.verifyCode";
 pub const AGENT_AUTH_LOGOUT: &str = "agent.auth.logout";
 pub const AGENT_AUTH_REFRESH_PROFILE: &str = "agent.auth.refreshProfile";
+pub const AGENT_AUTH_SEND_PASSWORD_RESET_CODE: &str = "agent.auth.sendPasswordResetCode";
+pub const AGENT_AUTH_RESET_PASSWORD: &str = "agent.auth.resetPassword";
 pub const AGENT_PROFILE_SEND_EMAIL_CODE: &str = "agent.profile.sendEmailCode";
 pub const AGENT_PROFILE_SEND_NEW_EMAIL_CODE: &str = "agent.profile.sendNewEmailCode";
 pub const AGENT_PROFILE_CHANGE_EMAIL: &str = "agent.profile.changeEmail";
@@ -132,12 +134,16 @@ pub const AGENT_PROFILE_RANDOM_ORIGIN_ID: &str = "agent.profile.randomOriginId";
 pub const AGENT_PROFILE_CHECK_ORIGIN_ID: &str = "agent.profile.checkOriginId";
 pub const AGENT_PROFILE_CHANGE_ORIGIN_ID: &str = "agent.profile.changeOriginId";
 pub const AGENT_PROFILE_CHANGE_NICKNAME: &str = "agent.profile.changeNickname";
+pub const AGENT_PROFILE_SEND_PASSWORD_CODE: &str = "agent.profile.sendPasswordCode";
+pub const AGENT_PROFILE_CHANGE_PASSWORD: &str = "agent.profile.changePassword";
 
 pub const AGENT_GATEWAY_GET: &str = "agent.gateway.get";
 pub const AGENT_GATEWAY_PATCH: &str = "agent.gateway.patch";
 /// 仅供本机官方 UI 展示/复制用户 token；结果 `{ "userToken": "..." }`（未配置为空串）。
 pub const AGENT_GATEWAY_REVEAL_TOKEN: &str = "agent.gateway.revealToken";
 pub const AGENT_DEVICE_LIST: &str = "agent.device.list";
+/// 请求立即重连任务 SSE；返回 `{ "accepted": true }` 不表示已经连接成功。
+pub const AGENT_REMOTE_RECONNECT: &str = "agent.remote.reconnect";
 pub const AGENT_DEVICE_RENAME: &str = "agent.device.rename";
 pub const AGENT_DEVICE_DELETE: &str = "agent.device.delete";
 pub const AGENT_PREFERENCES_PATCH: &str = "agent.preferences.patch";
@@ -200,6 +206,10 @@ pub const AGENT_CAPTURE_SUBMIT: &str = "agent.capture.submit";
 pub const AGENT_CAPTURE_SUBMIT_TORRENT_FILE: &str = "agent.capture.submitTorrentFile";
 pub const AGENT_CAPTURE_LIST: &str = "agent.capture.list";
 pub const AGENT_CAPTURE_RESOLVE: &str = "agent.capture.resolve";
+/// 捕获上下文只读清单预解析，返回 `ResolvePreviewResponse`，不消费事务。
+pub const AGENT_CAPTURE_PREVIEW: &str = "agent.capture.preview";
+/// 用捕获上下文与最终清单选择建组，成功后消费事务，返回 `CreateGroupResponse`。
+pub const AGENT_CAPTURE_CREATE_GROUP: &str = "agent.capture.createGroup";
 /// 从本机插件包安装：agent 读文件、上传 daemon blob 后调用 `daemon.plugin.install`。
 pub const AGENT_PLUGIN_INSTALL_FILE: &str = "agent.plugin.installFile";
 pub const AGENT_DIAGNOSTICS_RUN: &str = "agent.diagnostics.run";
@@ -337,6 +347,8 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_AUTH_VERIFY_CODE,
     AGENT_AUTH_LOGOUT,
     AGENT_AUTH_REFRESH_PROFILE,
+    AGENT_AUTH_SEND_PASSWORD_RESET_CODE,
+    AGENT_AUTH_RESET_PASSWORD,
     AGENT_PROFILE_SEND_EMAIL_CODE,
     AGENT_PROFILE_SEND_NEW_EMAIL_CODE,
     AGENT_PROFILE_CHANGE_EMAIL,
@@ -344,10 +356,13 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_PROFILE_CHECK_ORIGIN_ID,
     AGENT_PROFILE_CHANGE_ORIGIN_ID,
     AGENT_PROFILE_CHANGE_NICKNAME,
+    AGENT_PROFILE_SEND_PASSWORD_CODE,
+    AGENT_PROFILE_CHANGE_PASSWORD,
     AGENT_GATEWAY_GET,
     AGENT_GATEWAY_PATCH,
     AGENT_GATEWAY_REVEAL_TOKEN,
     AGENT_DEVICE_LIST,
+    AGENT_REMOTE_RECONNECT,
     AGENT_DEVICE_RENAME,
     AGENT_DEVICE_DELETE,
     AGENT_PREFERENCES_PATCH,
@@ -393,6 +408,8 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_CAPTURE_SUBMIT_TORRENT_FILE,
     AGENT_CAPTURE_LIST,
     AGENT_CAPTURE_RESOLVE,
+    AGENT_CAPTURE_PREVIEW,
+    AGENT_CAPTURE_CREATE_GROUP,
     AGENT_PLUGIN_INSTALL_FILE,
     AGENT_DIAGNOSTICS_RUN,
     AGENT_DIAGNOSTICS_REPAIR,

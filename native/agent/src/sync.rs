@@ -10,13 +10,14 @@
 //! - 拉取到的单条毒值只跳过并记录，不阻塞水位前进；
 //! - 首次 / resync 把目录里云端没有的本机值播种上云。
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use fluxdown_protocol::{
-    AgentEvent, DaemonConfigPatch, ErrorReason, RpcErrorData, ServiceEvent, SettingSpec,
-    SyncStatusDto, daemon_config_default, daemon_config_to_value, normalize_daemon_config_value,
+    AgentEvent, CUSTOM_THEMES_KEY, DaemonConfigPatch, ErrorReason, RpcErrorData, ServiceEvent,
+    SettingSpec, SyncStatusDto, custom_theme_id, daemon_config_default, daemon_config_to_value,
+    normalize_daemon_config_value, sync_scope_key,
 };
 use futures_util::StreamExt;
 use serde::Deserialize;
@@ -41,6 +42,12 @@ pub fn owner_for_key(key: &str) -> SyncOwner {
     setting_spec(key).map_or(SyncOwner::Excluded, |spec| spec.owner)
 }
 
+/// 键（或其所属集合，如自定义主题键之于 [`CUSTOM_THEMES_KEY`]）已设为本机专属。
+fn is_local_only(local_only_keys: &[String], key: &str) -> bool {
+    let scope = sync_scope_key(key);
+    local_only_keys.iter().any(|local| local == scope)
+}
+
 const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(75);
 const LOCAL_DEBOUNCE: Duration = Duration::from_millis(600);
 const RESYNC_PAUSE: Duration = Duration::from_secs(1);
@@ -53,6 +60,9 @@ const RETRY_DELAYS: [Duration; 4] = [
 ];
 /// SSE 单行上限；超过说明流已损坏。
 const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
+/// 单次推送的条目上限，镜像 FluxCloud `sync::MAX_ITEMS_PER_PUSH`：自定义主题逐个成键，
+/// 首次播种时脏键数可能超出，必须分批。
+const MAX_ITEMS_PER_PUSH: usize = 128;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -126,11 +136,6 @@ impl SyncService {
         self.state.lock().await.sync.clone()
     }
 
-    async fn publish_status(&self) {
-        let sync = self.state.lock().await.sync.clone();
-        self.events.publish(AgentEvent::SyncChanged(sync));
-    }
-
     async fn persist(&self) -> Result<(), SyncError> {
         self.store.persist(&self.state).await?;
         Ok(())
@@ -138,8 +143,9 @@ impl SyncService {
 
     /// 开 / 关同步；用户显式关闭会被记住（登录后不再自动开启）。
     pub async fn set_enabled(&self, enabled: bool) -> Result<(), SyncError> {
+        let epoch = self.cloud.request_epoch();
         {
-            let mut state = self.state.lock().await;
+            let mut state = self.cloud.lock_epoch(epoch).await?;
             state.sync.enabled = enabled;
             state.sync_user_disabled = !enabled;
             if enabled {
@@ -149,9 +155,10 @@ impl SyncService {
             } else {
                 state.sync.connected = false;
             }
+            self.events
+                .publish(AgentEvent::SyncChanged(state.sync.clone()));
         }
         self.persist().await?;
-        self.publish_status().await;
         if enabled {
             self.resume.notify_one();
         }
@@ -165,13 +172,14 @@ impl SyncService {
         keys: &[String],
         local_only: bool,
     ) -> Result<SyncStatusDto, SyncError> {
+        let epoch = self.cloud.request_epoch();
         for key in keys {
             if owner_for_key(key) == SyncOwner::Excluded {
                 return Err(SyncError::UnknownKey(key.clone()));
             }
         }
         let status = {
-            let mut state = self.state.lock().await;
+            let mut state = self.cloud.lock_epoch(epoch).await?;
             let mut set = state
                 .sync
                 .local_only_keys
@@ -182,9 +190,11 @@ impl SyncService {
             for key in keys {
                 if local_only {
                     set.insert(key.clone());
-                    // 专属键不再推送本机的待上传编辑。
-                    if let Some(entry) = state.sync_entries.get_mut(key) {
-                        entry.dirty = false;
+                    // 专属键（含集合下的全部成员键）不再推送本机的待上传编辑。
+                    for (entry_key, entry) in &mut state.sync_entries {
+                        if sync_scope_key(entry_key) == key {
+                            entry.dirty = false;
+                        }
                     }
                 } else if set.remove(key) {
                     rejoined = true;
@@ -197,10 +207,11 @@ impl SyncService {
                 state.sync_pulled = false;
             }
             state.refresh_sync_projection();
+            self.events
+                .publish(AgentEvent::SyncChanged(state.sync.clone()));
             state.sync.clone()
         };
         self.persist().await?;
-        self.events.publish(AgentEvent::SyncChanged(status.clone()));
         self.wake.notify_one();
         Ok(status)
     }
@@ -212,8 +223,9 @@ impl SyncService {
             if cancel.is_cancelled() {
                 return;
             }
+            let epoch = self.cloud.request_epoch();
             if !self.cloud.is_authenticated().await {
-                self.set_connected(false).await;
+                self.set_connected_epoch(false, epoch).await;
                 tokio::select! {
                     _ = cancel.cancelled() => return,
                     _ = self.wake.notified() => {},
@@ -222,7 +234,7 @@ impl SyncService {
                 }
                 continue;
             }
-            match self.enable_by_default().await {
+            match self.enable_by_default(epoch).await {
                 Ok(()) => {}
                 Err(error) => {
                     tracing::warn!(error = %error, "enabling config sync after login failed")
@@ -233,7 +245,7 @@ impl SyncService {
                 (state.sync.enabled, state.sync.halted)
             };
             if !enabled {
-                self.set_connected(false).await;
+                self.set_connected_epoch(false, epoch).await;
                 tokio::select! {
                     _ = cancel.cancelled() => return,
                     _ = self.wake.notified() => {},
@@ -248,13 +260,13 @@ impl SyncService {
                     _ = cancel.cancelled() => return,
                     _ = self.resume.notified() => {},
                     _ = wait_for_session(&mut session_events) => {
-                        self.clear_halt().await;
+                        self.clear_halt(epoch).await;
                     },
                 }
                 continue;
             }
-            if let Err(error) = self.sync_once().await {
-                self.record_error(&error).await;
+            if let Err(error) = self.sync_once_epoch(epoch).await {
+                self.record_error(&error, epoch).await;
                 if error.halts() {
                     continue;
                 }
@@ -269,19 +281,19 @@ impl SyncService {
             }
             let sync_started = std::time::Instant::now();
             let device_id = self.state.lock().await.device_id.clone();
-            match self.cloud.sync_events(&device_id).await {
+            match self.cloud.at_epoch(epoch).sync_events(&device_id).await {
                 Ok(response) => {
-                    self.set_connected(true).await;
+                    self.set_connected_epoch(true, epoch).await;
                     let outcome = self
-                        .consume_events(response, &cancel, &mut session_events)
+                        .consume_events(response, &cancel, &mut session_events, epoch)
                         .await;
-                    self.set_connected(false).await;
+                    self.set_connected_epoch(false, epoch).await;
                     match outcome {
                         Ok(SseEnd::Cancelled) => return,
                         Ok(SseEnd::Stopped) => continue,
                         Ok(SseEnd::Resync) => {
                             tracing::info!("sync SSE asked for resync; reloading everything");
-                            self.force_full_pull().await;
+                            self.force_full_pull(epoch).await;
                             tokio::select! {
                                 _ = cancel.cancelled() => return,
                                 _ = tokio::time::sleep(RESYNC_PAUSE) => {},
@@ -289,7 +301,7 @@ impl SyncService {
                             continue;
                         }
                         Err(error) => {
-                            self.record_error(&error).await;
+                            self.record_error(&error, epoch).await;
                             if error.halts() {
                                 continue;
                             }
@@ -298,7 +310,7 @@ impl SyncService {
                 }
                 Err(error) => {
                     let error = SyncError::Cloud(error);
-                    self.record_error(&error).await;
+                    self.record_error(&error, epoch).await;
                     if error.halts() {
                         continue;
                     }
@@ -318,44 +330,65 @@ impl SyncService {
     }
 
     /// 登录后默认开启同步；用户曾显式关闭则保持关闭。
-    async fn enable_by_default(&self) -> Result<(), SyncError> {
+    async fn enable_by_default(&self, epoch: crate::cloud::RequestEpoch) -> Result<(), SyncError> {
         {
-            let mut state = self.state.lock().await;
+            let mut state = self.cloud.lock_epoch(epoch).await?;
             if state.sync.enabled || state.sync_user_disabled {
                 return Ok(());
             }
             state.sync.enabled = true;
+            self.events
+                .publish(AgentEvent::SyncChanged(state.sync.clone()));
         }
         self.persist().await?;
-        self.publish_status().await;
         Ok(())
     }
 
-    async fn clear_halt(&self) {
+    async fn clear_halt(&self, epoch: crate::cloud::RequestEpoch) {
         {
-            let mut state = self.state.lock().await;
+            let mut state = match self.cloud.lock_epoch(epoch).await {
+                Ok(state) => state,
+                Err(error) => {
+                    tracing::debug!(%error, "discarding stale sync resume");
+                    return;
+                }
+            };
             if !state.sync.halted {
                 return;
             }
             state.sync.halted = false;
+            self.events
+                .publish(AgentEvent::SyncChanged(state.sync.clone()));
         }
-        self.publish_status().await;
     }
 
-    async fn set_connected(&self, connected: bool) {
+    async fn set_connected_epoch(&self, connected: bool, epoch: crate::cloud::RequestEpoch) {
         {
-            let mut state = self.state.lock().await;
+            let mut state = match self.cloud.lock_epoch(epoch).await {
+                Ok(state) => state,
+                Err(error) => {
+                    tracing::debug!(%error, "discarding stale sync connection state");
+                    return;
+                }
+            };
             if state.sync.connected == connected {
                 return;
             }
             state.sync.connected = connected;
+            self.events
+                .publish(AgentEvent::SyncChanged(state.sync.clone()));
         }
-        self.publish_status().await;
     }
 
     /// 让下一轮同步 `since=0` 并重新播种（resync 事件）。
-    async fn force_full_pull(&self) {
-        let mut state = self.state.lock().await;
+    async fn force_full_pull(&self, epoch: crate::cloud::RequestEpoch) {
+        let mut state = match self.cloud.lock_epoch(epoch).await {
+            Ok(state) => state,
+            Err(error) => {
+                tracing::debug!(%error, "discarding stale sync resync request");
+                return;
+            }
+        };
         state.sync.revision = 0;
         state.sync_pulled = false;
     }
@@ -365,6 +398,7 @@ impl SyncService {
         response: reqwest::Response,
         cancel: &CancellationToken,
         session_events: &mut broadcast::Receiver<fluxdown_protocol::EventFrame>,
+        epoch: crate::cloud::RequestEpoch,
     ) -> Result<SseEnd, SyncError> {
         let stream_uid = self.cloud.current_user_id().await;
         let mut stream = response.bytes_stream();
@@ -411,7 +445,7 @@ impl SyncService {
                     if !self.sync_allowed().await {
                         return Ok(SseEnd::Stopped);
                     }
-                    self.sync_once().await?;
+                    self.sync_once_epoch(epoch).await?;
                 }
                 chunk = stream.next() => {
                     let chunk = chunk
@@ -424,7 +458,7 @@ impl SyncService {
                     }
                     while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
                         let line = buffer.drain(..=newline).collect::<Vec<_>>();
-                        if let Some(end) = self.handle_sse_line(&line).await? {
+                        if let Some(end) = self.handle_sse_line(&line, epoch).await? {
                             return Ok(end);
                         }
                     }
@@ -443,7 +477,12 @@ impl SyncService {
     }
 
     /// 单行 SSE：坏行只记录；`resync` 结束流；有新 revision 则同步。
-    async fn handle_sse_line(&self, line: &[u8]) -> Result<Option<SseEnd>, SyncError> {
+    async fn handle_sse_line(
+        &self,
+        line: &[u8],
+        epoch: crate::cloud::RequestEpoch,
+    ) -> Result<Option<SseEnd>, SyncError> {
+        drop(self.cloud.lock_epoch(epoch).await?);
         let Ok(line) = std::str::from_utf8(line) else {
             tracing::warn!("sync SSE line is not UTF-8; skipped");
             return Ok(None);
@@ -470,55 +509,70 @@ impl SyncService {
                 if !self.sync_allowed().await {
                     return Ok(Some(SseEnd::Stopped));
                 }
-                self.sync_once().await?;
+                self.sync_once_epoch(epoch).await?;
             }
         }
         Ok(None)
     }
 
     /// 只在内存里记录错误（不落盘：每次重试都写盘没有意义）；不可自动恢复的错误置 `halted`。
-    async fn record_error(&self, error: &SyncError) {
+    async fn record_error(&self, error: &SyncError, epoch: crate::cloud::RequestEpoch) {
         tracing::warn!(error = %error, reason = ?error.reason(), "config sync failed");
         {
-            let mut state = self.state.lock().await;
+            let mut state = match self.cloud.lock_epoch(epoch).await {
+                Ok(state) => state,
+                Err(error) => {
+                    tracing::debug!(%error, "discarding stale sync error");
+                    return;
+                }
+            };
             state.sync.last_error = Some(error.to_string());
             state.sync.last_error_reason = error.reason();
             state.sync.connected = false;
             if error.halts() {
                 state.sync.halted = true;
             }
+            self.events
+                .publish(AgentEvent::SyncChanged(state.sync.clone()));
         }
-        self.publish_status().await;
     }
 
     /// 用户显式「立即同步」：清除 `halted` 后执行一次同步；仍失败则重新 halted 并返回错误。
     pub async fn sync_now(&self) -> Result<(), SyncError> {
-        if !self.state.lock().await.sync.enabled {
+        let epoch = self.cloud.request_epoch();
+        if !self.cloud.lock_epoch(epoch).await?.sync.enabled {
             return Err(SyncError::Disabled);
         }
-        self.clear_halt().await;
-        match self.sync_once().await {
+        self.clear_halt(epoch).await;
+        match self.sync_once_epoch(epoch).await {
             Ok(()) => {
                 self.resume.notify_one();
                 Ok(())
             }
             Err(error) => {
-                self.record_error(&error).await;
+                self.record_error(&error, epoch).await;
                 Err(error)
             }
         }
     }
 
     /// 执行一次严格 pull-before-push 同步。
+    #[cfg(test)]
     async fn sync_once(&self) -> Result<(), SyncError> {
+        let epoch = self.cloud.request_epoch();
+        self.sync_once_epoch(epoch).await
+    }
+
+    async fn sync_once_epoch(&self, epoch: crate::cloud::RequestEpoch) -> Result<(), SyncError> {
         let _gate = self.gate.lock().await;
+        drop(self.cloud.lock_epoch(epoch).await?);
         let uid = self
             .cloud
             .current_user_id()
             .await
             .ok_or_else(|| SyncError::Cloud(CloudError::unauthorized()))?;
         let (since, device_id, first_sync) = {
-            let mut state = self.state.lock().await;
+            let mut state = self.cloud.lock_epoch(epoch).await?;
             state.bind_account(Some(&uid));
             (
                 state.sync.revision,
@@ -526,7 +580,8 @@ impl SyncService {
                 state.sync.revision == 0 || !state.sync_pulled,
             )
         };
-        let pull_value = self.cloud.sync_pull(since, &device_id).await?;
+        let cloud = self.cloud.at_epoch(epoch);
+        let pull_value = cloud.sync_pull(since, &device_id).await?;
         let pull = serde_json::from_value::<PullResult>(pull_value)
             .map_err(|error| SyncError::Protocol(format!("sync pull response: {error}")))?;
         let no_pulled_items = pull.items.is_empty();
@@ -544,7 +599,7 @@ impl SyncService {
 
         let current_daemon = daemon_config_values(&self.events);
         let (daemon_changes, prefs_changed, sent_entries) = {
-            let mut state = self.state.lock().await;
+            let mut state = self.cloud.lock_epoch(epoch).await?;
             if state.account_uid.as_deref() != Some(uid.as_str()) {
                 return Err(SyncError::AccountChanged);
             }
@@ -561,54 +616,64 @@ impl SyncService {
         };
 
         if !daemon_changes.is_empty() {
-            self.patch_daemon(daemon_changes).await?;
+            self.patch_daemon(daemon_changes, epoch).await?;
         }
         let mut idle = false;
         if !sent_entries.is_empty() {
-            let payload = sent_entries
-                .iter()
-                .map(|(key, entry)| {
-                    serde_json::json!({
-                        "key": key,
-                        "value": entry.value,
-                        "deleted": entry.deleted,
-                        "version": entry.version,
+            let sent_entries = sent_entries.into_iter().collect::<Vec<_>>();
+            // 每批回包恰好是上一水位的下一个 revision（本批无实变时等于上一水位）才说明期间无他人
+            // 写入；否则保持 pull 水位，让后续 SSE 触发的 pull 补回并发写入。
+            let mut watermark = Some(pull.revision);
+            for batch in sent_entries.chunks(MAX_ITEMS_PER_PUSH) {
+                let payload = batch
+                    .iter()
+                    .map(|(key, entry)| {
+                        serde_json::json!({
+                            "key": key,
+                            "value": entry.value,
+                            "deleted": entry.deleted,
+                            "version": entry.version,
+                        })
                     })
-                })
-                .collect::<Vec<_>>();
-            let response = self
-                .cloud
-                .sync_push(&serde_json::json!({
-                    "deviceId": device_id,
-                    "items": payload,
-                }))
-                .await?;
-            let revision = response
-                .get("revision")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| SyncError::Protocol("sync push returned no revision".to_owned()))?;
-            let mut state = self.state.lock().await;
+                    .collect::<Vec<_>>();
+                let response = self
+                    .cloud
+                    .at_epoch(epoch)
+                    .sync_push(&serde_json::json!({
+                        "deviceId": device_id,
+                        "items": payload,
+                    }))
+                    .await?;
+                let revision = response
+                    .get("revision")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| {
+                        SyncError::Protocol("sync push returned no revision".to_owned())
+                    })?;
+                let mut state = self.cloud.lock_epoch(epoch).await?;
+                if state.account_uid.as_deref() != Some(uid.as_str()) {
+                    return Err(SyncError::AccountChanged);
+                }
+                for (key, sent) in batch {
+                    if let Some(entry) = state.sync_entries.get_mut(key)
+                        && entry.value == sent.value
+                        && entry.deleted == sent.deleted
+                        && entry.version == sent.version
+                    {
+                        entry.dirty = false;
+                    }
+                }
+                watermark = watermark
+                    .filter(|current| revision == *current || revision == current.saturating_add(1))
+                    .map(|_| revision);
+            }
+            let mut state = self.cloud.lock_epoch(epoch).await?;
             if state.account_uid.as_deref() != Some(uid.as_str()) {
                 return Err(SyncError::AccountChanged);
             }
-            for (key, sent) in &sent_entries {
-                if let Some(entry) = state.sync_entries.get_mut(key)
-                    && entry.value == sent.value
-                    && entry.deleted == sent.deleted
-                    && entry.version == sent.version
-                {
-                    entry.dirty = false;
-                }
-            }
-            // 回包恰好是 pull 之后的下一个 revision 才说明期间无他人写入；
-            // 否则保持 pull 水位，让后续 SSE 触发的 pull 补回并发写入。
-            state.sync.revision = if revision == pull.revision.saturating_add(1) {
-                revision
-            } else {
-                pull.revision
-            };
+            state.sync.revision = watermark.unwrap_or(pull.revision);
         } else {
-            let mut state = self.state.lock().await;
+            let mut state = self.cloud.lock_epoch(epoch).await?;
             if state.account_uid.as_deref() != Some(uid.as_str()) {
                 return Err(SyncError::AccountChanged);
             }
@@ -616,8 +681,8 @@ impl SyncService {
             idle = no_pulled_items && !first_sync && pull.revision == since;
         }
 
-        let (preferences, status) = {
-            let mut state = self.state.lock().await;
+        {
+            let mut state = self.cloud.lock_epoch(epoch).await?;
             idle = idle && state.sync_pulled && state.sync.last_error.is_none();
             state.sync_pulled = true;
             state.refresh_sync_projection();
@@ -625,24 +690,29 @@ impl SyncService {
             state.sync.last_error_reason = None;
             state.sync.halted = false;
             state.sync.last_synced_at_unix_ms = Some(now_unix_ms());
-            (state.preferences.clone(), state.sync.clone())
-        };
+            if prefs_changed {
+                self.events
+                    .publish(AgentEvent::PreferencesChanged(state.preferences.clone()));
+            }
+            self.events
+                .publish(AgentEvent::SyncChanged(state.sync.clone()));
+        }
         if !idle {
             self.persist().await?;
         }
-        if prefs_changed {
-            self.events
-                .publish(AgentEvent::PreferencesChanged(preferences));
-        }
-        self.events.publish(AgentEvent::SyncChanged(status));
         Ok(())
     }
 
     /// 把云端值写进 daemon。`normalize` 已在 [`apply_pull`] 里剔除毒值；revision 冲突时按
     /// 错误里给出的最新 revision 重试一次。
-    async fn patch_daemon(&self, values: BTreeMap<String, String>) -> Result<(), SyncError> {
+    async fn patch_daemon(
+        &self,
+        values: BTreeMap<String, String>,
+        epoch: crate::cloud::RequestEpoch,
+    ) -> Result<(), SyncError> {
         let mut expected_revision = daemon_revision(&self.events);
         for attempt in 0..2 {
+            drop(self.cloud.lock_epoch(epoch).await?);
             let result = self
                 .daemon
                 .call::<DaemonConfigPatch, Value>(
@@ -683,6 +753,13 @@ impl SyncService {
         value: Value,
         deleted: bool,
     ) -> Result<u64, SyncError> {
+        let epoch = self.cloud.request_epoch();
+        if key == CUSTOM_THEMES_KEY {
+            // 集合范围键只承载分组与本机专属开关；主题逐个写 `appearance.custom_themes.<id>`。
+            return Err(SyncError::InvalidValue(format!(
+                "{key} is a collection; write per-theme keys"
+            )));
+        }
         let Some(spec) = setting_spec(&key).filter(|spec| spec.owner != SyncOwner::Excluded) else {
             return self.set_local_preference(key, value, deleted).await;
         };
@@ -702,14 +779,14 @@ impl SyncService {
             } else {
                 value_to_daemon_config(spec, &value).map_err(SyncError::InvalidValue)?
             };
-            self.patch_daemon(BTreeMap::from([(
-                spec.storage_key.to_owned(),
-                daemon_value,
-            )]))
+            self.patch_daemon(
+                BTreeMap::from([(spec.storage_key.to_owned(), daemon_value)]),
+                epoch,
+            )
             .await?;
         }
         let revision = {
-            let mut state = self.state.lock().await;
+            let mut state = self.cloud.lock_epoch(epoch).await?;
             if matches!(spec.owner, SyncOwner::Agent | SyncOwner::Preferences) {
                 if deleted {
                     state.preferences.values.remove(&key);
@@ -718,23 +795,20 @@ impl SyncService {
                 }
                 state.preferences.revision = state.preferences.revision.saturating_add(1);
             }
-            if !state.sync.local_only_keys.iter().any(|local| local == &key) {
+            if !is_local_only(&state.sync.local_only_keys, &key) {
                 let entry = state.sync_entries.entry(key).or_default();
                 entry.value = wire;
                 entry.deleted = deleted;
                 entry.dirty = true;
             }
             state.refresh_sync_projection();
+            self.events
+                .publish(AgentEvent::PreferencesChanged(state.preferences.clone()));
+            self.events
+                .publish(AgentEvent::SyncChanged(state.sync.clone()));
             state.preferences.revision
         };
         self.persist().await?;
-        let (preferences, status) = {
-            let state = self.state.lock().await;
-            (state.preferences.clone(), state.sync.clone())
-        };
-        self.events
-            .publish(AgentEvent::PreferencesChanged(preferences));
-        self.events.publish(AgentEvent::SyncChanged(status));
         self.wake.notify_one();
         Ok(revision)
     }
@@ -808,7 +882,11 @@ fn apply_pull(
             report.skipped.push((item.key, "outside the sync catalog"));
             continue;
         };
-        if local_only.contains(&item.key) {
+        if item.key == CUSTOM_THEMES_KEY {
+            report.skipped.push((item.key, "collection scope key"));
+            continue;
+        }
+        if local_only.contains(sync_scope_key(&item.key)) {
             report.skipped.push((item.key, "local-only key"));
             continue;
         }
@@ -921,26 +999,34 @@ fn prepare_remote_value(
 
 /// 首次 / resync：目录里云端没有的键，用本机当前值播种（标脏重传）。
 /// resync 时已有条目也重新标脏（云端可能已丢失它们）。本机专属键不播种。
+/// 自定义主题按成员键逐个播种（集合范围键本身不承载值）。
 fn seed_local_values(
     state: &mut AgentState,
     remote_keys: &HashSet<String>,
     current_daemon: &BTreeMap<String, String>,
     resync: bool,
 ) {
-    let local_only = state
-        .sync
-        .local_only_keys
-        .iter()
+    let theme_keys = state
+        .preferences
+        .values
+        .keys()
+        .chain(state.sync_entries.keys())
+        .filter(|key| custom_theme_id(key).is_some())
         .cloned()
-        .collect::<HashSet<_>>();
-    for spec in fluxdown_protocol::SYNC_SETTING_SPECS {
-        if spec.owner == SyncOwner::Excluded
-            || remote_keys.contains(spec.key)
-            || local_only.contains(spec.key)
-        {
+        .collect::<BTreeSet<_>>();
+    let candidates = fluxdown_protocol::SYNC_SETTING_SPECS
+        .iter()
+        .filter(|spec| spec.key != CUSTOM_THEMES_KEY)
+        .map(|spec| spec.key.to_owned())
+        .chain(theme_keys);
+    for key in candidates {
+        let Some(spec) = setting_spec(&key).filter(|spec| spec.owner != SyncOwner::Excluded) else {
+            continue;
+        };
+        if remote_keys.contains(&key) || is_local_only(&state.sync.local_only_keys, &key) {
             continue;
         }
-        if let Some(entry) = state.sync_entries.get_mut(spec.key) {
+        if let Some(entry) = state.sync_entries.get_mut(&key) {
             if resync && !entry.deleted {
                 entry.dirty = true;
             }
@@ -956,15 +1042,13 @@ fn seed_local_values(
                     }
                 }
             }),
-            SyncOwner::Agent | SyncOwner::Preferences => {
-                state.preferences.values.get(spec.key).cloned()
-            }
+            SyncOwner::Agent | SyncOwner::Preferences => state.preferences.values.get(&key).cloned(),
             SyncOwner::Excluded => None,
         };
         let Some(local_value) = local_value else {
             continue;
         };
-        let wire = if spec.key == CUSTOM_CATEGORIES_KEY {
+        let wire = if key == CUSTOM_CATEGORIES_KEY {
             match categories_to_wire(&local_value) {
                 Ok(wire) => wire,
                 Err(reason) => {
@@ -974,13 +1058,13 @@ fn seed_local_values(
             }
         } else {
             if let Err(reason) = validate_value(spec.key, &local_value) {
-                tracing::warn!(key = %spec.key, reason = %reason, "not seeding invalid local setting");
+                tracing::warn!(key = %key, reason = %reason, "not seeding invalid local setting");
                 continue;
             }
             local_value
         };
         state.sync_entries.insert(
-            spec.key.to_owned(),
+            key,
             PersistedSyncEntry {
                 value: wire,
                 version: 0,
@@ -999,7 +1083,7 @@ fn dirty_entries(state: &AgentState) -> BTreeMap<String, PersistedSyncEntry> {
         .filter(|(key, entry)| {
             entry.dirty
                 && owner_for_key(key) != SyncOwner::Excluded
-                && !state.sync.local_only_keys.iter().any(|local| local == *key)
+                && !is_local_only(&state.sync.local_only_keys, key)
         })
         .map(|(key, entry)| (key.clone(), entry.clone()))
         .collect()
@@ -1430,6 +1514,77 @@ mod tests {
         assert_eq!(keys, ["appearance.theme_mode"]);
     }
 
+    fn theme_text(name: &str) -> Value {
+        json!(format!(r#"{{"meta":{{"name":"{name}"}}}}"#))
+    }
+
+    /// 主题逐个成键：首次播种逐个上云，云端增删按键应用；整组本机专属时成员键既不推送也不应用，
+    /// 集合范围键本身即便出现在云端也不落成偏好。
+    #[test]
+    fn custom_themes_sync_per_theme_and_follow_the_collection_local_only_switch() {
+        let ocean = fluxdown_protocol::custom_theme_key("ocean").expect("key");
+        let nord = fluxdown_protocol::custom_theme_key("nord-square").expect("key");
+        let rose = fluxdown_protocol::custom_theme_key("rose").expect("key");
+        let mut state = AgentState::default();
+        state
+            .preferences
+            .values
+            .insert(ocean.clone(), theme_text("Ocean"));
+        state
+            .preferences
+            .values
+            .insert(nord.clone(), theme_text("Nord"));
+        let remote_keys = [nord.clone()].into_iter().collect();
+        seed_local_values(&mut state, &remote_keys, &BTreeMap::new(), false);
+        let seeded = dirty_entries(&state);
+        assert_eq!(seeded[&ocean].value, theme_text("Ocean"));
+        assert!(
+            !seeded.contains_key(&nord),
+            "the cloud copy is not overwritten"
+        );
+        assert!(!seeded.contains_key(fluxdown_protocol::CUSTOM_THEMES_KEY));
+
+        let mut gone = item(&nord, Value::Null, 5, "device-2");
+        gone.deleted = true;
+        let report = apply_pull(
+            &mut state,
+            "device-1",
+            vec![
+                gone,
+                item(&rose, theme_text("Rose"), 6, "device-2"),
+                item(
+                    fluxdown_protocol::CUSTOM_THEMES_KEY,
+                    theme_text("Root"),
+                    7,
+                    "device-2",
+                ),
+            ],
+            &BTreeMap::new(),
+        );
+        assert!(report.prefs_changed);
+        assert!(!state.preferences.values.contains_key(&nord));
+        assert_eq!(state.preferences.values[&rose], theme_text("Rose"));
+        assert!(
+            !state
+                .preferences
+                .values
+                .contains_key(fluxdown_protocol::CUSTOM_THEMES_KEY)
+        );
+
+        state.sync.local_only_keys = vec![fluxdown_protocol::CUSTOM_THEMES_KEY.to_owned()];
+        assert!(
+            dirty_entries(&state).is_empty(),
+            "local-only members are not pushed"
+        );
+        apply_pull(
+            &mut state,
+            "device-1",
+            vec![item(&rose, theme_text("Rose 2"), 8, "device-2")],
+            &BTreeMap::new(),
+        );
+        assert_eq!(state.preferences.values[&rose], theme_text("Rose"));
+    }
+
     #[test]
     fn categories_are_pushed_without_save_dir_and_pulled_keeping_the_local_one() {
         let local = json!([
@@ -1475,12 +1630,18 @@ mod tests {
         pushes: Mutex<Vec<Value>>,
         pull_status: Mutex<Option<(StatusCode, Value)>>,
         pull_items: Mutex<Vec<Value>>,
+        pull_barrier: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
         /// `true`：SSE 发出首个事件后保持连接不再有数据（长连接）；否则发完即断（触发重连）。
         hold_open: std::sync::atomic::AtomicBool,
     }
 
     async fn mock_pull(State(state): State<Arc<SyncMockState>>) -> axum::response::Response {
         state.pulls.fetch_add(1, Ordering::SeqCst);
+        let barrier = state.pull_barrier.lock().await.clone();
+        if let Some((started, release)) = barrier {
+            started.notify_one();
+            release.notified().await;
+        }
         if let Some((status, body)) = state.pull_status.lock().await.clone() {
             return (status, axum::Json(body)).into_response();
         }
@@ -1527,6 +1688,68 @@ mod tests {
             [(header::CONTENT_TYPE, "text/event-stream")],
             body,
         )
+    }
+
+    #[tokio::test]
+    async fn old_sync_event_cannot_resample_reopened_same_uid() {
+        let harness = Harness::new("sync_event_epoch", |state| state.sync.enabled = true).await;
+        let epoch = harness.service.cloud.request_epoch();
+        let credentials = harness.state.lock().await.credentials.clone();
+        harness.service.cloud.clear_session().await.expect("logout");
+        {
+            let mut state = harness.state.lock().await;
+            state.credentials = credentials;
+            state.bind_account(Some("u1"));
+            state.sync.enabled = true;
+            state.sync.revision = 99;
+        }
+        assert!(
+            harness
+                .service
+                .handle_sse_line(b"data: {\"revision\":7}\n", epoch)
+                .await
+                .is_err()
+        );
+        assert_eq!(harness.mock.pulls.load(Ordering::SeqCst), 0);
+        assert_eq!(harness.state.lock().await.sync.revision, 99);
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn old_sync_response_and_error_cannot_modify_reopened_account() {
+        let harness = Harness::new("sync_epoch", |state| state.sync.enabled = true).await;
+        let epoch = harness.service.cloud.request_epoch();
+        let credentials = harness.state.lock().await.credentials.clone();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *harness.mock.pull_barrier.lock().await = Some((started.clone(), release.clone()));
+        let request = harness.service.sync_once();
+        let replace = async {
+            started.notified().await;
+            harness.service.cloud.clear_session().await.expect("logout");
+            let mut state = harness.state.lock().await;
+            // Reopening the same UID is a different epoch too (UID-only guards
+            // cannot distinguish this logout/login ABA).
+            state.credentials = credentials;
+            state.bind_account(Some("u1"));
+            state.sync.revision = 99;
+            state.sync.last_error = None;
+            drop(state);
+            release.notify_one();
+        };
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(request, replace)
+        })
+        .await
+        .expect("barrier completes");
+        let error = result.expect_err("old pull rejected");
+        harness.service.record_error(&error, epoch).await;
+        let state = harness.state.lock().await;
+        assert_eq!(state.sync.revision, 99);
+        assert!(state.sync.last_error.is_none());
+        assert!(!state.sync_pulled);
+        drop(state);
+        harness.finish().await;
     }
 
     struct Harness {
@@ -1873,6 +2096,49 @@ mod tests {
             !pushed_keys.contains(&"general.locale"),
             "echo of a fresh cloud item is not re-pushed"
         );
+        harness.finish().await;
+    }
+
+    /// 主题逐个成键后首次播种可能超过云端单批 128 条：分批推送且全部确认。
+    #[tokio::test]
+    async fn many_custom_themes_are_pushed_in_batches_within_the_cloud_item_limit() {
+        let harness = Harness::new("theme_batches", |state| {
+            state.sync.enabled = true;
+            for index in 0..140 {
+                let key =
+                    fluxdown_protocol::custom_theme_key(&format!("theme-{index}")).expect("key");
+                state
+                    .preferences
+                    .values
+                    .insert(key, theme_text(&index.to_string()));
+            }
+        })
+        .await;
+        harness.mock.push_revision.store(8, Ordering::SeqCst);
+        harness.service.sync_now().await.expect("sync now");
+        let pushes = harness.mock.pushes.lock().await.clone();
+        let sizes = pushes
+            .iter()
+            .map(|body| body["items"].as_array().map_or(0, Vec::len))
+            .collect::<Vec<_>>();
+        assert_eq!(sizes, [128, 12]);
+        let state = harness.state.lock().await;
+        assert!(state.sync.dirty_keys.is_empty());
+        assert_eq!(
+            state.sync.revision, 8,
+            "both batches confirm the same contiguous revision"
+        );
+        drop(state);
+        let error = harness
+            .service
+            .mark_local(
+                fluxdown_protocol::CUSTOM_THEMES_KEY.to_owned(),
+                theme_text("Root"),
+                false,
+            )
+            .await
+            .expect_err("the collection key carries no value");
+        assert!(matches!(error, super::SyncError::InvalidValue(_)));
         harness.finish().await;
     }
 

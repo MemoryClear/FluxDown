@@ -17,26 +17,29 @@ pub(crate) enum ViewDensity {
     #[default]
     Comfortable,
     Compact,
+    Relaxed,
 }
 
 impl ViewDensity {
     /// 任务行高：舒适双行取 `density.taskRow`（默认 44 = 13/18 正文 + 12/16 元信息 + 上下留白），
-    /// 紧凑单行取 `density.taskRowCompact`（默认 30）。
+    /// 紧凑单行取 `density.taskRowCompact`（默认 30），宽松双行取舒适的 1.5 倍（默认 66）。
     pub(crate) fn row_height(self, density: &DensityTokens) -> Pixels {
         match self {
             Self::Comfortable => density.task_row,
             Self::Compact => density.task_row_compact,
+            Self::Relaxed => density.task_row * 1.5,
         }
     }
 
     /// 是否渲染第二行元信息（名称列的类别 · 域名、状态列的详情）。
     pub(crate) fn two_line(self) -> bool {
-        self == Self::Comfortable
+        self != Self::Compact
     }
 
     pub(crate) fn next(self) -> Self {
         match self {
-            Self::Comfortable => Self::Compact,
+            Self::Comfortable => Self::Relaxed,
+            Self::Relaxed => Self::Compact,
             Self::Compact => Self::Comfortable,
         }
     }
@@ -191,6 +194,7 @@ pub(crate) struct ViewPrefs {
     pub(crate) detail_open: bool,
     pub(crate) detail_size: f32,
     pub(crate) sidebar_width: f32,
+    pub(crate) sidebar_collapsed: bool,
     pub(crate) collapsed_groups: Vec<String>,
 }
 
@@ -207,6 +211,7 @@ impl Default for ViewPrefs {
             detail_open: false,
             detail_size: 260.,
             sidebar_width: 200.,
+            sidebar_collapsed: false,
             collapsed_groups: Vec::new(),
         }
     }
@@ -235,6 +240,7 @@ impl ViewPrefs {
         read_field(map, "detail_open", &mut prefs.detail_open);
         read_field(map, "detail_size", &mut prefs.detail_size);
         read_field(map, "sidebar_width", &mut prefs.sidebar_width);
+        read_field(map, "sidebar_collapsed", &mut prefs.sidebar_collapsed);
         read_field(map, "collapsed_groups", &mut prefs.collapsed_groups);
         prefs
     }
@@ -496,12 +502,31 @@ mod tests {
     }
 
     #[test]
+    fn density_cycle_preserves_each_choice_across_reload() {
+        let mut prefs = ViewPrefs {
+            density: ViewDensity::Compact,
+            ..ViewPrefs::default()
+        };
+        for density in [
+            ViewDensity::Comfortable,
+            ViewDensity::Relaxed,
+            ViewDensity::Compact,
+        ] {
+            prefs.cycle_density();
+            prefs = ViewPrefs::from_value(&prefs.to_value());
+            assert_eq!(prefs.density, density);
+            assert_eq!(prefs.density.two_line(), density != ViewDensity::Compact);
+        }
+    }
+
+    #[test]
     fn prefs_round_trip_and_tolerate_unknown_fields() {
         let mut prefs = ViewPrefs {
             density: ViewDensity::Compact,
             group_by: ViewGroupBy::Site,
             sort_key: ViewSortKey::Size,
             sort_dir: SortDir::Asc,
+            sidebar_collapsed: true,
             ..ViewPrefs::default()
         };
         prefs.collapsed_groups.push("x".to_owned());

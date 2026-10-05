@@ -6,7 +6,8 @@ use fluxdown_protocol::{
     DaemonConfigSnapshot, RpcErrorData,
 };
 use fluxdown_ui_components::{
-    ControlExt as _, FluxIcon, IconControlExt as _, card, input_with_action, tabular_numbers,
+    BusyExt as _, ControlExt as _, FluxIcon, IconControlExt as _, card, input_with_action,
+    tabular_numbers,
 };
 use fluxdown_ui_theme::active_theme;
 use gpui::{
@@ -46,10 +47,14 @@ fn desc_key(kind: ComponentKind) -> &'static str {
     }
 }
 
-fn path_hint_key(kind: ComponentKind) -> &'static str {
-    match kind {
-        ComponentKind::Ffmpeg => "componentsManualPathHintFfmpeg",
-        ComponentKind::Ytdlp => "componentsManualPathHintYtdlp",
+fn path_hint_key(kind: ComponentKind, platform: &str) -> &'static str {
+    match (kind, platform) {
+        (ComponentKind::Ffmpeg, "windows") => "componentsManualPathHintFfmpeg",
+        (ComponentKind::Ytdlp, "windows") => "componentsManualPathHintYtdlp",
+        (ComponentKind::Ffmpeg, "macos") => "componentsManualPathHintFfmpegMacos",
+        (ComponentKind::Ytdlp, "macos") => "componentsManualPathHintYtdlpMacos",
+        (ComponentKind::Ffmpeg, _) => "componentsManualPathHintFfmpegLinux",
+        (ComponentKind::Ytdlp, _) => "componentsManualPathHintYtdlpLinux",
     }
 }
 
@@ -151,7 +156,7 @@ impl ExtensionsView {
             let placeholder = self
                 .translator
                 .read(cx)
-                .text(path_hint_key(kind))
+                .text(path_hint_key(kind, std::env::consts::OS))
                 .to_owned();
             let input = cx.new(|cx| {
                 InputState::new(window, cx)
@@ -376,7 +381,7 @@ impl ExtensionsView {
                             .outline()
                             .control(cx)
                             .label(translator.text("componentsManualPathSave").to_owned())
-                            .loading(ui.saving_path)
+                            .busy(ui.saving_path)
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.save_manual_path_from_input(kind, window, cx);
@@ -456,7 +461,7 @@ impl ExtensionsView {
                             .ghost()
                             .control(cx)
                             .label(translator.text("componentsFetchVersionsButton").to_owned())
-                            .loading(ui.versions_loading)
+                            .busy(ui.versions_loading)
                             .disabled(ui.versions_loading || stale)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.fetch_versions(kind, window, cx);
@@ -496,7 +501,7 @@ impl ExtensionsView {
                                 .outline()
                                 .control(cx)
                                 .label(translator.text("componentsRetryVersions").to_owned())
-                                .loading(ui.versions_loading)
+                                .busy(ui.versions_loading)
                                 .disabled(ui.versions_loading || stale)
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.fetch_versions(kind, window, cx);
@@ -553,7 +558,7 @@ impl ExtensionsView {
                                     })
                                     .to_owned(),
                             )
-                            .loading(ui.installing)
+                            .busy(ui.installing)
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.install_component(kind, window, cx);
@@ -565,7 +570,7 @@ impl ExtensionsView {
                                 .outline()
                                 .control(cx)
                                 .label(translator.text("componentsUninstallButton").to_owned())
-                                .loading(ui.uninstalling)
+                                .busy(ui.uninstalling)
                                 .disabled(busy)
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.confirm_uninstall_component(kind, window, cx);
@@ -908,7 +913,12 @@ fn protocol_error() -> RpcErrorData {
 
 #[cfg(test)]
 mod tests {
-    use super::format_bytes;
+    use std::sync::Arc;
+
+    use fluxdown_protocol::{ComponentKind, PathStyle};
+    use fluxdown_ui_i18n::I18nCatalog;
+
+    use super::{format_bytes, path_hint_key};
 
     #[test]
     fn format_bytes_scales_by_1024() {
@@ -918,5 +928,36 @@ mod tests {
         assert_eq!(format_bytes(1536), "1.5 KB");
         assert_eq!(format_bytes(12 * 1024 * 1024 + 300 * 1024), "12.3 MB");
         assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GB");
+    }
+
+    #[test]
+    fn manual_path_hints_use_the_target_platform_path_style() {
+        let catalog = Arc::new(I18nCatalog::load_embedded().expect("embedded translations"));
+        for locale in ["en", "zh"] {
+            let translator = catalog.translator(locale);
+            for (platform, style) in [
+                ("windows", PathStyle::Windows),
+                ("macos", PathStyle::Posix),
+                ("linux", PathStyle::Posix),
+            ] {
+                for (kind, executable) in [
+                    (ComponentKind::Ffmpeg, "ffmpeg"),
+                    (ComponentKind::Ytdlp, "yt-dlp"),
+                ] {
+                    let hint = translator.text(path_hint_key(kind, platform));
+                    let path = hint
+                        .split_whitespace()
+                        .find(|part| style.is_absolute(part))
+                        .unwrap_or_else(|| panic!("{locale}/{platform}: {hint}"));
+                    let filename = path.rsplit(['/', '\\']).next().expect("executable name");
+                    if style == PathStyle::Windows {
+                        assert_eq!(filename, format!("{executable}.exe"));
+                    } else {
+                        assert_eq!(filename, executable);
+                        assert!(!path.contains('\\'));
+                    }
+                }
+            }
+        }
     }
 }

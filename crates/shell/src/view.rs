@@ -1,19 +1,20 @@
 use std::rc::Rc;
 
-use fluxdown_ui_components::{activity_button as activity_bar_button, nav_icon_color};
+use fluxdown_ui_components::{
+    FluxIcon, SidebarState, activity_button as activity_bar_button, nav_icon_color,
+    toolbar_action_button,
+};
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
-    AnyElement, AnyView, App, Context, Div, Entity, Font, FontWeight, InteractiveElement as _,
+    AnyElement, AnyView, App, Context, Div, Entity, FontWeight, InteractiveElement as _,
     IntoElement, MouseButton, ParentElement, Pixels, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, TextRun, Window, div, img, px,
+    StatefulInteractiveElement as _, Styled, Window, div, img, percentage, px,
 };
-use gpui_component::{
-    Icon, TITLE_BAR_HEIGHT, TitleBar, h_flex, menu::AppMenuBar, tooltip::Tooltip, v_flex,
-};
+use gpui_component::{Icon, TitleBar, h_flex, menu::AppMenuBar, tooltip::Tooltip, v_flex};
 
 use crate::assets::APP_LOGO_PATH;
-use crate::window_controls::{FixedSizeTitleBar, controls_width};
+use crate::window_controls::FixedSizeTitleBar;
 
 /// shell 路由的稳定标识。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +37,8 @@ pub struct ShellRoute {
     view: AnyView,
     /// 路由活跃时渲染在统一顶栏中的插槽（靠右内容由插槽自己排布）。
     title_bar: Option<AnyView>,
+    /// 页面独立侧栏状态；由 shell 统一提供顶栏收起 / 展开入口。
+    sidebar: Option<Entity<SidebarState>>,
     /// 可选路由参与活动栏「是否整体渲染」的判定；固定路由（如下载）不参与。
     optional: bool,
     visible: bool,
@@ -59,6 +62,7 @@ impl ShellRoute {
             icon,
             view,
             title_bar: None,
+            sidebar: None,
             optional: false,
             visible: true,
         }
@@ -75,6 +79,12 @@ impl ShellRoute {
     /// 插槽内可交互元素须自行拦截左键 `mouse_down` 冒泡，空白处保持窗口拖拽 / 双击。
     pub fn with_title_bar(mut self, view: impl Into<AnyView>) -> Self {
         self.title_bar = Some(view.into());
+        self
+    }
+
+    /// 为有侧边菜单的路由登记共享侧栏状态；按钮位置与行为由 shell 统一管理。
+    pub fn with_sidebar(mut self, sidebar: Entity<SidebarState>) -> Self {
+        self.sidebar = Some(sidebar);
         self
     }
 }
@@ -150,6 +160,8 @@ pub struct AuxiliaryWindowView {
     /// 窗口是否可由用户调整尺寸；`false` 时 Windows / Linux 自绘只含最小化 + 关闭的标题栏
     /// （系统不会响应最大化，留着只会误导）。macOS 恒用系统交通灯。
     resizable: bool,
+    /// 已应用到 macOS 交通灯的纵向偏移；标题栏随文字放大撑高时重新居中。
+    traffic_light_y: Pixels,
 }
 
 impl AuxiliaryWindowView {
@@ -173,6 +185,7 @@ impl AuxiliaryWindowView {
             title_override: None,
             content,
             resizable: true,
+            traffic_light_y: crate::initial_traffic_light_y(),
         }
     }
 
@@ -207,7 +220,7 @@ impl AuxiliaryWindowView {
         let extended = theme.extended().colors;
         let spacing = tokens.spacing;
         let typography = tokens.typography.clone();
-        let height = theme.density().title_bar;
+        let height = crate::title_bar_height(cx);
         let title_row = h_flex()
             .absolute()
             .inset_0()
@@ -251,54 +264,13 @@ impl AuxiliaryWindowView {
     }
 }
 
-/// macOS 交通灯占位：gpui-component `TitleBar` 在 macOS 的默认左内边距。
-const MACOS_TRAFFIC_LIGHT_INSET: Pixels = px(80.);
-
-/// 辅助窗口标题栏完整显示 `title`（单行）所需的最小窗口宽度：标题文字宽度（按标题栏实际
-/// 字体 / 字号 / 字重量得）加上左右内边距与窗口控制区。供宿主按内容自适应窗口宽度时使用；
-/// `resizable` 须与 [`AuxiliaryWindowView::resizable`] 一致（决定控制按钮个数）。
-#[must_use]
-pub fn auxiliary_title_min_width(
-    title: &str,
-    resizable: bool,
-    window: &Window,
-    cx: &App,
-) -> Pixels {
-    let theme = active_theme(cx);
-    let tokens = theme.tokens();
-    let line = title.lines().next().unwrap_or_default();
-    let run = TextRun {
-        len: line.len(),
-        font: Font {
-            family: tokens.typography.sans.clone(),
-            weight: FontWeight::MEDIUM,
-            ..Font::default()
-        },
-        ..TextRun::default()
-    };
-    let text_width = window
-        .text_system()
-        .layout_line(line, tokens.typography.sm.size, &[run], None)
-        .width;
-
-    let spacing = tokens.spacing;
-    let title_padding = spacing.sm + spacing.md;
-    let chrome = if cfg!(target_os = "macos") {
-        MACOS_TRAFFIC_LIGHT_INSET + title_padding
-    } else {
-        let controls = if resizable {
-            TITLE_BAR_HEIGHT * 3.
-        } else {
-            controls_width()
-        };
-        // 标题栏自身左内边距 + 标题行内边距 + 控制区。
-        spacing.sm + title_padding + controls
-    };
-    text_width + chrome
-}
-
 impl Render for AuxiliaryWindowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::sync_traffic_light(
+            window,
+            crate::title_bar_height(cx),
+            &mut self.traffic_light_y,
+        );
         // 构造时拿不到 Window：语言切换后在渲染期把默认标题同步到 OS 窗口标题。
         if self.title_override.is_none() && self.os_title != self.title {
             window.set_window_title(&self.title);
@@ -338,6 +310,8 @@ pub struct ShellView {
     actions: Vec<ShellAction>,
     /// Windows / Linux 标题栏内的应用菜单；macOS 走原生菜单不渲染。
     menu_bar: Option<Entity<AppMenuBar>>,
+    /// 已应用到 macOS 交通灯的纵向偏移；标题栏随文字放大撑高时重新居中。
+    traffic_light_y: Pixels,
 }
 
 impl ShellView {
@@ -351,12 +325,24 @@ impl ShellView {
     ) -> Self {
         let active_route = routes.first().map(|route| route.id);
         cx.observe(&translator, |_, _, cx| cx.notify()).detach();
+        for route in &routes {
+            if let Some(sidebar) = &route.sidebar {
+                let route_id = route.id;
+                cx.observe(sidebar, move |this, _, cx| {
+                    if this.active_route == Some(route_id) {
+                        cx.notify();
+                    }
+                })
+                .detach();
+            }
+        }
         Self {
             translator,
             active_route,
             routes,
             actions,
             menu_bar,
+            traffic_light_y: crate::initial_traffic_light_y(),
         }
     }
 
@@ -417,13 +403,19 @@ impl ShellView {
                 }))
         });
         let slot = self.active_title_bar();
+        let sidebar_toggle = self
+            .active_route
+            .and_then(|id| self.routes.iter().find(|route| route.id == id))
+            .and_then(|route| route.sidebar.as_ref())
+            .filter(|sidebar| sidebar.read(cx).is_available())
+            .map(|sidebar| self.render_sidebar_toggle(sidebar, cx));
         let title_bar = TitleBar::new();
         #[cfg(not(target_os = "macos"))]
         let title_bar = title_bar.pl(spacing.sm);
 
         // 显式 `.bg` 覆盖 gpui-component 默认渐变；`.h` 经 refine_style 覆盖默认 34px。
         title_bar
-            .h(theme.density().title_bar)
+            .h(crate::title_bar_height(cx))
             .bg(extended.chrome)
             .border_color(extended.hairline)
             .child(
@@ -435,6 +427,7 @@ impl ShellView {
                     .gap(spacing.sm)
                     .pr(if is_macos { spacing.md } else { spacing.sm })
                     .children(leading)
+                    .children(sidebar_toggle)
                     .child(
                         h_flex()
                             .h_full()
@@ -443,6 +436,41 @@ impl ShellView {
                             .items_center()
                             .children(slot),
                     ),
+            )
+    }
+
+    fn render_sidebar_toggle(
+        &self,
+        sidebar: &Entity<SidebarState>,
+        cx: &App,
+    ) -> impl IntoElement + use<> {
+        let key = if sidebar.read(cx).is_collapsed() {
+            "expandSidebar"
+        } else {
+            "collapseSidebar"
+        };
+        let label = SharedString::from(self.translator.read(cx).text(key).to_owned());
+        let state = sidebar.clone();
+        div()
+            .id("shell-sidebar-toggle-tooltip")
+            .flex_none()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .tooltip({
+                let label = label.clone();
+                move |window, cx| Tooltip::new(label.clone()).build(window, cx)
+            })
+            .child(
+                toolbar_action_button(
+                    "shell-sidebar-toggle",
+                    label,
+                    Icon::new(FluxIcon::PanelRight)
+                        .size(active_theme(cx).extended().icon.md)
+                        .rotate(percentage(0.5)),
+                    false,
+                    false,
+                    cx,
+                )
+                .on_click(move |_, _, cx| state.update(cx, |state, cx| state.toggle(cx))),
             )
     }
 
@@ -588,7 +616,12 @@ impl ShellView {
 }
 
 impl Render for ShellView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::sync_traffic_light(
+            window,
+            crate::title_bar_height(cx),
+            &mut self.traffic_light_y,
+        );
         let colors = active_theme(cx).tokens().colors;
         v_flex()
             .size_full()

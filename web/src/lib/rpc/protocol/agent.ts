@@ -3,8 +3,19 @@
 
 import type { JsonValue } from './common';
 import type { ErrorReason } from './error';
+import type { CreateGroupRequest } from './queue';
+import type { CreateTaskRequest } from './task';
 
 // ── 账号 ──
+
+export type CloudConnectionState = 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
+
+/** 任务 SSE + 在线租约 + 最新设备名册均成功才 connected；独立于配置同步连接。 */
+export interface CloudConnectionDto {
+  state: CloudConnectionState;
+  lastError?: string;
+  lastErrorReason?: ErrorReason;
+}
 
 export type CloudUserStatus = 'active' | 'disabled' | 'pending' | 'unknown';
 
@@ -21,6 +32,8 @@ export interface CloudUser {
   originId: number | null;
   originIdChanged: boolean;
   membershipOrdinal: number | null;
+  /** 是否已设置登录密码；旧版云端不下发时为 `null`（未知）。 */
+  hasPassword: boolean | null;
 }
 
 /** 套餐权益集合：前向兼容，未知键原样保留。 */
@@ -339,8 +352,10 @@ export interface GatewayStatusDto {
   mcpEnabled: boolean;
   corsEnabled: boolean;
   userTokenConfigured: boolean;
-  /** 当前监听端口（只读，默认 17800）。 */
+  /** 当前已验证可用的实际监听端口；修改失败时保持原值。 */
   port: number;
+  /** server 模式或环境固定监听地址时为 false。 */
+  portEditable: boolean;
   /** 是否对局域网开放兼容 API；修改后下次 agent 启动生效。 */
   lanEnabled: boolean;
 }
@@ -422,6 +437,20 @@ export interface PendingCaptureDto {
   hasCookies: boolean;
   /** 携带的请求头名（不含值）。 */
   headerNames: string[];
+}
+
+/** 只读捕获预解析；不消费事务，原 URL/method/body/audioUrl 不可被表单覆盖。 */
+export interface CapturePreviewParams {
+  transactionId: string;
+  request: CreateTaskRequest;
+}
+
+/** 最终清单选择建组；成功后消费事务，sourceUrl 恒取捕获原 URL。 */
+export interface CaptureCreateGroupParams {
+  transactionId: string;
+  request: CreateGroupRequest;
+  /** 原表单 HTTP Basic 凭据，非空用户名覆盖浏览器 Authorization。 */
+  context: CreateTaskRequest;
 }
 
 /**

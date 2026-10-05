@@ -287,6 +287,22 @@ export interface ChangeNicknameParams {
   nickname: string;
 }
 
+/** 已登录修改 / 设置密码：`currentPassword` 与 `code`（`sendPasswordCode` 发到绑定邮箱）二选一。 */
+export interface ChangePasswordParams {
+  /** 至少 8 位。 */
+  newPassword: string;
+  currentPassword?: string;
+  code?: string;
+}
+
+/** 未登录重置密码：`sendPasswordResetCode` 发到该邮箱的验证码 + 新密码。 */
+export interface ResetPasswordParams {
+  email: string;
+  code: string;
+  /** 至少 8 位。 */
+  newPassword: string;
+}
+
 // ── agent.gateway / device / preferences / power ──
 
 export interface GatewayRevealTokenResult {
@@ -305,6 +321,8 @@ export interface GatewayPatchParams {
   mcpEnabled?: boolean;
   corsEnabled?: boolean;
   lanEnabled?: boolean;
+  /** 1024..=65535；验证新 API/RPC 服务可用后立即切换，固定监听模式拒绝修改。 */
+  port?: number;
   /** 空串 = 清除用户 token；省略 = 保持。 */
   userToken?: string;
   /** true 生成新的随机 token（优先于 `userToken`）。 */

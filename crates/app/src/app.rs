@@ -27,7 +27,6 @@ use crate::launch::{self, LaunchOptions};
 use crate::service_bootstrap::ServiceBootstrap;
 use crate::session::{AgentSession, SessionSignal, attach};
 use crate::settings_port::AgentSettingsPort;
-use crate::theme_library::FsThemeLibrary;
 use crate::windows::WindowRegistry;
 
 /// 事件泵单次批量上限。
@@ -127,6 +126,7 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         urls: launch.urls.clone(),
         files: launch.torrent_files.clone(),
         activate: launch.activate_existing || !launch.capture_only,
+        settings: launch.settings,
     };
     let _instance_lock =
         match acquire_or_activate(&instance_dir, &endpoint, &message, launch.activate_existing)? {
@@ -146,8 +146,15 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
     let listener =
         instance_ipc::Listener::bind(endpoint.clone()).map_err(AppError::ActivationListener)?;
     let agent_config = AgentClientConfig {
-        rpc_url: env::var("FLUXDOWN_AGENT_URL")
-            .unwrap_or_else(|_| "ws://127.0.0.1:17800/rpc".to_owned()),
+        rpc_url: match env::var("FLUXDOWN_AGENT_URL") {
+            Ok(url) => Some(url),
+            Err(env::VarError::NotPresent) => None,
+            Err(env::VarError::NotUnicode(_)) => {
+                return Err(AppError::AgentClient(AgentClientError::Configuration(
+                    "FLUXDOWN_AGENT_URL is not valid UTF-8".to_owned(),
+                )));
+            }
+        },
         bearer_path: token_path,
     };
 
@@ -170,7 +177,10 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
     );
     let open_urls_client = agent_client.clone();
 
-    let application = gpui_platform::application().with_assets(DesktopAssets);
+    // GPUI 在非 macOS 默认关掉最后一个窗口即退出；必须让 lifecycle 等待在途提交。
+    let application = gpui_platform::application()
+        .with_quit_mode(gpui::QuitMode::Explicit)
+        .with_assets(DesktopAssets);
     application.on_open_urls(move |urls| {
         let files = urls
             .iter()
@@ -192,12 +202,6 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         crate::logging::install_ui_watchdog(cx);
         crate::app_icon::install();
         fluxdown_ui_theme::init(cx);
-        // 导入主题须在首个偏好快照前注册，`custom:<id>` 偏好才能直接命中；
-        // 库内缺失的 id 由主题 crate 回退到该槽位的内置默认主题。
-        let theme_library = FsThemeLibrary::new(app_data_dir().join("themes"));
-        for failure in fluxdown_ui_settings::install_theme_library(Arc::new(theme_library), cx) {
-            log::warn!("failed to load imported theme: {failure}");
-        }
         gpui_component::set_locale(&locale);
         let translator = cx.new(|_| translator);
         let session = cx.new(|cx| AgentSession::new(agent_client.clone(), cx));
@@ -249,6 +253,7 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         // 会话 → 运行时统计 / 外壳状态折叠进 Desktop。偏好不在此处理：`SettingsStore` 已订阅同一
         // 会话并叠加本地未回执编辑，外观与语言只从它投影（见 `observe_preferences`）。
         observe_preferences(cx);
+        after_first_snapshot(cx, crate::legacy_themes::migrate);
         cx.subscribe(&session, |_, signal, cx| match signal {
             SessionSignal::Snapshot(snapshot) => {
                 if let Some(body) = crate::session::agent_body(snapshot) {
@@ -311,14 +316,23 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         cx.spawn(async move |cx| {
             while let Some(request) = activate_rx.recv().await {
                 let (message, acknowledgement) = request.into_parts();
-                drop(submit_captures_detached(
-                    &activate_client,
-                    message.urls,
-                    message.files,
-                ));
-                if message.activate {
-                    cx.update(crate::windows::main::reveal);
-                }
+                cx.update(|cx| {
+                    if !message.urls.is_empty() || !message.files.is_empty() {
+                        let submitted =
+                            submit_captures_detached(&activate_client, message.urls, message.files);
+                        let task = cx.spawn(async move |_| {
+                            if submitted.await.is_err() {
+                                log::debug!("activation submission owner released");
+                            }
+                        });
+                        crate::lifecycle::keep_alive(cx, task).detach();
+                    }
+                    if message.settings {
+                        crate::windows::settings::open(cx);
+                    } else if message.activate {
+                        crate::windows::main::reveal(cx);
+                    }
+                });
                 if acknowledgement.send(()).is_err() {
                     log::trace!("activation acknowledgement receiver already closed");
                 }
@@ -331,7 +345,6 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         // 引擎选择请求窗口 / 外部捕获确认（并入新建下载窗口）：跟随会话事件独立开关，
         // 不依赖主窗口存在。
         crate::windows::selection::install(cx);
-        crate::windows::new_download::install_captures(cx);
         crate::plugin_notices::install(cx);
         crate::progress_windows::install(cx);
         if let Some(task_id) = launch.progress_task.clone() {
@@ -339,26 +352,26 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
             crate::progress_windows::user_started_on_launch(task_id, cx);
         }
 
-        if launch.capture_only {
+        if launch.settings {
+            after_session_settled(cx, crate::windows::settings::open);
+        } else if launch.capture_only {
             // 由 agent 为待确认交互拉起：不开主窗口；确认窗口随快照 / 事件打开，全部关闭后由
             // 窗口注册表退出。启动链接提交完成后若首个快照里已无待确认项，直接退出。
             quit_when_nothing_to_confirm(launch_submissions, cx);
-            return;
-        }
-        if launch.minimized {
+        } else if launch.minimized {
             // 开机自启（agent 判定需要界面时才拉起）：会话就绪后开最小化主窗口。
             after_session_settled(cx, open_main_minimized);
-            return;
-        }
-        if launch.is_plain() {
+        } else if launch.is_plain() {
             // 普通启动：本进程冷启动了服务时按「启动时最小化到托盘」决定；agent 早已驻留时
             // 这是用户在打开应用，直接开窗。
             decide_plain_launch(bootstrap, cx);
-            return;
+        } else {
+            // 等快照就绪后开主窗口，避免首帧闪连接态。
+            after_session_settled(cx, crate::windows::main::reveal);
         }
-        // 连接在 GPUI 初始化前已开始：热启动时首个快照几乎与事件循环同时到达，等它到了再开窗，
-        // 首帧就是完整数据、主题与语言，不闪「正在连接」；冷启动（需拉起后台）等到会话宽限到期。
-        after_session_settled(cx, crate::windows::main::reveal);
+        // 主窗口的首帧 / 快照订阅先注册，捕获确认后开，避免主窗口覆盖待确认窗口。
+        // --capture 仍不创建主窗口；其空窗退出检查在异步回调里执行。
+        crate::windows::new_download::install_captures(cx);
     });
 
     Ok(RunOutcome::Completed)
@@ -527,6 +540,10 @@ fn observe_preferences(cx: &mut App) {
 
 fn apply_preferences(values: &BTreeMap<String, serde_json::Value>, cx: &mut App) {
     let translator = Desktop::global(cx).translator.clone();
+    // 导入主题先于外观注册，`custom:<id>` 选择才能直接命中。
+    for failure in fluxdown_ui_settings::sync_theme_library(values, cx) {
+        log::warn!("failed to load imported theme: {failure}");
+    }
     fluxdown_ui_theme::apply_appearance_preferences(values, cx);
     apply_activity_bar_preferences(values, cx);
     if let Some(locale) = values
@@ -696,8 +713,8 @@ fn portable_data_dir() -> Option<std::path::PathBuf> {
     None
 }
 
-/// 桌面数据根目录（导入主题等）。
-fn app_data_dir() -> std::path::PathBuf {
+/// 桌面数据根目录（旧版导入主题文件所在，见 `legacy_themes`）。
+pub(crate) fn app_data_dir() -> std::path::PathBuf {
     DesktopPaths::from_env().data_root
 }
 

@@ -853,12 +853,20 @@ impl DownloadView {
                 DeviceKind::Cloud => FluxIcon::Globe,
                 DeviceKind::Paired => FluxIcon::Network,
             };
-            let dot = if device.online {
-                online_color
-            } else {
-                offline_color
+            let dot = match device.online {
+                Some(true) => Some(online_color),
+                Some(false) => Some(offline_color),
+                None => None,
             };
-            (device.id, SharedString::from(device.label), icon, Some(dot))
+            let label = if device.online.is_none() {
+                SharedString::from(format!(
+                    "{} · {}",
+                    device.label, self.strings.device_presence_unknown
+                ))
+            } else {
+                SharedString::from(device.label)
+            };
+            (device.id, label, icon, dot)
         }));
         let count = rows.len() as f32;
         let mut items = Vec::with_capacity(rows.len());
@@ -905,6 +913,12 @@ impl DownloadView {
                 .controller
                 .preference_bool(section.visibility_pref(), true),
         }
+    }
+
+    pub(crate) fn has_visible_sidebar_section(&self) -> bool {
+        SidebarSection::ALL
+            .into_iter()
+            .any(|section| self.section_visible(section))
     }
 
     /// 侧栏根：与活动栏同为 `chrome` 底色；与内容区之间的分隔线由页面布局负责。

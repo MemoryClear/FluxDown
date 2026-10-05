@@ -63,10 +63,18 @@ pub enum ErrorReason {
     InvalidCredentials,
     /// FluxCloud：邮箱验证码错误或已过期。
     InvalidVerificationCode,
+    /// FluxCloud：修改密码时提供的当前密码不正确。
+    WrongPassword,
     /// FluxCloud：请求过于频繁（发码 / 登录 / 校验限流）。
     RateLimited,
     /// FluxCloud：邮箱已被注册。
     EmailTaken,
+    /// FluxCloud：目标 Origin ID 已被占用。
+    OriginIdTaken,
+    /// FluxCloud：当前权益不允许自助修改 Origin ID。
+    OriginIdChangeNotAllowed,
+    /// FluxCloud：Origin ID 的一次修改机会已使用。
+    OriginIdAlreadyChanged,
     /// FluxCloud：账号已被停用。
     AccountDisabled,
     /// FluxCloud：服务端关闭了注册。
@@ -83,6 +91,8 @@ pub enum ErrorReason {
     DeviceUntrusted,
     /// FluxCloud：登录会话已失效（被撤销 / 刷新令牌过期）。
     SessionExpired,
+    /// FluxCloud：账号密码已被修改或重置，本设备会话随之失效。
+    PasswordChanged,
     /// FluxCloud：无法连接云服务（网络 / DNS / TLS / 代理）。
     CloudUnreachable,
     /// 远程任务：目标设备当前离线，指令无法送达。
@@ -125,6 +135,10 @@ pub enum ErrorReason {
     RepairIncomplete,
     /// Doctor 修复：目标不在自动修复范围内（系统目录、家目录本身、非权限类错误），需用户手动处理。
     RepairNotApplicable,
+    /// API 服务切换：请求的新监听端口已被占用，原服务与配置保持不变。
+    GatewayPortInUse,
+    /// API 服务切换：新服务未通过启动验证或配置无法保存，已保留原服务。
+    GatewayRestartFailed,
     /// 对端发送了本端不认识的原因。
     #[serde(other)]
     Unknown,

@@ -15,8 +15,9 @@ use gpui::{
     ParentElement, Render, SharedString, Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Icon,
+    Icon, WindowExt as _,
     input::{Input, InputState},
+    notification::Notification,
     scroll::ScrollableElement as _,
     v_flex,
 };
@@ -77,7 +78,36 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&translator, |_, _, cx| cx.notify()).detach();
-        cx.observe(&store, |_, _, cx| cx.notify()).detach();
+        cx.observe_in(&store, window, |this, store, window, cx| {
+            let snapshot = store.read(cx);
+            let translator = this.translator.read(cx);
+            let notification = match snapshot.last_error() {
+                Some(error)
+                    if matches!(
+                        error.kind,
+                        SettingsErrorKind::GatewayPortInUse
+                            | SettingsErrorKind::GatewayRestartFailed
+                    ) =>
+                {
+                    Some(Notification::error(
+                        translator.text(error.kind.i18n_key()).to_owned(),
+                    ))
+                }
+                None if snapshot.last_notice() == Some("apiServiceRestarted") => {
+                    Some(Notification::success(translator.text_with(
+                        "apiServiceRestarted",
+                        &[("port", &snapshot.gateway().port.to_string())],
+                    )))
+                }
+                _ => None,
+            };
+            if let Some(notification) = notification {
+                store.update(cx, |store, cx| store.clear_feedback(cx));
+                window.push_notification(notification, cx);
+            }
+            cx.notify();
+        })
+        .detach();
         // 站点凭据由新建任务等流程在窗口外写入且无事件推送：每次打开窗口重新加载一次。
         store.update(cx, |store, _| store.reset_load("siteAuth"));
         let placeholder = translator.read(cx).text("settingsSearchHint").to_owned();
@@ -102,6 +132,12 @@ impl SettingsView {
         let store = self.store.read(cx);
         let translator = self.translator.read(cx);
         if let Some(error) = store.last_error() {
+            if matches!(
+                error.kind,
+                SettingsErrorKind::GatewayPortInUse | SettingsErrorKind::GatewayRestartFailed
+            ) {
+                return None;
+            }
             let mut text = translator.text(error.kind.i18n_key()).to_owned();
             if error.kind == SettingsErrorKind::InvalidArgument && !error.detail.is_empty() {
                 text.push_str(": ");
@@ -111,6 +147,7 @@ impl SettingsView {
         }
         store
             .last_notice()
+            .filter(|key| *key != "apiServiceRestarted")
             .map(|key| (SharedString::from(translator.text(key).to_owned()), false))
     }
 
@@ -168,6 +205,7 @@ impl SettingsView {
     fn render_sidebar(&self, pages: &[SettingsPage], cx: &mut Context<Self>) -> impl IntoElement {
         let theme = active_theme(cx);
         let tokens = theme.tokens().clone();
+        let sidebar_width = theme.text_extent(SIDEBAR_WIDTH);
         let extended = theme.extended().clone();
         let items: Vec<_> = pages
             .iter()
@@ -176,7 +214,7 @@ impl SettingsView {
 
         v_flex()
             .flex_none()
-            .w(px(SIDEBAR_WIDTH))
+            .w(sidebar_width)
             .h_full()
             .min_h_0()
             .px(tokens.spacing.sm)
@@ -360,7 +398,7 @@ impl Render for SettingsView {
         }
         // 内容区可用宽度：窗口宽 - 侧栏 - 左右留白（列数判定用，不参与布局）。
         let content_width = f32::from(window.viewport_size().width)
-            - SIDEBAR_WIDTH
+            - f32::from(active_theme(cx).text_extent(SIDEBAR_WIDTH))
             - CONTENT_PADDING_LEFT
             - CONTENT_PADDING_RIGHT;
         let feedback = self.feedback(cx);

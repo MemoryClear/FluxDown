@@ -6,6 +6,8 @@
 //! 提交时经 `agent.capture.resolve` 确认，Cookie / 请求头 / 请求体等上下文由 agent 合并；
 //! 未确认的捕获在窗口关闭时一并忽略。
 
+mod preview;
+
 use std::{
     collections::{BTreeMap, HashMap},
     rc::Rc,
@@ -61,11 +63,11 @@ use gpui_component::{
 };
 
 /// 「自定义线程数」数字输入宽度。
-const CUSTOM_THREADS_WIDTH: Pixels = px(96.);
+const CUSTOM_THREADS_WIDTH: f32 = 96.;
 /// 预设下拉（UA、校验算法）定宽，右侧输入框吃满剩余宽度。
-const PRESET_DROPDOWN_WIDTH: Pixels = px(140.);
+const PRESET_DROPDOWN_WIDTH: f32 = 140.;
 /// 请求头名称列宽。
-const HEADER_NAME_WIDTH: Pixels = px(168.);
+const HEADER_NAME_WIDTH: f32 = 168.;
 /// 链接停止变化多久后才查询站点凭据（逐键输入时不逐字符发 RPC）。
 const SITE_AUTH_LOOKUP_DEBOUNCE: Duration = Duration::from_millis(250);
 
@@ -106,15 +108,25 @@ pub fn new_download_context_from_snapshot(snapshot: &AgentSnapshot) -> NewDownlo
         &snapshot.preferences.values,
         &snapshot.daemon.queues,
         None,
-        new_download_targets(&snapshot.cloud_devices, &snapshot.linked_devices),
+        new_download_targets(
+            &snapshot.cloud_devices,
+            &snapshot.linked_devices,
+            snapshot.cloud_connection.state == fluxdown_protocol::CloudConnectionState::Connected,
+            true,
+        ),
     )
 }
 
 /// 「下载到」候选设备（云账号其他设备 + 已配对设备；名册里的本机、重复 id 已剔除，同名
 /// 设备已追加短码）。
 #[must_use]
-pub fn new_download_targets(cloud: &[CloudDevice], linked: &[LinkDeviceInfo]) -> Vec<DeviceEntry> {
-    other_devices(cloud, linked)
+pub fn new_download_targets(
+    cloud: &[CloudDevice],
+    linked: &[LinkDeviceInfo],
+    cloud_current: bool,
+    service_current: bool,
+) -> Vec<DeviceEntry> {
+    other_devices(cloud, linked, cloud_current, service_current)
 }
 
 /// 与 Dart 一致：偏好 `remember_last_save_dir` 开启且有记录时沿用上次目录，否则用全局
@@ -210,8 +222,13 @@ struct AuthAutofill {
 /// 提交或取消都会关闭自身所在窗口（「打开种子文件」只提交种子：表单里还有待处理链接时
 /// 窗口保留，链接原样留在表单中）；任务创建失败的提示由宿主展示。视图释放时仍未确认的
 /// 外部捕获由宿主经 [`Self::take_captures`] 取走并忽略。
+// 清单预解析与返回保留本表单实体，取消不会触发建任务。
 pub struct NewDownloadView {
     strings: NewDownloadStrings,
+    translator: Entity<Translator>,
+    preview_gate: crate::model::preview::PreviewGate,
+    preview_request: Option<(fluxdown_protocol::CreateTaskRequest, Option<String>)>,
+    manifest: Option<Entity<crate::pages::manifest::ManifestView>>,
     context: NewDownloadContext,
     port: Arc<dyn DownloadsPort>,
     on_submit: NewDownloadSubmit,
@@ -316,6 +333,10 @@ impl NewDownloadView {
             user_agent: Self::input(strings.user_agent_desc.clone(), window, cx),
             checksum: Self::input(strings.checksum_placeholder.clone(), window, cx),
             strings,
+            translator: translator.clone(),
+            preview_gate: crate::model::preview::PreviewGate::default(),
+            preview_request: None,
+            manifest: None,
             context,
             port,
             on_submit,
@@ -641,7 +662,11 @@ impl NewDownloadView {
     }
 
     fn can_submit(&self, cx: &App) -> bool {
-        if self.picking || self.entries.is_empty() {
+        if self.picking
+            || self.preview_gate.is_active()
+            || self.manifest.is_some()
+            || self.entries.is_empty()
+        {
             return false;
         }
         match self.target_entry() {
@@ -651,10 +676,10 @@ impl NewDownloadView {
     }
 
     fn target_label(&self, entry: &DeviceEntry) -> SharedString {
-        let status = if entry.online {
-            &self.strings.device_online
-        } else {
-            &self.strings.device_offline
+        let status = match entry.online {
+            Some(true) => &self.strings.device_online,
+            Some(false) => &self.strings.device_offline,
+            None => &self.strings.device_presence_unknown,
         };
         match entry.kind {
             DeviceKind::Cloud => SharedString::from(format!("{} · {status}", entry.label)),
@@ -777,9 +802,25 @@ impl NewDownloadView {
             return;
         }
         let options = self.draft_options(later, queue_override, cx);
+        let requests = build_requests(&self.entries, &options);
+        if let [request] = requests.as_slice()
+            && crate::model::preview::previewable(request)
+        {
+            self.start_preview(request.clone(), window, cx);
+            return;
+        }
+        self.submit_requests(requests, window, cx);
+    }
+
+    fn submit_requests(
+        &mut self,
+        requests: Vec<fluxdown_protocol::CreateTaskRequest>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let mut tasks = Vec::new();
         let mut captures = Vec::new();
-        for request in build_requests(&self.entries, &options) {
+        for request in requests {
             match self
                 .captures
                 .iter()
@@ -944,7 +985,7 @@ impl NewDownloadView {
             NewDownloadSubmission::Remote(RemoteSubmission {
                 target: entry.target(),
                 device_label: entry.label.clone(),
-                target_offline: entry.kind == DeviceKind::Cloud && !entry.online,
+                target_offline: entry.kind == DeviceKind::Cloud && entry.online == Some(false),
                 items,
                 save_dir,
                 captures,
@@ -1164,10 +1205,14 @@ impl NewDownloadView {
     ///
     /// 不要再加 `px`/`py`：多行 `Input` 已按尺寸给内部编辑区设置了内边距，外层再叠
     /// 一层会让文字离边框两倍远。
-    fn textarea(state: &Entity<TextareaState>, height: Pixels, cx: &App) -> Textarea {
-        let tokens = active_theme(cx).tokens();
+    ///
+    /// `height` 为默认字号下的高度；至少容纳 `lines` 行正文加上下小间距，文字放大后随行高增长。
+    fn textarea(state: &Entity<TextareaState>, height: Pixels, lines: f32, cx: &App) -> Textarea {
+        let theme = active_theme(cx);
+        let tokens = theme.tokens();
+        let text_height = tokens.typography.sm.line_height * lines + tokens.spacing.xs * 2.;
         Textarea::new(state)
-            .h(height)
+            .h(height.max(text_height))
             .w_full()
             .text_size(tokens.typography.sm.size)
             .line_height(tokens.typography.sm.line_height)
@@ -1225,7 +1270,7 @@ impl NewDownloadView {
                         this.child(field_hint(self.strings.format_url_count(count), cx))
                     }),
             )
-            .child(Self::textarea(&self.urls, px(128.), cx))
+            .child(Self::textarea(&self.urls, px(128.), 6., cx))
             .when(has_text && count == 0, |this| {
                 this.child(field_error(self.strings.no_valid_url.clone(), cx))
             })
@@ -1288,9 +1333,12 @@ impl NewDownloadView {
             None => self.strings.download_to_hint.clone(),
             Some(entry) => {
                 let offline = match (entry.online, entry.kind) {
-                    (true, _) => None,
-                    (false, DeviceKind::Cloud) => Some(&self.strings.target_offline_hint),
-                    (false, DeviceKind::Paired) => Some(&self.strings.target_paired_offline_hint),
+                    (Some(true), _) => None,
+                    (Some(false), DeviceKind::Cloud) => Some(&self.strings.target_offline_hint),
+                    (Some(false), DeviceKind::Paired) => {
+                        Some(&self.strings.target_paired_offline_hint)
+                    }
+                    (None, _) => Some(&self.strings.device_presence_unknown),
                 };
                 match offline {
                     Some(offline) => SharedString::from(format!(
@@ -1387,7 +1435,7 @@ impl NewDownloadView {
                     Input::new(&self.custom_threads)
                         .control(cx)
                         .flex_none()
-                        .w(CUSTOM_THREADS_WIDTH),
+                        .w(active_theme(cx).text_extent(CUSTOM_THREADS_WIDTH)),
                 )
             });
         form_field(self.strings.threads.clone(), control, None, cx)
@@ -1507,7 +1555,7 @@ impl NewDownloadView {
             .collect();
         let preset = self.dropdown(
             "new-download-ua-preset",
-            Some(PRESET_DROPDOWN_WIDTH),
+            Some(active_theme(cx).text_extent(PRESET_DROPDOWN_WIDTH)),
             self.ua_preset,
             options,
             |this, key, window, cx| this.set_ua_preset(key, window, cx),
@@ -1524,7 +1572,7 @@ impl NewDownloadView {
     fn render_cookie(&self, cx: &mut Context<Self>) -> Div {
         form_field(
             self.strings.cookie.clone(),
-            Self::textarea(&self.cookie, px(72.), cx),
+            Self::textarea(&self.cookie, px(72.), 3., cx),
             Some(self.strings.cookie_desc.clone()),
             cx,
         )
@@ -1537,7 +1585,7 @@ impl NewDownloadView {
             .collect();
         let preset = self.dropdown(
             "new-download-hash-algorithm",
-            Some(PRESET_DROPDOWN_WIDTH),
+            Some(active_theme(cx).text_extent(PRESET_DROPDOWN_WIDTH)),
             self.hash_algorithm,
             options,
             |this, algorithm, _, cx| {
@@ -1567,7 +1615,7 @@ impl NewDownloadView {
                     .child(
                         div()
                             .flex_none()
-                            .w(HEADER_NAME_WIDTH)
+                            .w(active_theme(cx).text_extent(HEADER_NAME_WIDTH))
                             .child(Input::new(&row.key).control(cx).w_full()),
                     )
                     .child(
@@ -1783,6 +1831,12 @@ impl NewDownloadView {
 impl Render for NewDownloadView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = active_theme(cx).tokens().clone();
+        if let Some(manifest) = &self.manifest {
+            return div().size_full().child(manifest.clone()).into_any_element();
+        }
+        if self.preview_gate.is_active() {
+            return self.render_preview(cx).into_any_element();
+        }
         v_flex()
             .size_full()
             // 表单区用 surface（白），与设置窗口内容区一致。
@@ -1795,6 +1849,7 @@ impl Render for NewDownloadView {
                     .child(self.render_form(cx).overflow_y_scrollbar()),
             )
             .child(self.render_footer(cx))
+            .into_any_element()
     }
 }
 

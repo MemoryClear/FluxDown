@@ -6,7 +6,7 @@ import type { DownloadTaskView, TaskState } from './task'
 
 export const VIEW_PREFS_KEY = 'desktop.downloads.view'
 
-export type ViewDensity = 'comfortable' | 'compact'
+export type ViewDensity = 'comfortable' | 'compact' | 'relaxed'
 export type ViewGroupBy = 'none' | 'status' | 'date' | 'type' | 'queue' | 'site' | 'group'
 export type ViewSortKey = 'smart' | 'created' | 'name' | 'size' | 'progress' | 'speed' | 'status'
 export type SortDir = 'asc' | 'desc'
@@ -118,6 +118,7 @@ export interface ViewPrefs {
   detail_open: boolean
   detail_size: number
   sidebar_width: number
+  sidebar_collapsed: boolean
   collapsed_groups: string[]
 }
 
@@ -140,6 +141,7 @@ export function defaultViewPrefs(): ViewPrefs {
     detail_open: false,
     detail_size: 260,
     sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+    sidebar_collapsed: false,
     collapsed_groups: [],
   }
 }
@@ -174,7 +176,7 @@ export function parseViewPrefs(value: unknown): ViewPrefs {
       })
     : []
   return {
-    density: oneOf(['comfortable', 'compact'], json.density, defaults.density),
+    density: oneOf(['comfortable', 'compact', 'relaxed'], json.density, defaults.density),
     group_by: oneOf(GROUP_BY_OPTIONS, json.group_by, defaults.group_by),
     sort_key: oneOf(SORT_KEY_OPTIONS, json.sort_key, defaults.sort_key),
     sort_dir: oneOf(['asc', 'desc'], json.sort_dir, defaults.sort_dir),
@@ -184,6 +186,7 @@ export function parseViewPrefs(value: unknown): ViewPrefs {
     detail_open: json.detail_open === true,
     detail_size: finite(json.detail_size, defaults.detail_size),
     sidebar_width: finite(json.sidebar_width, defaults.sidebar_width),
+    sidebar_collapsed: json.sidebar_collapsed === true,
     collapsed_groups: Array.isArray(json.collapsed_groups)
       ? json.collapsed_groups.filter((item): item is string => typeof item === 'string')
       : [],

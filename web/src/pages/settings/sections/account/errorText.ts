@@ -10,9 +10,13 @@ export type AccountErrorContext = 'generic' | 'login' | 'register' | 'code'
 /** reason → 文案键；未列出的 reason（含 `unknown` 与插件市场类）回退按码。 */
 export const REASON_KEYS: Partial<Record<ErrorReason, string>> = {
   invalidCredentials: 'accountErrorInvalidCredentials',
+  wrongPassword: 'accountErrorWrongPassword',
   invalidVerificationCode: 'accountErrorInvalidCode',
   rateLimited: 'accountErrorRateLimited',
   emailTaken: 'accountErrorEmailTaken',
+  originIdTaken: 'accountOriginIdErrorTaken',
+  originIdChangeNotAllowed: 'accountOriginIdErrorNotAllowed',
+  originIdAlreadyChanged: 'accountOriginIdErrorAlreadyChanged',
   accountDisabled: 'accountErrorAccountDisabled',
   registrationClosed: 'accountErrorRegistrationClosed',
   registrationIncomplete: 'accountErrorRegistrationIncomplete',
