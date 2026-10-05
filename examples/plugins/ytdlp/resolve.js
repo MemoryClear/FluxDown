@@ -559,6 +559,16 @@ globalThis.resolve = async (ctx) => {
     throw new Error(friendlyError(ctx.url, r, !!cookiesText));
   }
 
+  // 截断优先于解析：FluxDown 回传 stdout 有上限（YTDLP_STDOUT_CAP），超限会被
+  // 截成非法 JSON。先据 truncatedStdout 给出可定位的错误，而不是让 JSON.parse
+  // 抛出「Unexpected end of JSON input」这种难以排查的信息。
+  if (r.truncatedStdout) {
+    throw new Error(
+      'yt-dlp 输出超过 FluxDown 回传上限，已被截断（该站点 -J 体积过大；' +
+        '可通过「附加 yt-dlp 参数」加 --parse-metadata 剔除重字段，或减少输出）'
+    );
+  }
+
   var info;
   try {
     info = JSON.parse(raw);
