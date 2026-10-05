@@ -21,6 +21,7 @@ import androidx.compose.ui.graphics.RenderEffect
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.asComposeRenderEffect
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.drawOutline
 import androidx.compose.ui.graphics.drawscope.ContentDrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -205,7 +206,9 @@ private class GlassNode(var spec: GlassElement) : Modifier.Node(), DrawModifierN
         val c = s.colors
         val outline = s.shape.createOutline(size, layoutDirection, this)
         val bd = s.backdrop
-        val real = s.kind == FluxGlassKind.Real && s.mode == FluxGlassMode.Blur && bd != null && bd.version >= 0
+        // 弹出层（Sheet / 对话框 / 菜单等）一律不透明：不采样下层模糊副本，直接画合成到画布的实色
+        val popup = s.level == FluxGlass.Sheet || s.level == FluxGlass.Menu
+        val real = !popup && s.kind == FluxGlassKind.Real && s.mode == FluxGlassMode.Blur && bd != null && bd.version >= 0
         val layer = if (real) bd?.request(s.blur) else null
         if (layer != null && bd != null) {
             val d = origin - bd.originInRoot
@@ -243,8 +246,8 @@ private class GlassNode(var spec: GlassElement) : Modifier.Node(), DrawModifierN
         FluxGlass.G2 -> if (s.kind == FluxGlassKind.Flat) tint(s, c) else c.glassSolid2
         FluxGlass.G3 -> if (s.kind == FluxGlassKind.Flat) tint(s, c) else c.glassSolid3
         FluxGlass.G4 -> if (s.kind == FluxGlassKind.Flat) tint(s, c) else c.glassSolid4
-        FluxGlass.Sheet -> c.sheetBg.copy(alpha = 0.97f)
-        FluxGlass.Menu -> c.menuBg.copy(alpha = 0.97f)
+        FluxGlass.Sheet -> c.sheetBg.compositeOver(c.canvas)
+        FluxGlass.Menu -> c.menuBg.compositeOver(c.canvas)
     }
 }
 

@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableFloatState
 import androidx.compose.runtime.getValue
@@ -74,6 +75,7 @@ import androidx.compose.ui.unit.dp
 import com.fluxdown.fluxui.icons.FluxIcons
 import com.fluxdown.fluxui.material.FluxBlur
 import com.fluxdown.fluxui.material.FluxGlass
+import com.fluxdown.fluxui.material.LocalFluxBackdrop
 import com.fluxdown.fluxui.material.fluxGlass
 import com.fluxdown.fluxui.theme.FluxText
 import com.fluxdown.fluxui.theme.FluxTheme
@@ -206,7 +208,8 @@ fun FluxSheet(
     val fill = detent != FluxSheetDetent.Wrap
     val dragState = rememberDraggableState { rawDrag.floatValue += it }
 
-    Box(modifier.fillMaxSize().semantics { isTraversalGroup = true }) {
+    // Sheet 是不透明叠加面：本体与内部玻璃面都不采样下层页面的模糊副本（backdrop = null ⇒ 一律实色）
+    CompositionLocalProvider(LocalFluxBackdrop provides null) { Box(modifier.fillMaxSize().semantics { isTraversalGroup = true }) {
         // 遮罩
         Box(
             Modifier
@@ -352,7 +355,7 @@ fun FluxSheet(
                 },
             )
         }
-    }
+    } }
 }
 
 /**

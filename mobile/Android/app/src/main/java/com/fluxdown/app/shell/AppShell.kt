@@ -133,6 +133,12 @@ fun AppShell() {
     val selection by remember { derivedStateOf { host.value.selections.firstOrNull() } }
     val windowClass = FluxTheme.windowClass
     val orb = rememberFluxOrbState()
+    // 只有首页（下载根页，含 medium / expanded 档右栏详情）透出氛围光；其余页面 / 命令搜索铺实色把它完全遮住，
+    // 此时冻结相位（maxFps = 0），不再为看不见的氛围光逐帧重绘。
+    val top = nav.top
+    val homeVisible = nav.tab == AppTab.Downloads &&
+        (top == null || (top is Route.TaskDetail && windowClass != FluxWindowClass.Compact))
+    val auraFps = if (homeVisible && !nav.searchOpen) FluxTheme.perf.auraMaxFps else 0
 
     // 氛围光亮度 ∝ 总吞吐（读取在 draw 阶段）
     var aura by remember { mutableFloatStateOf(0f) }
@@ -162,7 +168,7 @@ fun AppShell() {
                     // 背景源内部不得采样自身（RenderNode 环）：页面内的玻璃面取 null → 平玻璃 / 实色；
                     // 需要真模糊的页内浮层（读数条等）由页面自建局部背景源，页内 Sheet 经 FluxPortal 传送到浮层层。
                     CompositionLocalProvider(LocalFluxBackdrop provides null) {
-                        FluxCanvas(activity = { aura }, modifier = Modifier.fillMaxSize()) {
+                        FluxCanvas(activity = { aura }, modifier = Modifier.fillMaxSize(), auraMaxFps = auraFps) {
                             when (windowClass) {
                                 FluxWindowClass.Expanded -> ExpandedStage()
                                 else -> CompactStage(paned = windowClass == FluxWindowClass.Medium)
@@ -246,7 +252,11 @@ private fun PageStack(modifier: Modifier, route: Route?, expanded: Boolean) {
         label = "page",
     ) { key ->
         val r = key.route
-        if (r == null) TabRoot(nav.tab, expanded) else RouteContent(r, inPane = false)
+        // 非首页（其余 Tab 根页与推入页）铺实色画布：不透出氛围光渐变，推入 / 返回过渡中也不与下层页透叠。
+        val home = r == null && nav.tab == AppTab.Downloads
+        Box(if (home) Modifier.fillMaxSize() else Modifier.fillMaxSize().background(FluxTheme.colors.canvas)) {
+            if (r == null) TabRoot(nav.tab, expanded) else RouteContent(r, inPane = false)
+        }
     }
 }
 

@@ -1,6 +1,7 @@
 package com.fluxdown.fluxui.overlay
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -19,6 +20,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -29,7 +31,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalFocusManager
@@ -45,16 +46,16 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import com.fluxdown.fluxui.icons.FluxIcon
 import com.fluxdown.fluxui.icons.FluxIcons
-import com.fluxdown.fluxui.material.FluxBlur
 import com.fluxdown.fluxui.material.FluxGlass
 import com.fluxdown.fluxui.material.FluxGlassKind
+import com.fluxdown.fluxui.material.LocalFluxBackdrop
 import com.fluxdown.fluxui.material.fluxGlass
 import com.fluxdown.fluxui.material.fluxGlow
 import com.fluxdown.fluxui.theme.FluxText
 import com.fluxdown.fluxui.theme.FluxTheme
 
 /**
- * 命令搜索全屏壳（§12.31，z74）：canvas@70% + Thick 模糊；入场 scale 1.02→1、模糊 10→0（fluid），出场 snap。
+ * 命令搜索全屏壳（§12.31，z74）：实色画布底（不透出下层页面与氛围光）；入场 scale 1.02→1、模糊 10→0（fluid），出场 snap。
  * 顶部为搜索框（h52、r26、聚焦时 accent@70% 描边 + 辉光）与“取消”；其下 [content] 占满剩余空间并随键盘收缩
  * （结果列表用 LazyColumn，contentPadding = 0 16 40 自行设置）。显示后自动聚焦并弹出键盘。
  * 返回键 = [onDismiss]。
@@ -98,38 +99,41 @@ fun CommandSearchScaffold(
         }
     }
 
-    Column(
-        modifier
-            .fillMaxSize()
-            .graphicsLayer {
-                val v = prog.value
-                alpha = v.coerceIn(0f, 1f)
-                val s = 1.02f - 0.02f * v
-                scaleX = s
-                scaleY = s
-                renderEffect = blurs?.at(v)
-            }
-            .fluxGlass(FluxGlass.G1, RectangleShape, FluxBlur.Thick, canvasMix = 0.7f, strongLine = false)
-            .swallowTaps()
-            .windowInsetsPadding(WindowInsets.statusBars)
-            .windowInsetsPadding(WindowInsets.ime),
-    ) {
-        Row(
-            Modifier.fillMaxWidth().padding(start = 16.dp, top = 8.dp, end = 8.dp, bottom = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
+    // 全屏实色壳：内部玻璃面（结果分区等）不得采样下层页面的模糊副本，一律退化为合成到画布的实色。
+    CompositionLocalProvider(LocalFluxBackdrop provides null) {
+        Column(
+            modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    val v = prog.value
+                    alpha = v.coerceIn(0f, 1f)
+                    val s = 1.02f - 0.02f * v
+                    scaleX = s
+                    scaleY = s
+                    renderEffect = blurs?.at(v)
+                }
+                .background(FluxTheme.colors.canvas)
+                .swallowTaps()
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .windowInsetsPadding(WindowInsets.ime),
         ) {
-            SearchField(
-                query = query,
-                onQueryChange = onQueryChange,
-                placeholder = placeholder,
-                onSearch = onSearch,
-                focusRequester = focusRequester,
-                modifier = Modifier.weight(1f),
-            )
-            OverlayTextButton("取消", onDismiss)
+            Row(
+                Modifier.fillMaxWidth().padding(start = 16.dp, top = 8.dp, end = 8.dp, bottom = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                SearchField(
+                    query = query,
+                    onQueryChange = onQueryChange,
+                    placeholder = placeholder,
+                    onSearch = onSearch,
+                    focusRequester = focusRequester,
+                    modifier = Modifier.weight(1f),
+                )
+                OverlayTextButton("取消", onDismiss)
+            }
+            Column(Modifier.weight(1f).fillMaxWidth()) { content() }
         }
-        Column(Modifier.weight(1f).fillMaxWidth()) { content() }
     }
 }
 
@@ -152,7 +156,8 @@ private fun SearchField(
         modifier
             .height(52.dp)
             .then(if (focused) Modifier.fluxGlow(c.accentGlow, 11.dp, shape, spread = (-6).dp) else Modifier)
-            .fluxGlass(FluxGlass.G3, shape, kind = FluxGlassKind.Flat, strongLine = true)
+            // Real + 壳内 backdrop = null ⇒ 不透明 glassSolid3：聚焦辉光只留在框外，不透进框内把文字染糊
+            .fluxGlass(FluxGlass.G3, shape, kind = FluxGlassKind.Real, strongLine = true)
             .then(if (focused) Modifier.border(1.dp, c.accent.copy(alpha = 0.7f), shape) else Modifier)
             .padding(start = 16.dp, end = if (query.isEmpty()) 16.dp else 4.dp),
         verticalAlignment = Alignment.CenterVertically,
