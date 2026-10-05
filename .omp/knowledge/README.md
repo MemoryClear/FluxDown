@@ -156,5 +156,6 @@ FluxDown/
 ├── bucket/             Scoop manifest
 ├── docs/               设计文档（实现状态见 `ops.md`「设计文档实现状态」）
 ├── android/ ios/   Flutter 移动端原生工程
+├── mobile/Android/     原生 Android（Compose + Flux Lumen，:core / :fluxui / :app）——见 `clients.md`「原生移动端」
 └── .github/workflows/   ci.yml 主干门禁 + release.yml 组件发布——见 `ops.md`「发布与 CI」
 ```

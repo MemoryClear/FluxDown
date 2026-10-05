@@ -1,7 +1,7 @@
 # FluxDown — AI 工作契约（核心）
 
 多协议下载管理器（IDM 的免费替代）。官网 <https://fluxdown.zerx.dev>。Rust 发行物版本由 CI 按 `v*` tag 注入 `FLUXDOWN_APP_VERSION`，运行期基准为 `fluxdown_protocol::APP_VERSION`（本地回退 crate 版本）；引擎 UA 的本地回退见 `native/engine/build.rs`。`pubspec.yaml` 管 Flutter 版本并作为引擎本地构建的回退来源，不是 Rust 发行物版本的唯一来源。
-**一套 Rust 下载引擎 `fluxdown_engine` + 多宿主 + 多客户端**：桌面发行物已是 GPUI，移动端仍是 Flutter；PC 客户端主力维护 GPUI（Flutter `lib/` 的 UI 修复与新功能暂停，只保持 wire 兼容，见 `.omp/RULES.md`）。GPUI 包 `fluxdown_ui_app` 已接入 `fluxdown-desktop → fluxdown-agent → fluxdownd → fluxdown_engine` 三进程本机链路。NAS/服务器端 = `fluxdown-agent --server` + `fluxdownd`（托管 React Web SPA，SPA 走 agent `/rpc`）。另有 CLI、WXT 浏览器扩展、Tampermonkey 用户脚本、JS 插件系统、内置 MCP/REST/aria2 API。Rinf 仅 Flutter App（`hub` crate）使用；`hub` 仅作为移动端（Android/iOS）Flutter 宿主；`native/server` 已冻结（不构建/发布，新实现不得依赖它）。
+**一套 Rust 下载引擎 `fluxdown_engine` + 多宿主 + 多客户端**：桌面发行物已是 GPUI，移动端发行物仍是 Flutter，其原生替代 `mobile/Android`（Jetpack Compose + 自研 Flux Lumen，零 Material）在建，将经 UniFFI（规划中的 `native/mobile`）接 Rust 核心；PC 客户端主力维护 GPUI（Flutter `lib/` 的 UI 修复与新功能暂停，只保持 wire 兼容，见 `.omp/RULES.md`）。GPUI 包 `fluxdown_ui_app` 已接入 `fluxdown-desktop → fluxdown-agent → fluxdownd → fluxdown_engine` 三进程本机链路。NAS/服务器端 = `fluxdown-agent --server` + `fluxdownd`（托管 React Web SPA，SPA 走 agent `/rpc`）。另有 CLI、WXT 浏览器扩展、Tampermonkey 用户脚本、JS 插件系统、内置 MCP/REST/aria2 API。Rinf 仅 Flutter App（`hub` crate）使用；`hub` 仅作为移动端（Android/iOS）Flutter 宿主；`native/server` 已冻结（不构建/发布，新实现不得依赖它）。
 
 ---
 
@@ -15,7 +15,7 @@
 | 架构全图、顶层目录树（哪个目录管什么） | `.omp/knowledge/README.md` |
 | 状态码 / DB 表与字段语义、6 种协议、引擎子系统（auto_proxy、RSS、segment_coordinator…）、插件系统、受管组件 | `.omp/knowledge/engine.md` |
 | HTTP API 路由组与鉴权、hub / cli / nmh / updater、headless server（agent `--server`）env 与路由 | `.omp/knowledge/hosts-and-api.md` |
-| Flutter 与 GPUI 前端（主题 token、云同步、widgets 族、移动端、GPUI 迁移层）、扩展、用户脚本、Web SPA、官网 | `.omp/knowledge/clients.md` |
+| Flutter、GPUI 与原生 Android（`mobile/Android`）前端（主题 token、云同步、widgets 族、移动端、GPUI 迁移层、Flux Lumen 模块与主机端口）、扩展、用户脚本、Web SPA、官网 | `.omp/knowledge/clients.md` |
 | 日志系统细节、发布流水线矩阵、设计文档实现状态（已实现 vs 仅设计，含命名歧义澄清） | `.omp/knowledge/ops.md` |
 | **「要加 X 改哪里」全表 —— 动手前先查这张** | `.omp/knowledge/extension-points.md` |
 
@@ -97,6 +97,7 @@ cargo run -p fluxdown_cli -- add <url> --local   # B 模式：内嵌引擎独立
 cd web && bun run dev                 # Web SPA localhost:5173（/rpc、/api、/ping、/demo 代理到 :17800 的 agent --server）；bun run build → web/dist
 cd website && npm run dev             # 官网 Astro localhost:4321
 cd fluxDown && npm run dev            # 扩展开发（Chrome）；dev:firefox / build / zip
+cd mobile/Android && ./gradlew :core:testDebugUnitTest :app:assembleDebug   # 原生 Android（JAVA_HOME = Android Studio 自带 JBR）
 
 # ── OpenAPI / 图标 / 发布 ──
 cargo run -p fluxdown_api --example gen_openapi > website-v2/public/openapi.json   # 改 API 后重生成
@@ -177,11 +178,13 @@ git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z   # 触发发布流水�
 | `hub/src/signals/mod.rs` | `rinf gen` → `download_actor` 的 `AuxSignal` 泵 → Dart 侧 `rustSignalStream` 监听 |
 | `native/api` 契约 | 重跑 `gen_openapi` 覆盖 `website-v2/public/openapi.json` |
 | `native/protocol` 的 DTO / 方法 / 事件 / `ErrorReason`（`agent.rs`、`event.rs`、`error.rs`、`method.rs`、`rpc.rs` 版本） | `web/src/lib/rpc/protocol/*.ts` 手写镜像 + `apply.ts`；新增严格事件枚举升协议版本；`settings.rs` 同步目录变化会被 Web `syncGroups.test.ts` 核对 |
-| 任一 UI 文案 | 只补 **en + zh 基线对**：App/GPUI/Web SPA 共用 `assets/i18n/{en,zh}.json`（Flutter 另补 `translations.dart` getter；Web 经 `web/src/i18n` 按同一 camelCase 键查表）；官网主站 `website-v2/src/i18n/messages/<ns>.ts`（`defineMessages({ en, zh })`）；`fluxDown/utils/locales/{en,zh-CN}.ts`。社区语言（`ja` 等）由 Weblate 维护，**不碰**（运行时键级回退英文）。**`assets/i18n` 同时被 `crates/*`（GPUI）与 `web/` 引用**：删键前先 `grep crates/ web/src`，`lib/` 无引用不等于死键 |
+| 任一 UI 文案 | 只补 **en + zh 基线对**：App/GPUI/Web SPA/原生 Android 共用 `assets/i18n/{en,zh}.json`（Flutter 另补 `translations.dart` getter；Web 经 `web/src/i18n` 按同一 camelCase 键查表；`mobile/Android` 构建期生成 `R.string.<键>`，禁止在 `res/` 手写同名文案）；官网主站 `website-v2/src/i18n/messages/<ns>.ts`（`defineMessages({ en, zh })`）；`fluxDown/utils/locales/{en,zh-CN}.ts`。社区语言（`ja` 等）由 Weblate 维护，**不碰**（运行时键级回退英文）。**`assets/i18n` 同时被 `crates/*`（GPUI）、`web/` 与 `mobile/Android` 引用**：删键前先 `grep crates/ web/src mobile/Android`，`lib/` 无引用不等于死键 |
 | web 设置项 / 对话框字段归属 | **基准 = GPUI 桌面客户端**：Web 设置分类与字段顺序、对话框分区对齐 `crates/settings` / `crates/downloads`（`web/src/pages/settings/categories.ts` ↔ `crates/settings/src/view.rs::build_pages`）。桌面专属项（托盘、自启、关联、剪贴板、打开文件/所在目录、进度窗口）在 Web 省略，其余不得各自措辞或另立分类 |
 | 「一键分类目录」的目录名推导 | `lib/src/models/custom_category.dart` 的 `sanitizeCategoryDirName` / `categoryDirUnder` ↔ `web/src/lib/category-dir.ts` 同名函数（含分隔符归一）；**且内置分类显示名两端逐字一致**（App/GPUI/Web 共用 `assets/i18n` 的 `categoryVideo/...` 键，勿在 Web 另起译文），否则同一台机器上桌面与 Web 会各建一套目录（`Document` vs `Documents`） |
 | 开机自启语义（`lib/src/services/autostart_service.dart`） | `native/agent/src/platform/autostart.rs`：「已启用」都要尊重系统级禁用（Windows `StartupApproved`、XDG `Hidden` / `X-GNOME-Autostart-enabled`），启动时自动迁移只改启动目标、**绝不**改系统启用状态；细节见 `.omp/knowledge/clients.md`「开机自启」 |
 | 文件跟踪重扫节流（`crates/downloads/src/model/file_rescan.rs::RescanThrottle`） | `web/src/lib/rescanThrottle.ts`（`RescanThrottle`）：逐条对齐 10s 冷却 / 尾沿排队 / 合并 / 尾沿后重计冷却；测试复用同组用例（`rescanThrottle.test.ts`） |
+| `native/protocol/src/agent.rs::CustomCategoryDto::builtin_defaults`（内置分类基线） | `mobile/Android/core/.../model/Category.kt::BUILTIN`（同序同扩展名；仅作主机未下发分类时的展示基线，匹配规则来源仍是主机快照） |
+| `native/protocol/src/event.rs` 的 reducer（`apply_daemon_event` / `apply_engine_message`） | `mobile/Android/core/.../store/HostStore.kt`（移动端渲染子集，`HostStoreTest` 覆盖删除哨兵 / 旧采样丢弃 / 非活跃清段 / Stale 只读）；UniFFI 接入后游标与重同步留在 Rust，Kotlin 只应用已接受的事件 |
 
 ---
 

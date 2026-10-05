@@ -1,4 +1,4 @@
-# FluxDown internals · GPUI 桌面 · Flutter 移动端/legacy · 扩展 · 用户脚本 · Web SPA · 官网
+# FluxDown internals · GPUI 桌面 · Flutter 移动端/legacy · 原生 Android（Flux Lumen） · 扩展 · 用户脚本 · Web SPA · 官网
 
 > 本文件是 `FluxDown/AGENTS.md` 的深挖附录：只放**枚举性 / 可从源码复原**的细节，硬不变式与红线在 AGENTS.md。
 > 路径以 `FluxDown/` 为根（cwd=工作区根时前置 `FluxDown/`）。事实层以源码为准，文档给坐标。
@@ -132,6 +132,18 @@ SharedPreferences 门面，**便携模式**（`portable` 标记）写 `<exe>/por
 
 ### 设置项（单一事实源 = `models/settings_provider.dart` load switch + `db.rs config` 表）
 ~80 键，分类：**下载**（default_save_dir/segments、auto_max_connections、domain_conn_caps、max_concurrent_tasks、speed_limit_bytes、max_auto_retries、auto_retry_delay_secs、auto_resume_on_start、remember/last_save_dir、default_queue_id、global_user_agent、cdn_multi_enabled、cdn_max_nodes［0=自动］、cdn_resolver_endpoints/cdn_ecs_subnets/cdn_hints_base［云端下发，Dart 云拉取落库］、cdn_node_health/cdn_pending_reports/auto_route_health［引擎学习/遥测缓存，UI 不读写］）、**App/系统**（close_to_tray、start_minimized_to_tray、auto_startup、auto_check_update、update_channel、analytics_enabled、notify_on_complete、silent_download_enabled、silent_skip_selection［免打扰子开关：跳过 BT/HLS/变体二次选择；设备本地，不入云同步目录］、use_server_time、keep_awake_while_downloading、log_max_size_mb、reveal_file_cmd）、**悬浮球/剪贴板**、**侧栏/标题栏可见性**、**自定义分类**、**代理**、**BT**（含 tracker 订阅键）、**ED2K**（server_list/订阅/kad/upnp/…
+
+## 原生移动端（`mobile/Android`，Jetpack Compose · Flux Lumen）
+
+Flutter 移动端的原生替代（退役路线见本机设计稿 `docs/mobile-ui/README.md` §8；iOS 另起 SwiftUI 工程，共享同一 Rust 核心）。设计语言 Flux Lumen：**只用 Compose Foundation，禁止 `androidx.compose.material*` / Material Symbols / accompanist**（`grep -RIn -E 'androidx\.compose\.material|com\.google\.android\.material|MaterialTheme|Material3' mobile/Android` 必须为空）。minSdk 31（`RenderEffect` 模糊为材质基线）。
+
+- **模块**：`:core`（无 UI；主机端口 + 状态仓库 + 格式化 + 演示主机，JVM 单测）→ `:fluxui`（纯组件库，不依赖业务：`theme/` 令牌、`icons/` Lucide 生成的 `FluxIcons`、`material/` 烟晶 / 氛围光 / 颗粒 / 流入、`chrome/` 坞 / 球 / 页头 / Rail、`overlay/` Sheet / 菜单 / 对话框 / toast（全部画在主窗口内以采样 `FluxBackdrop`，不用 Popup 窗口）、`controls/`、`data/` 流带 / 环 / 波形 / 仪表 / TaskRow、`feedback/`）→ `:app`（`shell/AppShell` 舞台、`nav/AppNavigator` 单一导航状态、`actions/TaskActions` 任务动作唯一分发点、`feature/*` 页面）。
+- **主机端口**：`core/host/HostSession`（方法与 `fluxdown_protocol` 的 `daemon.* / agent.*` 一一对应）+ `HostSignal`（Snapshot / Event / Stale / Fatal）。未来 UniFFI `native/mobile` 实现此端口：握手、epoch/sequence 游标、缓冲、重同步、重连与 800ms 离线宽限都在 Rust，Kotlin **不重复实现游标**。当前唯一实现是 `core/demo/DemoHostSession`（复刻设计原型 `shared/data.js` 的模拟数据，UI 标注为“演示主机”）。
+- **状态仓库**：`core/store/HostStore` 按 `native/protocol/src/event.rs` 的 reducer 规则应用信号（`status==4 && errorMessage=="deleted"` 即删除、runtime 旧 sampleSequence 丢弃、非活跃清活跃段、速度只来自 TaskProgress、Stale 清 runtime/速度并只读）；工作副本单线程就地合并，非结构性事件按 100ms 合帧发布。scope 必须串行调度。
+- **文案**：构建期 `app/build.gradle.kts::GenerateI18nResources` 把仓库根 `assets/i18n/{en,zh}.json` 生成为 `R.string.<camelCaseKey>`（`formatted=false`，占位符 `{name}` 由 `i18n/Strings.kt::fill` 替换）；禁止在 `res/` 手写同名文案。
+- **分类**：`core/model/Category.kt` 只做匹配，分类列表来自主机快照（偏好 `custom_categories`）；`Category.BUILTIN` 是主机未下发时的展示基线，与 `CustomCategoryDto::builtin_defaults` 同序同扩展名。
+- **启动图标**：`bun scripts/gen_icons.ts` 同时写 Flutter `android/` 与 `mobile/Android/` 的 mipmap。
+- **命令**（cwd=`mobile/Android`，`JAVA_HOME` 用 Android Studio 自带 JBR）：`./gradlew :core:testDebugUnitTest`、`./gradlew :app:assembleDebug`。
 
 ---
 
