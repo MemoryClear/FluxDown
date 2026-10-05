@@ -171,6 +171,42 @@ export function downloadViewsFiles(views: readonly DownloadTaskView[]): void {
   })
 }
 
+/** 只有本地已完成且文件仍在磁盘上的任务可「打开 / 定位」。 */
+export const canOpenLocally = (view: DownloadTaskView): boolean =>
+  view.source === 'local' && view.state === 'completed' && !view.fileMissing
+
+/**
+ * 在宿主机打开 / 定位任务产物。
+ *
+ * 仅当 agent 与浏览器同机时可用：headless server 只放行环回来源的 `agent.platform.*`
+ * （见 native/agent gateway）。远程 source 会得到 `Unsupported` —— 此时给一条说明性
+ * toast，而不是报错（按钮对远程任务本就不展示，这里是兜底）。
+ */
+async function openLocalTask(taskId: string, reveal: boolean): Promise<void> {
+  try {
+    if (reveal) await rpc.agent.platform.revealTask({ taskId })
+    else await rpc.agent.platform.openTask({ taskId })
+  } catch (error) {
+    if (isUnsupported(error)) {
+      toast.key('openLocalOnlyHint', 'info')
+      return
+    }
+    toastRpcError(error)
+  }
+}
+
+/** agent 是否拒绝了该 RPC（远程 / 非本机来源）。 */
+function isUnsupported(error: unknown): boolean {
+  const code =
+    typeof error === 'object' && error !== null && 'code' in error
+      ? String((error as { code?: unknown }).code)
+      : ''
+  return code.toLowerCase().includes('unsupported')
+}
+
+export const openTaskFile = (taskId: string) => openLocalTask(taskId, false)
+export const revealTaskFile = (taskId: string) => openLocalTask(taskId, true)
+
 // ── 任务组 ──
 
 export const pauseGroup = (groupId: string) => guarded(() => rpc.daemon.group.pause({ groupId }))

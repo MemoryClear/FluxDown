@@ -6,6 +6,7 @@ import {
   CircleAlert,
   Copy,
   Download,
+  FolderOpen,
   Pause,
   PanelRight,
   Pen,
@@ -19,6 +20,7 @@ import type { QueueDto } from '../../../lib/rpc'
 import type { MenuEntry } from '../../../ui'
 import {
   canRedownload,
+  canOpenLocally,
   confirmDeleteGroupWithFiles,
   confirmDeleteWithFiles,
   confirmIgnorePluginRetry,
@@ -30,12 +32,14 @@ import {
   isDownloadable,
   isPluginRetryError,
   moveViewsToQueue,
+  openTaskFile,
   pauseGroup,
   pauseViews,
   redownloadViews,
   resumeGroup,
   resumeViews,
   retryFailedInGroup,
+  revealTaskFile,
   toggleBoost,
 } from '../model/actions'
 import { remoteCan } from '../model/batchPlan'
@@ -93,6 +97,23 @@ export function buildTaskMenu({ t, views, queues, queueName, showDetail }: TaskM
       label: t('webDownloadFile'),
       icon: Download,
       onSelect: () => downloadViewsFiles(views),
+    })
+  }
+  // 同机 agent 才能打开 / 定位产物；远程部署（Unsupported）由 action 静默回退。
+  if (only && canOpenLocally(only)) {
+    entries.push({
+      type: 'item',
+      key: 'open-file',
+      label: t('openFile'),
+      icon: AppWindow,
+      onSelect: () => void openTaskFile(only.taskId),
+    })
+    entries.push({
+      type: 'item',
+      key: 'reveal-file',
+      label: t('openFolder'),
+      icon: FolderOpen,
+      onSelect: () => void revealTaskFile(only.taskId),
     })
   }
   if (only && only.source === 'local') {

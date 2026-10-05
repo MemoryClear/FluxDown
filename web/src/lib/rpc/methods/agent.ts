@@ -261,6 +261,15 @@ const power = {
   disarm: () => call<OkResult>(METHOD.AGENT_POWER_DISARM),
 };
 
+// 桌面集成：打开 / 定位任务产物。**仅当 agent 与浏览器同机时可用**——headless server
+// 只放行来自环回地址（或显式 `FLUXDOWN_ALLOW_LOCAL_PLATFORM=1`）的调用；远程 source
+// 会收到 Unsupported（调用方应静默回退，见 menus.ts）。
+const platform = {
+  openTask: (params: { taskId: string }) => call<OkResult>(METHOD.AGENT_PLATFORM_OPEN_TASK, params),
+  revealTask: (params: { taskId: string }) =>
+    call<OkResult>(METHOD.AGENT_PLATFORM_REVEAL_TASK, params),
+};
+
 export const agent = {
   session,
   auth,
@@ -278,4 +287,5 @@ export const agent = {
   diagnostics,
   update,
   power,
+  platform,
 };

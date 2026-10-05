@@ -2138,6 +2138,7 @@
   "webPluginInstallDirHint": "Absolute path of the plugin directory on the machine running FluxDown.",
   "webPluginUploading": "Uploading… {percent}%",
   "webDownloadFile": "Download File",
+  "openLocalOnlyHint": "Only available when the server runs on this machine.",
   "webOpenSidebar": "Open sidebar",
   "webSearchClear": "Clear search",
   "fileExistsSkip": "Skip download",
