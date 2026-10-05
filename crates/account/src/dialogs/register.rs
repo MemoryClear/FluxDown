@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use fluxdown_ui_components::{
-    ControlExt as _, dialog_scroll_body, field_error, field_hint, form, form_field,
+    BusyExt as _, ControlExt as _, dialog_scroll_body, field_error, field_hint, form, form_field,
 };
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
@@ -57,6 +57,8 @@ pub(crate) fn open(
         dialog
             .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
             .w(active_theme(cx).text_extent(520.))
+            // 点遮罩不关闭：误触关闭会丢掉已输入内容并迫使重新发码。
+            .overlay_closable(false)
             .content(move |content, _, _| content.min_h_0().child(view.clone()))
     });
     email_input.update(cx, |input, cx| input.focus(window, cx));
@@ -86,6 +88,7 @@ pub(crate) fn open_resume(
         dialog
             .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
             .w(active_theme(cx).text_extent(520.))
+            .overlay_closable(false)
             .content(move |content, _, _| content.min_h_0().child(view.clone()))
     });
 }
@@ -353,7 +356,7 @@ impl RegisterDialog {
                             .primary()
                             .label(submit_label)
                             .control(cx)
-                            .loading(self.busy)
+                            .busy(self.busy)
                             .disabled(self.busy)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 if this.verification_required {

@@ -2,7 +2,8 @@
 
 use fluxdown_protocol::{RpcErrorData, method};
 use fluxdown_ui_components::{
-    ControlExt as _, check_row, dialog_title, field_error, field_hint, form, form_field,
+    BusyExt as _, ControlExt as _, check_row, dialog_title, field_error, field_hint, form,
+    form_field,
 };
 use fluxdown_ui_theme::active_theme;
 use gpui::{
@@ -343,7 +344,7 @@ impl ProfileDialog {
                     .label(self.text("accountOriginIdEditRoll", cx))
                     .control(cx)
                     .disabled(disabled)
-                    .loading(self.operation == Operation::Suggest)
+                    .busy(self.operation == Operation::Suggest)
                     .on_click(cx.listener(|this, _, window, cx| this.suggest(window, cx))),
             )
             .child(
@@ -392,7 +393,7 @@ impl ProfileDialog {
                     .primary()
                     .label(self.text(save_label, cx))
                     .control(cx)
-                    .loading(matches!(
+                    .busy(matches!(
                         self.operation,
                         Operation::Check(_) | Operation::Save(_)
                     ))

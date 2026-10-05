@@ -8,8 +8,8 @@ use fluxdown_protocol::{
     LinkPairFinishResponse, LinkPairingCodeDto, method,
 };
 use fluxdown_ui_components::{
-    ControlExt as _, dialog_scroll_body, field_error, field_hint, field_label, form_field,
-    input_with_action, segmented_tabs, tabular_numbers,
+    BusyExt as _, ControlExt as _, dialog_scroll_body, field_error, field_hint, field_label,
+    form_field, input_with_action, segmented_tabs, tabular_numbers,
 };
 use fluxdown_ui_theme::active_theme;
 use gpui::{
@@ -570,7 +570,7 @@ impl AddDeviceDialog {
                                     .outline()
                                     .label(self.t("localPairingMyCodeRefresh", cx))
                                     .control(cx)
-                                    .loading(self.own_code_busy)
+                                    .busy(self.own_code_busy)
                                     .disabled(self.own_code_busy)
                                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                         this.refresh_own_code(cx);
@@ -707,7 +707,7 @@ impl AddDeviceDialog {
                         .primary()
                         .label(self.t("localPairingConnect", cx))
                         .control(cx)
-                        .loading(busy)
+                        .busy(busy)
                         .disabled(busy)
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                             this.begin(window, cx);

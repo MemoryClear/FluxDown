@@ -5,8 +5,8 @@ use std::collections::{HashMap, HashSet};
 
 use fluxdown_protocol::{InstalledPlugin, MarketEntryDto, PluginDto};
 use fluxdown_ui_components::{
-    ControlExt as _, FluxIcon, IconControlExt as _, card, form, form_field, input_with_action,
-    tabular_numbers,
+    BusyExt as _, ControlExt as _, FluxIcon, IconControlExt as _, card, form, form_field,
+    input_with_action, tabular_numbers,
 };
 use fluxdown_ui_theme::active_theme;
 use gpui::{
@@ -222,7 +222,7 @@ impl ExtensionsView {
                                     .ghost()
                                     .control(cx)
                                     .label(translator.text("marketRefreshTooltip").to_owned())
-                                    .loading(self.plugins.market.loading)
+                                    .busy(self.plugins.market.loading)
                                     .disabled(self.plugins.market.loading || stale)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.load_market(window, cx);
@@ -282,7 +282,7 @@ impl ExtensionsView {
                             .icon(FluxIcon::FolderOpen)
                             .label(translator.text("pluginInstallZipButton").to_owned())
                             .control(cx)
-                            .loading(self.plugins.installing_file)
+                            .busy(self.plugins.installing_file)
                             .disabled(stale || self.plugins.installing_file)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.pick_plugin_zip(window, cx);
@@ -322,7 +322,7 @@ impl ExtensionsView {
                                         .primary()
                                         .label(translator.text("pluginInstallDirButton").to_owned())
                                         .control(cx)
-                                        .loading(self.plugins.installing_dir)
+                                        .busy(self.plugins.installing_dir)
                                         .disabled(
                                             stale || dev_dir_empty || self.plugins.installing_dir,
                                         )
@@ -469,7 +469,7 @@ impl ExtensionsView {
                                 })
                                 .to_owned(),
                         )
-                        .loading(pending)
+                        .busy(pending)
                         .disabled(busy || pending)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.request_market_install(entry.clone(), window, cx);
@@ -485,7 +485,7 @@ impl ExtensionsView {
                         .control_icon(cx)
                         .icon(FluxIcon::RotateCw)
                         .tooltip(translator.text("pluginReloadTooltip").to_owned())
-                        .loading(reloading)
+                        .busy(reloading)
                         .disabled(busy)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.reload_plugin(identity.clone(), window, cx);
@@ -750,7 +750,7 @@ impl ExtensionsView {
                     .outline()
                     .control(cx)
                     .label(install_label)
-                    .loading(pending)
+                    .busy(pending)
                     .disabled(!actionable || pending || stale)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.request_market_install(target.clone(), window, cx);
@@ -1334,7 +1334,7 @@ impl ExtensionsView {
                                 } else {
                                     save.clone()
                                 })
-                                .loading(is_saving)
+                                .busy(is_saving)
                                 .disabled(is_saving)
                                 .on_click(move |_, window, cx| {
                                     form_for_save.update(cx, |form, cx| form.submit(window, cx));

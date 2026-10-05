@@ -4,8 +4,8 @@
 
 use fluxdown_protocol::{CloudDevice, LinkDeviceInfo, LinkDeviceParams};
 use fluxdown_ui_components::{
-    ControlExt as _, DialogIntent, dialog_footer, dialog_scroll_body, dialog_title, field_error,
-    field_hint, form, form_field,
+    BusyExt as _, ControlExt as _, DialogIntent, dialog_footer, dialog_scroll_body, dialog_title,
+    field_error, field_hint, form, form_field,
 };
 use fluxdown_ui_theme::active_theme;
 use gpui::{
@@ -157,7 +157,7 @@ impl Render for RenameDialog {
                             .primary()
                             .label(translated(&self.host, "confirm", cx))
                             .control(cx)
-                            .loading(self.busy)
+                            .busy(self.busy)
                             .disabled(self.busy)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.submit(window, cx);

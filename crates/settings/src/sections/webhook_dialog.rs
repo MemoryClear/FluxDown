@@ -5,9 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use fluxdown_protocol::{RpcErrorData, WebhookDeliveriesResponse, WebhookPresetDto, method};
 use fluxdown_ui_components::{
-    ControlExt as _, FluxIcon, IconControlExt as _, card, check_row, choice_chip, field_error,
-    field_hint, field_label, form, form_field, form_row, input_with_action, option_group,
-    option_row,
+    BusyExt as _, ControlExt as _, FluxIcon, IconControlExt as _, card, check_row, choice_chip,
+    field_error, field_hint, field_label, form, form_field, form_row, input_with_action,
+    option_group, option_row,
 };
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
@@ -1119,7 +1119,7 @@ impl WebhookDialog {
                         "webhookSendTest"
                     }))
                     .control(cx)
-                    .loading(self.testing)
+                    .busy(self.testing)
                     .disabled(!can_test)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.send_test(cx))),
             )

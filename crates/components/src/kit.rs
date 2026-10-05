@@ -66,6 +66,21 @@ impl IconControlExt for Button {
     }
 }
 
+/// 按钮进行中状态。gpui-component 的 `Button::loading` 只把**前置图标**换成转圈；
+/// 纯文字按钮没有图标，`loading(true)` 只会变得不可点击而看不到任何动画。
+/// 一律用 [`BusyExt::busy`]：进行中时补一个前置 spinner。
+pub trait BusyExt: Sized {
+    fn busy(self, busy: bool) -> Self;
+}
+
+impl BusyExt for Button {
+    fn busy(self, busy: bool) -> Self {
+        self.loading(busy).when(busy, |button| {
+            button.icon(gpui_component::spinner::Spinner::new())
+        })
+    }
+}
+
 // 输入框用 `Medium` 取得宽松的横向内边距（`Small` 只有约 6px，显得局促），
 // 字号 / 高度由实例样式覆盖（gpui-component 在根节点 `refine_style`，覆盖有效）。
 // 高度必须走 `Styled::h`：`Input` 自带的同名 `h()` 只作用于多行输入，单行会被

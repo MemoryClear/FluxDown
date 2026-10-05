@@ -520,6 +520,9 @@ pub(crate) struct DownloadTableDelegate {
     reorder_timer: Option<Task<()>>,
     selected_tasks: HashSet<RowKey>,
     selection_anchor: Option<RowKey>,
+    /// 显式多选模式：仅 Cmd/Ctrl+点击或全选进入，普通单击 / 清空选择退出；
+    /// 行首复选框只在该模式且有选中项时显示（与 Web `multiSelect` 对齐）。
+    multi_select: bool,
     filter: TableFilter,
     query: String,
     prefs: ViewPrefs,
@@ -575,6 +578,7 @@ impl DownloadTableDelegate {
             reorder_timer: None,
             selected_tasks: HashSet::new(),
             selection_anchor: None,
+            multi_select: false,
             filter: TableFilter::Download(DownloadFilter::ALL),
             query: String::new(),
             prefs: ViewPrefs::default(),
@@ -1218,11 +1222,18 @@ impl DownloadTableDelegate {
         self.selected_tasks.clear();
         self.selected_tasks.extend(self.visible_task_keys());
         self.selection_anchor = None;
+        self.multi_select = true;
     }
 
     pub(crate) fn clear_selection(&mut self) {
         self.selected_tasks.clear();
         self.selection_anchor = None;
+        self.multi_select = false;
+    }
+
+    /// 是否处于显式多选模式（且仍有选中项）：控制行首复选框、表头全选框与表头选择条。
+    pub(crate) fn in_multi_select(&self) -> bool {
+        self.multi_select && !self.selected_tasks.is_empty()
     }
 
     pub(crate) fn select_task(&mut self, key: RowKey, modifiers: Modifiers) {
@@ -1250,9 +1261,11 @@ impl DownloadTableDelegate {
             if !self.selected_tasks.remove(&key) {
                 self.selected_tasks.insert(key.clone());
             }
+            self.multi_select = true;
         } else {
             self.selected_tasks.clear();
             self.selected_tasks.insert(key.clone());
+            self.multi_select = false;
         }
         self.selection_anchor = Some(key);
     }
@@ -1276,6 +1289,7 @@ impl DownloadTableDelegate {
         if !self.selected_tasks.contains(&key) {
             self.selected_tasks.clear();
             self.selected_tasks.insert(key.clone());
+            self.multi_select = false;
         }
         self.selection_anchor = Some(key);
     }
@@ -1461,7 +1475,7 @@ impl DownloadTableDelegate {
         let icon_sizes = theme.extended().icon;
         let key = task.key.clone();
         let selected = self.selected_tasks.contains(&key);
-        let checkbox_pinned = selected || !self.selected_tasks.is_empty();
+        let checkbox_pinned = self.in_multi_select();
         let glyph = (!checkbox_pinned).then(|| {
             if task.metadata_pending {
                 return Spinner::new()
@@ -1511,31 +1525,23 @@ impl DownloadTableDelegate {
                 delegate.selection_anchor = Some(key.clone());
                 cx.notify();
             }));
+        // 复选框只在多选状态（已有选中项，经 Cmd/Ctrl+点击进入）显示；悬浮不再露出。
         div()
             .size_full()
             .relative()
             .when_some(glyph, |this, glyph| {
+                this.child(h_flex().absolute().inset_0().justify_center().child(glyph))
+            })
+            .when(checkbox_pinned, |this| {
                 this.child(
                     h_flex()
                         .absolute()
                         .inset_0()
                         .justify_center()
-                        .group_hover(ROW_GROUP, |style| style.invisible())
-                        .child(glyph),
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(checkbox),
                 )
             })
-            .child(
-                h_flex()
-                    .absolute()
-                    .inset_0()
-                    .justify_center()
-                    .when(!checkbox_pinned, |this| {
-                        this.invisible()
-                            .group_hover(ROW_GROUP, |style| style.visible())
-                    })
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(checkbox),
-            )
             .into_any_element()
     }
 
@@ -2229,7 +2235,9 @@ impl TableDelegate for DownloadTableDelegate {
                 .iter()
                 .filter(|key| self.selected_tasks.contains(*key))
                 .count();
+            // 非多选模式（如普通单击选中一行）表头全选框按未选处理，不随单选点亮。
             let state = match selected_count {
+                _ if !self.in_multi_select() => CheckState::Unchecked,
                 0 => CheckState::Unchecked,
                 n if n == keys.len() => CheckState::Checked,
                 _ => CheckState::Indeterminate,
