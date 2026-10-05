@@ -4,7 +4,7 @@
 
 import { copyText } from '../../../lib/copy'
 import { t } from '../../../i18n'
-import { downloadTaskFile, rpc } from '../../../lib/rpc'
+import { downloadTaskFile, rpc, RpcError } from '../../../lib/rpc'
 import type { CreateTaskRequest, RemoteCommandParams } from '../../../lib/rpc'
 import { confirmDialog, toast } from '../../../ui'
 import { toastRpcError } from '../../../lib/rpcToast'
@@ -197,11 +197,7 @@ async function openLocalTask(taskId: string, reveal: boolean): Promise<void> {
 
 /** agent 是否拒绝了该 RPC（远程 / 非本机来源）。 */
 function isUnsupported(error: unknown): boolean {
-  const code =
-    typeof error === 'object' && error !== null && 'code' in error
-      ? String((error as { code?: unknown }).code)
-      : ''
-  return code.toLowerCase().includes('unsupported')
+  return error instanceof RpcError && error.is('unsupported')
 }
 
 export const openTaskFile = (taskId: string) => openLocalTask(taskId, false)
