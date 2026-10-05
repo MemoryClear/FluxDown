@@ -23,4 +23,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "FluxDown"
-include(":app")
+include(":app", ":fluxui", ":core")

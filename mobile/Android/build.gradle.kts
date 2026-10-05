@@ -1,5 +1,6 @@
-// Top-level build file where you can add configuration options common to all sub-projects/modules.
+// Top-level build file. 模块：:core（主机契约 / 状态仓库）→ :fluxui（Flux Lumen 组件库）→ :app（页面与宿主装配）
 plugins {
     alias(libs.plugins.android.application) apply false
+    alias(libs.plugins.android.library) apply false
     alias(libs.plugins.kotlin.compose) apply false
 }
