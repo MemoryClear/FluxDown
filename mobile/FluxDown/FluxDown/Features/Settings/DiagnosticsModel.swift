@@ -10,7 +10,7 @@ import os
 @MainActor
 @Observable
 final class DiagnosticsModel {
-    struct HostReport: Equatable {
+    nonisolated struct HostReport: Equatable {
         var report: DiagnosticsReportDto
         /// 已滤掉桌面专属项。
         var checks: [DiagnosticCheckDto]

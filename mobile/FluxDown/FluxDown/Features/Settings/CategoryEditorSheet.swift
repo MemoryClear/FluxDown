@@ -285,7 +285,7 @@ private struct CategoryIconCell: View {
 // MARK: - 扩展名胶囊换行布局
 
 /// 自动换行的水平流式布局（扩展名 Token 预览）。
-private struct CategoryTokenFlow: Layout {
+private nonisolated struct CategoryTokenFlow: Layout {
     var spacing: CGFloat = 6
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {

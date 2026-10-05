@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// 圆环按钮中心字形（§9.4）。
-public enum RingGlyph: Sendable, Hashable, CaseIterable {
+public nonisolated enum RingGlyph: Sendable, Hashable, CaseIterable {
     /// 下载中 / 排队：`pause.fill`，环显示进度。
     case pause
     /// 已暂停：`play.fill`，环显示进度。

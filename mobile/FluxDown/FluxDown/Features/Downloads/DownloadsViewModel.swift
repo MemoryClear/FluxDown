@@ -3,8 +3,8 @@ import Foundation
 import Observation
 
 /// 与列表派生同步发布的「壳层」信息：只在值变化时才发布，页面 body 不随 10 Hz 的主机状态重算。
-struct DownloadsChrome: Equatable {
-    enum Link: Equatable { case connecting, live, stale, failed }
+nonisolated struct DownloadsChrome: Equatable {
+    nonisolated enum Link: Equatable { case connecting, live, stale, failed }
 
     var link: Link = .connecting
     var diskFree: UInt64?
@@ -16,7 +16,7 @@ struct DownloadsChrome: Equatable {
     var showsOfflineBanner: Bool { link == .stale || link == .failed }
 }
 
-struct PendingSelection: Equatable {
+nonisolated struct PendingSelection: Equatable {
     let requestId: String
     /// 标题 i18n 键（BT 文件 / HLS 画质 / 插件规格）。
     let titleKey: String
@@ -25,7 +25,7 @@ struct PendingSelection: Equatable {
 }
 
 /// 多选的批量能力：继续 / 暂停 / 移动 各自的可用性（Resume / Pause 取「存在」）。
-struct SelectionCaps: Equatable {
+nonisolated struct SelectionCaps: Equatable {
     var canResume = false
     var canPause = false
     var canMove = false

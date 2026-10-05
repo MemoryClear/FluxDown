@@ -17,7 +17,7 @@ struct RssItemsScreen: View {
     }
 
     /// 重拉触发键：条目流修订号 / 手动重试 / 重连恢复。
-    private struct LoadKey: Hashable {
+    private nonisolated struct LoadKey: Hashable {
         var revision: UInt64
         var tick: Int
         var live: Bool
@@ -63,7 +63,7 @@ struct RssItemsScreen: View {
             model.consumeNotices(container.store.notices)
         }
         .fluxAnimation(.smooth, value: visible.map(\.guid))
-        .sensoryFeedback(trigger: model.feedback) { _, new in
+        .sensoryFeedback(trigger: model.feedback) { @Sendable _, new in
             switch new?.tone {
             case .success: .success
             case .error: .error

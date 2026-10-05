@@ -45,7 +45,7 @@ enum SeedLimitText {
 @MainActor
 @Observable
 final class SeedLimitsLoader {
-    enum Phase: Equatable {
+    nonisolated enum Phase: Equatable {
         case idle
         case loading
         case loaded(TaskSeedLimits)

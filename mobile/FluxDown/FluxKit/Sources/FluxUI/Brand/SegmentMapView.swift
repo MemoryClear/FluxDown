@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// 分段图谱 / 进度条的着色语气（§3.B）。
-public enum SegmentTone: Sendable, Hashable, CaseIterable {
+public nonisolated enum SegmentTone: Sendable, Hashable, CaseIterable {
     case downloading, paused, failed, queued, seeding, completed
 
     /// 填充色：下载中 = 强调色；已暂停 = `fdStatusPaused` 55%；失败 = `fdStatusFailed`；
@@ -18,7 +18,7 @@ public enum SegmentTone: Sendable, Hashable, CaseIterable {
 }
 
 /// 一段真实字节区间（对应 `TaskSegmentDto`）。
-public struct SegmentSpan: Sendable, Hashable {
+public nonisolated struct SegmentSpan: Sendable, Hashable {
     /// 区间起点（含）。
     public var startByte: Int64
     /// 区间终点（不含）。
@@ -98,28 +98,51 @@ public struct SegmentMapView: View {
     }
 
     public var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !animates)) { context in
-            Canvas { gc, size in
-                draw(into: &gc, size: size, time: context.date.timeIntervalSinceReferenceDate)
+        // Canvas 的渲染闭包由 SwiftUI 渲染线程（`com.apple.SwiftUI.AsyncRenderer`）在非主线程调用：
+        // 默认 MainActor 隔离下，直接在 body 里写的闭包会被推断为 MainActor 隔离，渲染线程一进去就触发
+        // `dispatch_assert_queue(main)` 陷入断点。所以这里先在主线程把绘制输入算成 Sendable 值，
+        // 闭包标 `@Sendable`（nonisolated），只调用 nonisolated 的 `SegmentScene.draw`，不碰 `self`。
+        let scene = SegmentScene(
+            mode: usesSegments ? .segments : (isIndeterminate ? .indeterminate : .plain),
+            spans: spans,
+            totalBytes: totalBytes,
+            fraction: fraction,
+            reduceMotion: reduceMotion,
+            track: contrast == .increased ? .fdProgressTrackIncreased : .fdProgressTrack,
+            color: tone.color
+        )
+        return TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !animates)) { context in
+            let time = context.date.timeIntervalSinceReferenceDate
+            Canvas { @Sendable gc, size in
+                scene.draw(into: &gc, size: size, time: time)
             }
         }
         .frame(height: height)
         .clipShape(.capsule)
         .modifier(SegmentAccessibility(label: accessibilityLabel, fraction: fraction, isIndeterminate: isIndeterminate))
     }
+}
 
-    // MARK: 绘制
+/// `SegmentMapView` 一帧的绘制输入（主线程算好的纯值）与绘制实现；`nonisolated` 以便在渲染线程调用。
+private nonisolated struct SegmentScene: Sendable {
+    enum Mode: Sendable { case segments, indeterminate, plain }
 
-    private func draw(into gc: inout GraphicsContext, size: CGSize, time: TimeInterval) {
-        let track: Color = contrast == .increased ? .fdProgressTrackIncreased : .fdProgressTrack
+    let mode: Mode
+    let spans: [SegmentSpan]
+    let totalBytes: Int64
+    /// 0…1 总完成度（仅 `.plain` 使用）。
+    let fraction: Double
+    let reduceMotion: Bool
+    let track: Color
+    let color: Color
+
+    func draw(into gc: inout GraphicsContext, size: CGSize, time: TimeInterval) {
         gc.fill(Path(CGRect(origin: .zero, size: size)), with: .color(track))
 
-        if usesSegments {
-            drawSegments(into: &gc, size: size, time: time)
-        } else if isIndeterminate {
-            drawIndeterminate(into: &gc, size: size, time: time)
-        } else {
-            drawPlain(into: &gc, size: size)
+        switch mode {
+        case .segments: drawSegments(into: &gc, size: size, time: time)
+        case .indeterminate: drawIndeterminate(into: &gc, size: size, time: time)
+        case .plain: drawPlain(into: &gc, size: size)
         }
     }
 
@@ -127,7 +150,7 @@ public struct SegmentMapView: View {
         let width = size.width * fraction
         guard width > 0 else { return }
         let rect = CGRect(x: 0, y: 0, width: max(width, size.height), height: size.height)
-        gc.fill(Path(roundedRect: rect, cornerRadius: size.height / 2), with: .color(tone.color))
+        gc.fill(Path(roundedRect: rect, cornerRadius: size.height / 2), with: .color(color))
     }
 
     private func drawIndeterminate(into gc: inout GraphicsContext, size: CGSize, time: TimeInterval) {
@@ -137,13 +160,12 @@ public struct SegmentMapView: View {
         let eased = phase < 0.5 ? 4 * phase * phase * phase : 1 - pow(-2 * phase + 2, 3) / 2
         let x = -barWidth + eased * barWidth * 3.7
         let rect = CGRect(x: x, y: 0, width: barWidth, height: size.height)
-        gc.fill(Path(roundedRect: rect, cornerRadius: size.height / 2), with: .color(tone.color))
+        gc.fill(Path(roundedRect: rect, cornerRadius: size.height / 2), with: .color(color))
     }
 
     private func drawSegments(into gc: inout GraphicsContext, size: CGSize, time: TimeInterval) {
         let total = CGFloat(totalBytes)
         let breath = reduceMotion ? 1 : 0.775 + 0.225 * sin(time * 2 * .pi / 2.4)
-        let color = tone.color
         for span in spans where span.length > 0 {
             let length = CGFloat(span.length)
             let rawWidth = length / total * size.width

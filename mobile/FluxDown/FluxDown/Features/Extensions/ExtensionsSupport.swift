@@ -67,7 +67,7 @@ enum ExtensionErrorText {
 // MARK: - 换行布局
 
 /// 徽标流：子视图按行排列，放不下自动换行。
-struct FlowLayout: Layout {
+nonisolated struct FlowLayout: Layout {
     var spacing: CGFloat = 6
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {

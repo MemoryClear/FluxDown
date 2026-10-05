@@ -10,7 +10,7 @@ import os
 
 /// 一次需要通知的任务状态迁移。
 nonisolated struct NotificationEvent: Equatable, Sendable {
-    enum Kind: Sendable { case completed, failed }
+    nonisolated enum Kind: Sendable { case completed, failed }
 
     var kind: Kind
     var taskId: String

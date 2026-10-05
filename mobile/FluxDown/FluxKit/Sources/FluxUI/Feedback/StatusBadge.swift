@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// 徽标语气（§9.16）。底色 = 语气基色 α .15，文字 = §3.E 加深文字变体。
-public enum BadgeTone: Sendable, Hashable, CaseIterable {
+public nonisolated enum BadgeTone: Sendable, Hashable, CaseIterable {
     case accent, neutral, success, warning, failure
 
     /// 语气基色（底色 / 描边用）。

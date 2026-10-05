@@ -6,12 +6,12 @@ import SwiftUI
 // N1 单条 http(s) 链接经 `daemon.group.resolvePreview` 命中清单，数据已就绪后推入本页。
 
 /// 清单来源。
-enum ManifestSource: Hashable {
+nonisolated enum ManifestSource: Hashable {
     case daemon(preview: ResolvePreviewResponse, sourceUrl: String)
 }
 
 /// 组级请求选项：沿用 N1 表单里已填的值，下发给全部子任务。
-struct ManifestBaseOptions: Hashable {
+nonisolated struct ManifestBaseOptions: Hashable {
     var saveDir = ""
     var queueId = ""
     var segments: Int32 = 0

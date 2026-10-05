@@ -3,7 +3,7 @@ import SwiftUI
 
 /// 三栏读数的一格：品牌大数字（圆体 + 等宽数字）+ 单位 + 说明。
 struct StatCell: View {
-    enum Emphasis { case none, accent, failure }
+    nonisolated enum Emphasis { case none, accent, failure }
 
     let value: String
     let unit: String?

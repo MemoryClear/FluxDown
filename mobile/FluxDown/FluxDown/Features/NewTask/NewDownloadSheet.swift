@@ -682,14 +682,14 @@ private struct NewDownloadContent: View {
     }
 }
 
-enum NewDownloadRoute: Hashable {
+nonisolated enum NewDownloadRoute: Hashable {
     case advanced
     /// 插件清单选择（N5）：来源 + 组级基础选项。
     case manifest(ManifestSource, ManifestBaseOptions)
 }
 
 /// 文件选择器的用途：决定可选类型与结果去向。
-private enum ImporterKind { case text, torrent }
+private nonisolated enum ImporterKind { case text, torrent }
 
 /// 读取文本文件（上限 2 MiB，防止误选大文件）；需要 security-scoped 访问。读取失败向上抛出，由调用方提示。
 private nonisolated func readTextFile(_ url: URL) throws -> String {

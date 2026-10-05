@@ -11,7 +11,7 @@ import UIKit
 
 /// 一次发码的倒计时：有效期（`ttl` 秒）与重发冷却（发码后前 60 秒，见 `AccountRules.resendCooldown`）。
 /// 不持有计时器：视图用 `TimelineView` 按 `now` 求值，因此重建视图不会重置，也不会泄漏任务。
-struct CodeClock: Equatable, Sendable {
+nonisolated struct CodeClock: Equatable, Sendable {
     let sentAt: Date
     let ttl: Int64
 

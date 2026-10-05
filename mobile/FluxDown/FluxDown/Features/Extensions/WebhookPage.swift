@@ -22,7 +22,7 @@ private struct WebhookContent: View {
     @State private var deleteTarget: WebhookEndpoint?
     @State private var logFilter = ""
 
-    private enum EditorTarget: Identifiable {
+    private nonisolated enum EditorTarget: Identifiable {
         case new
         case edit(WebhookEndpoint)
 

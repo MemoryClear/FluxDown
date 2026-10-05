@@ -6,7 +6,7 @@ import Foundation
 // MARK: - 限速（1024 进制）
 
 /// 限速单位（`speed_limit_bytes` / `upload_limit_bytes` 存字节/秒）。
-enum SettingsRateUnit: String, CaseIterable, Identifiable, Sendable {
+nonisolated enum SettingsRateUnit: String, CaseIterable, Identifiable, Sendable {
     case kb, mb, gb
 
     var id: String { rawValue }
@@ -101,7 +101,7 @@ enum SettingsRateLimit {
 
 // MARK: - 数值钳位
 
-enum SettingsNumber {
+nonisolated enum SettingsNumber {
     /// 钳位到 `range`；`adjusted` = 输入越界被改写（触发「已调整为 n」提示 + 警告触感）。
     static func clamp(_ value: Int, to range: ClosedRange<Int>) -> (value: Int, adjusted: Bool) {
         let clamped = min(max(value, range.lowerBound), range.upperBound)
@@ -127,7 +127,7 @@ enum SettingsNumber {
 // MARK: - 配置视图
 
 /// 设置项（行定义）：一个目录键 + 文案键。daemon 配置键与 agent 偏好键共用，读写由 `ConfigEditor` 按目录路由。
-struct SettingsItem: Identifiable, Hashable {
+nonisolated struct SettingsItem: Identifiable, Hashable {
     /// 搜索定位 / 滚动用的行标识（如 `download.maxConcurrent`）。
     let id: String
     /// `SettingsCatalog` 键。
@@ -149,7 +149,7 @@ struct SettingsItem: Identifiable, Hashable {
 }
 
 /// 一次渲染内的配置视图：显示值 = 乐观值 ?? 主机值 ?? 目录默认（同 Android `Form` / Web `useDaemonValue`）。
-struct SettingsConfigForm: Equatable {
+nonisolated struct SettingsConfigForm: Equatable {
     /// `daemon.config` 快照值（wire 字符串）。
     var host: [String: String] = [:]
     var optimistic: [String: String] = [:]
@@ -228,7 +228,7 @@ enum SettingsSaveDirectory {
 // MARK: - 下载页行目录
 
 /// 下载页分组（顺序即页面顺序）。
-enum SettingsDownloadSection: CaseIterable {
+nonisolated enum SettingsDownloadSection: CaseIterable {
     case saveLocation, behavior, connection, retry, advanced
 
     var titleKey: String {
@@ -243,14 +243,14 @@ enum SettingsDownloadSection: CaseIterable {
 }
 
 /// 可见性判定所需的上下文。
-struct SettingsDownloadContext: Equatable {
+nonisolated struct SettingsDownloadContext: Equatable {
     var form: SettingsConfigForm
     var isLocalHost: Bool
 }
 
 /// 下载页的每一行（Android `DownloadPage` 编辑的键，一一对应）。
 /// 页面渲染与设置搜索共用同一份可见性判定。
-enum SettingsDownloadRow: String, CaseIterable, Identifiable {
+nonisolated enum SettingsDownloadRow: String, CaseIterable, Identifiable {
     case saveDir, rememberLastSaveDir
     case silentDownload, silentSkipSelection, useServerTime, fileExistsBehavior
     case fileMissingAction, idleFileScan, defaultQueue, dedupSameUrl
@@ -388,7 +388,7 @@ enum SettingsDownloadRow: String, CaseIterable, Identifiable {
 
 /// 搜索索引项。`title` / `detail` / `breadcrumb` / `keywords` 由调用方用 `L(...)` 本地化后传入；
 /// `keywords` 是 PC 命令面板的别名词表（`searchKeywords…`），只做子串匹配、排在标题 / 说明之后。
-struct SettingsEntry: Identifiable, Hashable {
+nonisolated struct SettingsEntry: Identifiable, Hashable {
     let id: String
     let route: SettingsRoute
     let title: String

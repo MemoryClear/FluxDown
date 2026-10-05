@@ -7,14 +7,14 @@ import Foundation
 // MARK: - 行目录
 
 /// 通用页的每一行。页面渲染、设置搜索共用这份目录（行 id = `.settingsRow(id)` 的 id）。
-enum GeneralRow: String, CaseIterable, Identifiable {
+nonisolated enum GeneralRow: String, CaseIterable, Identifiable {
     case bgContinue, keepAwake
     case analytics, linkHandling
     case sidebarStatus, sidebarQueues, sidebarCategory
     case activityRss, activityWebhooks, activityTheme
     case categories
 
-    enum Group: CaseIterable {
+    nonisolated enum Group: CaseIterable {
         case background, system, downloadsView, entries, categories
 
         var titleKey: String {
@@ -104,7 +104,7 @@ enum GeneralRow: String, CaseIterable, Identifiable {
 // MARK: - 链接与文件打开方式
 
 /// iOS 的打开方式是 Info.plist 的静态声明（无法检测是否被其它 App 抢占）；这里只如实读取本 App 的声明。
-enum GeneralLinkKind: String, CaseIterable, Identifiable, Sendable {
+nonisolated enum GeneralLinkKind: String, CaseIterable, Identifiable, Sendable {
     case magnet, ed2k, torrent
 
     var id: String { rawValue }

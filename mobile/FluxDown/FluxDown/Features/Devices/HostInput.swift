@@ -1,7 +1,7 @@
 import Foundation
 
 /// 地址解析结果。成功时 `endpoint` 恒为 `http(s)://host:port`（桥接层再规范到 `ws(s)://…/rpc`）。
-enum EndpointParse: Equatable {
+nonisolated enum EndpointParse: Equatable {
     /// `host` 为不含端口的主机（IPv6 带方括号）；`cleartext` = 明文 HTTP 且非回环。
     case ok(endpoint: String, host: String, cleartext: Bool)
     case empty
@@ -10,7 +10,7 @@ enum EndpointParse: Equatable {
 }
 
 /// 访问密钥违规项；顺序与 `validate_access_key` 的检查顺序一致。
-enum KeyIssue: Equatable {
+nonisolated enum KeyIssue: Equatable {
     case badChars, tooShort, tooLong, needsMix
 }
 

@@ -14,13 +14,13 @@ struct WebhookEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var sizeClass
 
-    private struct HeaderRow: Identifiable, Hashable {
+    private nonisolated struct HeaderRow: Identifiable, Hashable {
         let id = UUID()
         var key: String
         var value: String
     }
 
-    private enum Pane: Hashable { case config, preview }
+    private nonisolated enum Pane: Hashable { case config, preview }
 
     @State private var endpointId: String
     @State private var name: String
@@ -50,7 +50,7 @@ struct WebhookEditorSheet: View {
     @State private var baseline: WebhookEndpoint?
     @FocusState private var focus: Field?
 
-    private enum Field: Hashable { case name, url, template }
+    private nonisolated enum Field: Hashable { case name, url, template }
 
     init(existing: WebhookEndpoint?, model: WebhookModel) {
         self.existing = existing

@@ -2,7 +2,7 @@ import Charts
 import SwiftUI
 
 /// 环形图的一块（来源构成）。
-public struct DonutSlice: Identifiable {
+public nonisolated struct DonutSlice: Identifiable {
     public let id: String
     public let label: String
     public let value: Double

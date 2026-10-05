@@ -3,11 +3,11 @@ import FluxUI
 import Foundation
 
 /// 状态行语气（颜色映射在视图层：accent → `accent.text`，其余用加深文字色，状态不只靠颜色 —— 文案本身带状态词）。
-enum StatusTone: Equatable {
+nonisolated enum StatusTone: Equatable {
     case accent, secondary, failure, success, warning
 }
 
-struct StatusLine: Equatable {
+nonisolated struct StatusLine: Equatable {
     let text: String
     let tone: StatusTone
 }

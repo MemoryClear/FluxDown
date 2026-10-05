@@ -101,7 +101,7 @@ private struct RssContent: View {
 // MARK: - R1 订阅列表
 
 private struct RssFeedsList: View {
-    enum Mode { case stack, split }
+    nonisolated enum Mode { case stack, split }
 
     @Environment(AppContainer.self) private var container
     let rss: RssModel

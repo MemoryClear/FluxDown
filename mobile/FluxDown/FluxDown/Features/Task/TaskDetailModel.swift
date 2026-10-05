@@ -5,7 +5,7 @@ import Foundation
 // 任务详情（D3）的只读派生量与纯函数。不含任何视图 / 文案查表，便于单测（同 Android `TaskDetailModel.kt`）。
 
 /// 派生显示状态（02-downloads §1.3 / §6.3：颜色 + 图形 + 文字三通道）。
-enum TaskDetailVisual: Sendable, Hashable {
+nonisolated enum TaskDetailVisual: Sendable, Hashable {
     case downloading, queued, pending, preparing, verifying, paused, failed, seeding, missing, completed
 
     init(task: DownloadTask, queuePosition: Int) {
@@ -69,7 +69,7 @@ enum TaskDetailVisual: Sendable, Hashable {
 }
 
 /// 详情页一次渲染所需的派生量。值相等 → SwiftUI 不重算（主机约 10 Hz 发布，单任务字段变化频率低得多）。
-struct TaskDetailModel: Equatable {
+nonisolated struct TaskDetailModel: Equatable {
     let task: DownloadTask
     let visual: TaskDetailVisual
     /// 排队序号（1 起）；0 = 不在排队。
@@ -133,10 +133,10 @@ struct TaskDetailModel: Equatable {
 }
 
 /// 来源构成（General 页环形图）：源站 = 已下载 − (CDN + 代理 + 多网卡)；BT / eD2K 全部来自 P2P。
-struct TaskSourceComposition: Equatable {
-    enum Kind: Hashable { case origin, cdn, proxy, nic, p2p }
+nonisolated struct TaskSourceComposition: Equatable {
+    nonisolated enum Kind: Hashable { case origin, cdn, proxy, nic, p2p }
 
-    struct Row: Equatable {
+    nonisolated struct Row: Equatable {
         let kind: Kind
         let bytes: Int64
     }
@@ -181,7 +181,7 @@ struct TaskSourceComposition: Equatable {
 }
 
 /// 速度页统计：近 60 秒（`SpeedHistory.capacity`）平均 / 峰值。
-struct TaskSpeedStats: Equatable {
+nonisolated struct TaskSpeedStats: Equatable {
     let samples: Int
     let average: Int64
     let peak: Int64

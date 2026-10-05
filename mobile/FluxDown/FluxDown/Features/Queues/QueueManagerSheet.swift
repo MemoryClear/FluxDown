@@ -3,7 +3,7 @@ import FluxUI
 import SwiftUI
 
 /// 队列管理 Sheet 内的导航目的地。编辑按 `queueId` 解析，保证主机回流后表单头部实时更新。
-enum QueueRoute: Hashable {
+nonisolated enum QueueRoute: Hashable {
     case create
     case edit(String)
 }

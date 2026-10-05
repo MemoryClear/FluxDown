@@ -8,7 +8,7 @@ import Foundation
 /// 未知值回落蓝色）与 `appearance.custom_color`（Flutter `Color.toARGB32()` 的无符号 ARGB 整数，仅 `custom` 时生效）。
 /// iOS 还有两个预设色（orange / indigo）：它们在线上写成 `custom` + 对应 ARGB，读回时按色值认回预设，
 /// 这样同步到 PC 端也是同一种颜色，而不是被当作未知方案回落成蓝色。
-enum AppearanceWire {
+nonisolated enum AppearanceWire {
     static let modeKey = "appearance.theme_mode"
     static let schemeKey = "appearance.color_scheme"
     static let customKey = "appearance.custom_color"
@@ -17,7 +17,7 @@ enum AppearanceWire {
     private static let sharedPresets: Set<String> = ["blue", "green", "violet", "rose"]
 
     /// 主机偏好里的外观值（缺失为 nil）。
-    struct Host: Equatable {
+    nonisolated struct Host: Equatable {
         var mode: String?
         var scheme: String?
         var customARGB: Int64?
@@ -40,7 +40,7 @@ enum AppearanceWire {
     }
 
     /// 应用到本地的结果：nil = 保持本地不变。
-    struct Local: Equatable {
+    nonisolated struct Local: Equatable {
         var mode: ThemeMode?
         var scheme: String?
         var customRGB: UInt32?

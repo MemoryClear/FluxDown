@@ -3,7 +3,7 @@ import FluxUI
 import SwiftUI
 
 /// 行样式（视图偏好）。
-struct RowStyle: Equatable {
+nonisolated struct RowStyle: Equatable {
     var density: Density
     var fields: Set<CardField>
 }

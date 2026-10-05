@@ -64,7 +64,7 @@ struct GroupCommands {
 // MARK: - 删除确认
 
 /// 待确认的组删除：保留文件 / 连同文件各自一档确认。
-struct GroupDeleteRequest: Identifiable, Equatable {
+nonisolated struct GroupDeleteRequest: Identifiable, Equatable {
     let groupId: String
     /// 组名；为空回退组 id。
     let name: String

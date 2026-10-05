@@ -3,7 +3,7 @@ import Foundation
 import SwiftUI
 
 /// 明暗模式：`appearance.theme_mode`。
-enum ThemeMode: String, CaseIterable, Identifiable {
+nonisolated enum ThemeMode: String, CaseIterable, Identifiable {
     case system, light, dark
 
     var id: String { rawValue }
@@ -57,24 +57,24 @@ final class AppearanceStore {
 }
 
 /// 列表分组（PC 视图弹层同序）。
-enum GroupBy: String, CaseIterable, Identifiable {
+nonisolated enum GroupBy: String, CaseIterable, Identifiable {
     case none, status, date, type, queue, site, group
     var id: String { rawValue }
 }
 
 /// 排序键；smart = 智能排序（活跃优先 → 最近）。
-enum SortKey: String, CaseIterable, Identifiable {
+nonisolated enum SortKey: String, CaseIterable, Identifiable {
     case smart, created, name, size, progress, speed, status
     var id: String { rawValue }
 }
 
-enum Density: String, CaseIterable, Identifiable {
+nonisolated enum Density: String, CaseIterable, Identifiable {
     case comfortable, compact
     var id: String { rawValue }
 }
 
 /// 卡片显示字段（PC「列」换算）。
-enum CardField: String, CaseIterable, Identifiable {
+nonisolated enum CardField: String, CaseIterable, Identifiable {
     case size, speed, eta, `protocol`, site, queue, created
     var id: String { rawValue }
 }

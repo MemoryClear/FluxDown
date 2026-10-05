@@ -3,7 +3,7 @@ import Observation
 import SwiftUI
 
 /// Toast / Banner 的语气（§9.14）。
-public enum ToastTone: Sendable, Hashable, CaseIterable {
+public nonisolated enum ToastTone: Sendable, Hashable, CaseIterable {
     case success, warning, error, info
 
     /// 默认 SF Symbol（§6.2：check / 三角 / 叹号圆 / info）。
@@ -41,14 +41,18 @@ public enum ToastTone: Sendable, Hashable, CaseIterable {
 }
 
 /// 一条 Toast。相等性只看 `id`。
-public struct ToastItem: Identifiable, Equatable {
+///
+/// `nonisolated` + `Sendable`：`.animation(value: center.current)` / `.sensoryFeedback(trigger: center.current)`
+/// 会在 SwiftUI 渲染线程比较 `ToastItem?`，`==` 不能是 MainActor 隔离。`action` 因此标成 `@MainActor @Sendable`：
+/// 闭包本身只在主线程跑（Button 回调），但类型不再把整个结构体拖成 MainActor。
+public nonisolated struct ToastItem: Identifiable, Equatable, Sendable {
     public let id: UUID
     public let text: String
     public let tone: ToastTone
     public let systemImage: String
     /// 可选操作按钮标题（如「撤销」）。
     public let actionTitle: String?
-    public let action: (() -> Void)?
+    public let action: (@MainActor @Sendable () -> Void)?
 
     public init(
         id: UUID = UUID(),
@@ -56,7 +60,7 @@ public struct ToastItem: Identifiable, Equatable {
         tone: ToastTone = .info,
         systemImage: String? = nil,
         actionTitle: String? = nil,
-        action: (() -> Void)? = nil
+        action: (@MainActor @Sendable () -> Void)? = nil
     ) {
         self.id = id
         self.text = text
@@ -99,7 +103,7 @@ public final class ToastCenter {
         tone: ToastTone = .info,
         systemImage: String? = nil,
         actionTitle: String? = nil,
-        action: (() -> Void)? = nil
+        action: (@MainActor @Sendable () -> Void)? = nil
     ) {
         show(ToastItem(text: text, tone: tone, systemImage: systemImage, actionTitle: actionTitle, action: action))
     }

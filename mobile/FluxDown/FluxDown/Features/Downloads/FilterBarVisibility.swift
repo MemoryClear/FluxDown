@@ -2,7 +2,7 @@ import FluxDomain
 
 /// 下载页筛选区各部分的显隐（云同步偏好 `ui.show_sidebar_status|queues|category`，通用设置「下载页显示」）。
 /// 缺省全部显示。纯值，便于单测。
-struct FilterBarVisibility: Equatable {
+nonisolated struct FilterBarVisibility: Equatable {
     static let statusKey = "ui.show_sidebar_status"
     static let queuesKey = "ui.show_sidebar_queues"
     static let categoryKey = "ui.show_sidebar_category"

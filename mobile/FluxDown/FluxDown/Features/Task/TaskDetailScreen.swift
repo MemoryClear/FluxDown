@@ -63,7 +63,7 @@ private struct TaskDetailLoader: View {
     }
 }
 
-private enum DetailPage: Hashable, CaseIterable {
+private nonisolated enum DetailPage: Hashable, CaseIterable {
     case general, speed, seeding, log, advanced
 
     var title: String {

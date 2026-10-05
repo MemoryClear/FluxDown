@@ -2,7 +2,7 @@ import FluxDomain
 import Foundation
 
 /// 命令 / 设置页被选中后要执行的动作（由 `GlobalSearchScreen` 映射到路由 / `TaskActions` / 外观）。
-enum SearchAction: Hashable {
+nonisolated enum SearchAction: Hashable {
     case newDownload
     case pauseAll
     case resumeAll
@@ -25,7 +25,7 @@ enum SearchAction: Hashable {
 
 /// 命令 / 设置页条目（同 Android `CommandSearch.kt` 的 `Entry`）：
 /// `keywords` 只做连续子串匹配（降权），`sub` 同样参与降权匹配。
-struct SearchEntry: Identifiable, Hashable {
+nonisolated struct SearchEntry: Identifiable, Hashable {
     let id: String
     let title: String
     let sub: String?
@@ -232,7 +232,7 @@ enum SearchMatcher {
 }
 
 /// 范围条（全部 / 任务 / 命令 / 设置）。
-enum SearchScope: Hashable, CaseIterable {
+nonisolated enum SearchScope: Hashable, CaseIterable {
     case all, tasks, commands, settings
 }
 
@@ -293,7 +293,7 @@ struct SearchResults {
     }
 
     /// 键盘「搜索」键执行的第一条结果：任务 > 命令 > 设置。
-    enum First: Equatable {
+    nonisolated enum First: Equatable {
         case task(String)
         case entry(SearchAction)
     }

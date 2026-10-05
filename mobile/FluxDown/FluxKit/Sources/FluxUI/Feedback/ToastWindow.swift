@@ -7,7 +7,7 @@ import UIKit
 // 这样 Sheet / fullScreenCover / alert（都在 App 主窗口内展示）都盖不住它。入口只有 `View.toastHost`。
 
 /// 宿主视图环境的快照：overlay 窗口在 App 视图树之外，必须显式带过去。
-struct ToastOverlayConfiguration: Equatable {
+nonisolated struct ToastOverlayConfiguration: Equatable {
     var dismissLabel: String
     var accent: FluxAccent
     var colorScheme: ColorScheme
@@ -55,7 +55,7 @@ private struct ToastOverlayRoot: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .animation(FluxMotion.bouncy.animation(reduceMotion: reduceMotion), value: center.current)
-        .sensoryFeedback(trigger: center.current) { _, new in new?.tone.sensoryFeedback }
+        .sensoryFeedback(trigger: center.current) { @Sendable _, new in new?.tone.sensoryFeedback }
         .onChange(of: center.current) { _, new in
             if let new { AccessibilityNotification.Announcement(new.text).post() }
         }

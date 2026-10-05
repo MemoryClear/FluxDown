@@ -6,7 +6,7 @@ import SwiftUI
 // `daemon.siteAuth.get` 取回，不进入列表状态、不写日志。
 
 /// 编辑表单的目标：新建 / 编辑已有站点。
-enum SiteAuthSheetTarget: Identifiable, Equatable {
+nonisolated enum SiteAuthSheetTarget: Identifiable, Equatable {
     case add
     case edit(SiteAuthEntryDto)
 
@@ -250,7 +250,7 @@ struct SiteAuthEditSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(AppContainer.self) private var container
 
-    private enum Phase: Equatable {
+    private nonisolated enum Phase: Equatable {
         case loading, ready, failed(String)
     }
 

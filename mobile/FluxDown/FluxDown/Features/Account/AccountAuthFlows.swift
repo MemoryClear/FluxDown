@@ -6,7 +6,7 @@ import Observation
 // `PasswordDialogs.tsx` 与 GPUI `dialogs/{login,register,password_reset}.rs`。所有网络调用在调用时取当前主机会话。
 
 /// 一次提交的结果（视图据此推进导航）。
-enum AuthOutcome: Sendable {
+nonisolated enum AuthOutcome: Sendable {
     /// 已登录，关闭 sheet。
     case done
     /// 需要验证码步骤（设备验证 / 注册邮箱验证）。
@@ -23,7 +23,7 @@ private func trimmed(_ value: String) -> String { AccountRules.trimmed(value) }
 @MainActor
 @Observable
 final class LoginFlow {
-    enum Method: Hashable { case password, code }
+    nonisolated enum Method: Hashable { case password, code }
 
     var method: Method = .password
     /// 邮箱或纯数字 Origin ID（验证码登录只能是邮箱）。

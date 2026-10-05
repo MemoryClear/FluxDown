@@ -5,7 +5,7 @@ import SwiftUI
 /// V3 设备详情：云端受信任设备（完整：信息 / 下发 / 重命名 / 删除 / 该设备的远程任务）与局域网已配对设备（信息 / 下发 / 解除配对）。
 /// 设备在别处被删除 / 解除配对（或主机切换、退出登录）时自动返回上一页并提示。
 struct DeviceDetailScreen: View {
-    enum Target: Hashable {
+    nonisolated enum Target: Hashable {
         /// `CloudDeviceRecord.id`（云端行 id）。
         case cloud(id: String)
         case link(fingerprint: String)

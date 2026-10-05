@@ -24,7 +24,7 @@ struct PluginSettingsSheet: View {
     }
 
     /// 连续的开关合并进同一个 Section；其余字段各占一个 Section。
-    private enum Block: Identifiable {
+    private nonisolated enum Block: Identifiable {
         case toggles([PluginSettingField])
         case field(PluginSettingField)
 

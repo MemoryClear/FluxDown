@@ -14,7 +14,7 @@ struct LoginSheet: View {
     @State private var path: [Step] = []
     @State private var resetting = false
 
-    fileprivate enum Step: Hashable { case deviceVerify, registerVerify }
+    fileprivate nonisolated enum Step: Hashable { case deviceVerify, registerVerify }
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -214,7 +214,7 @@ struct RegisterSheet: View {
     }
 }
 
-enum RegisterStep: Hashable { case verify }
+nonisolated enum RegisterStep: Hashable { case verify }
 
 private struct RegisterFormPage: View {
     @Environment(AppContainer.self) private var container

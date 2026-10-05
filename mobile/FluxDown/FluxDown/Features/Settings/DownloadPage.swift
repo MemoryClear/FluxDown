@@ -3,7 +3,7 @@ import FluxUI
 import SwiftUI
 
 /// 全局 User-Agent 预设（与 PC 端同一份取值）。名称是品牌专有名词，本地化只用于「默认 / 自定义」。
-private struct UAPreset: Identifiable {
+private nonisolated struct UAPreset: Identifiable {
     let id: String
     let labelKey: String
     let ua: String

@@ -5,7 +5,7 @@ import Foundation
 /// 订阅行的纯文案规则（同 Android `RssScreen.kt` 的 `relativeAgo` / 抓取间隔 / 状态行）。
 enum RssFormat {
     /// 相对时间档位：< 1 分钟 / 分钟 / 小时 / 天（负值按 0 处理）。
-    enum Ago: Equatable {
+    nonisolated enum Ago: Equatable {
         case justNow
         case minutes(Int64)
         case hours(Int64)
@@ -55,7 +55,7 @@ enum RssFormat {
     }
 
     /// 状态行首段的种类（决定颜色）。
-    enum Status: Equatable {
+    nonisolated enum Status: Equatable {
         case refreshing
         case failed(count: Int32)
         case lastFetch(Ago)
@@ -94,7 +94,7 @@ enum RssFormat {
 // MARK: - 条目（R2）
 
 /// 条目关联任务的实时状态（来自 `HostState.tasks`，按 `taskId` 联动）。
-struct RssLinkedTask: Equatable {
+nonisolated struct RssLinkedTask: Equatable {
     var status: TaskStatus
     var fileMissing: Bool
     /// 0...1；总大小未知为 0。
@@ -114,7 +114,7 @@ struct RssLinkedTask: Equatable {
 }
 
 /// 条目状态 chip：文案键 + 图标 + 语气（形状 + 颜色双通道）。
-struct RssItemChip: Equatable {
+nonisolated struct RssItemChip: Equatable {
     var titleKey: String
     var systemImage: String
     var tone: BadgeTone

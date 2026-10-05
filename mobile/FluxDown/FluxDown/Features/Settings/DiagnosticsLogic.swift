@@ -66,7 +66,7 @@ nonisolated enum DiagnosticsLogic {
 
     // MARK: 报告文本
 
-    struct ReportLine: Equatable {
+    nonisolated struct ReportLine: Equatable {
         var level: DiagnosticLevel
         var label: String
         var target: String
@@ -74,7 +74,7 @@ nonisolated enum DiagnosticsLogic {
         var hint: String
     }
 
-    struct HostPart: Equatable {
+    nonisolated struct HostPart: Equatable {
         var name: String
         var appVersion: String
         var platform: String
@@ -85,7 +85,7 @@ nonisolated enum DiagnosticsLogic {
         var lines: [ReportLine]
     }
 
-    struct ReportInput: Equatable {
+    nonisolated struct ReportInput: Equatable {
         var appVersion: String
         var deviceDescription: String
         var generatedAt: Date

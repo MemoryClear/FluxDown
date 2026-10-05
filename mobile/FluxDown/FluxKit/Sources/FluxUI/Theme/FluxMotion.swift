@@ -5,19 +5,19 @@ import SwiftUI
 
 extension Animation {
     /// 页面推入 / 弹出、Sheet、Dock 显隐（0.5s，无过冲）。
-    public static let fluxSmooth: Animation = .smooth
+    public nonisolated static let fluxSmooth: Animation = .smooth
     /// 按压回弹、开关滑块、折叠箭头、勾选（bounce .15）。
-    public static let fluxSnappy: Animation = .snappy
+    public nonisolated static let fluxSnappy: Animation = .snappy
     /// 范围条药丸、菜单 / Toast 出现（bounce .30）。
-    public static let fluxBouncy: Animation = .bouncy
+    public nonisolated static let fluxBouncy: Animation = .bouncy
     /// 短距离位移、被挡回（0.3s，无过冲）。
-    public static let fluxRigid: Animation = .spring(duration: 0.3, bounce: 0)
+    public nonisolated static let fluxRigid: Animation = .spring(duration: 0.3, bounce: 0)
     /// 手指跟随（拖动、擦洗）。
-    public static let fluxInteractive: Animation = .interactiveSpring(response: 0.15, dampingFraction: 0.86, blendDuration: 0.25)
+    public nonisolated static let fluxInteractive: Animation = .interactiveSpring(response: 0.15, dampingFraction: 0.86, blendDuration: 0.25)
 }
 
 /// 弹簧 token 的枚举形态，用于按「减弱动态效果」选择实际动画（§7.3）。
-public enum FluxMotion: Sendable, Hashable, CaseIterable {
+public nonisolated enum FluxMotion: Sendable, Hashable, CaseIterable {
     case smooth, snappy, bouncy, rigid, interactive
 
     /// 减弱动态效果下：有过冲的弹簧（snappy / bouncy / rigid）一律退回无过冲的 `.smooth`；

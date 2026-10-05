@@ -6,7 +6,7 @@ import Foundation
 // MARK: - BitTorrent
 
 /// BT 页签（GPUI `bt.rs` 的 basic / tracker / seeding）。
-enum BtSettingsTab: String, CaseIterable, Identifiable {
+nonisolated enum BtSettingsTab: String, CaseIterable, Identifiable {
     case general, tracker, seeding
 
     var id: String { rawValue }
@@ -22,7 +22,7 @@ enum BtSettingsTab: String, CaseIterable, Identifiable {
 
 /// BT 页的每一行（GPUI 顺序）。页面渲染与设置搜索共用同一份可见性判定。
 /// 做种「时长 + 单位」两个 PC 行在移动端合成一行（各自仍写回两个键）。
-enum BtSettingsRow: String, CaseIterable, Identifiable {
+nonisolated enum BtSettingsRow: String, CaseIterable, Identifiable {
     case dht, upnp, portStart, portEnd, mseMode
     case customTrackers, trackerSub, trackerSubUrls, trackerSubStatus
     case seedEnabled, seedMaxActive, autoReseed, seedRatio, seedPostRatio
@@ -164,7 +164,7 @@ enum BtPortRange {
 }
 
 /// MSE（协议加密）选项：值 → 标题 / 说明。
-enum BtMseMode: String, CaseIterable, Identifiable {
+nonisolated enum BtMseMode: String, CaseIterable, Identifiable {
     case disabled, enabled, forced
 
     var id: String { rawValue }
@@ -190,7 +190,7 @@ enum BtMseMode: String, CaseIterable, Identifiable {
 
 /// 时长单位（`bt_seed_*_time_limit_unit`）。数值键始终以**分钟**落库，单位键记录设置页的展示单位
 /// （daemon `bt_config_from_map` 直接取分钟值）。
-enum BtDurationUnit: String, CaseIterable, Identifiable {
+nonisolated enum BtDurationUnit: String, CaseIterable, Identifiable {
     case minutes, hours, days
 
     var id: String { rawValue }
@@ -267,7 +267,7 @@ extension BtSettingsRow {
 
 // MARK: - eD2K
 
-enum Ed2kSettingsTab: String, CaseIterable, Identifiable {
+nonisolated enum Ed2kSettingsTab: String, CaseIterable, Identifiable {
     case general, servers
 
     var id: String { rawValue }
@@ -280,7 +280,7 @@ enum Ed2kSettingsTab: String, CaseIterable, Identifiable {
     }
 }
 
-enum Ed2kSettingsRow: String, CaseIterable, Identifiable {
+nonisolated enum Ed2kSettingsRow: String, CaseIterable, Identifiable {
     case kad, upnp, listenPort
     case serverList, serverSub, serverSubUrls, serverSubStatus
 
@@ -360,7 +360,7 @@ enum Ed2kSettingsRow: String, CaseIterable, Identifiable {
 // MARK: - 订阅
 
 /// 订阅种类：存储键、列表格式与文案键（`btTrackerSub…` / `ed2kServerSub…`）。
-enum SubscriptionKind {
+nonisolated enum SubscriptionKind {
     case btTrackers, ed2kServers
 
     var cacheKey: String {
@@ -435,7 +435,7 @@ enum SubscriptionKind {
 }
 
 /// 订阅状态的显示值：配置快照（缓存条数 / 更新时间）与本次刷新结果合并。
-struct SubscriptionStatusModel: Equatable {
+nonisolated struct SubscriptionStatusModel: Equatable {
     var count: Int
     /// Unix 秒；0 = 从未更新。
     var updatedAt: Int64

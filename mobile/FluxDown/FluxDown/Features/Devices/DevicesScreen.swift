@@ -15,7 +15,7 @@ struct DevicesScreen: View {
 }
 
 /// 设备页导航栈内的路由。
-enum DevicesRoute: Hashable {
+nonisolated enum DevicesRoute: Hashable {
     /// V1a 全部已信任设备。
     case allDevices
     /// V3 云端设备详情（`CloudDeviceRecord.id`）。
@@ -25,7 +25,7 @@ enum DevicesRoute: Hashable {
 }
 
 /// 设备页自己呈现的 sheet（同一时刻一个）。
-private enum DevicesSheet: Identifiable {
+private nonisolated enum DevicesSheet: Identifiable {
     case addDevice, login
 
     var id: String {

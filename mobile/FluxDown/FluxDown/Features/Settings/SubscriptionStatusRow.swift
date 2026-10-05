@@ -13,7 +13,7 @@ struct SubscriptionStatusRow: View {
     @Environment(AppContainer.self) private var container
     @Environment(ConfigEditor.self) private var editor
 
-    private enum Phase: Equatable {
+    private nonisolated enum Phase: Equatable {
         case idle
         case refreshing
         /// 失败：`detail` 为 daemon 错误摘要 / 传输错误文案（可为空）。

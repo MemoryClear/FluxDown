@@ -10,18 +10,18 @@ import SwiftUI
 @MainActor
 @Observable
 final class ExtensionsModel {
-    enum InstallPhase: Equatable {
+    nonisolated enum InstallPhase: Equatable {
         case uploading(Double)
         case installing
     }
 
-    enum MarketPhase: Equatable {
+    nonisolated enum MarketPhase: Equatable {
         case idle, loading, loaded
         case failed(String)
     }
 
     /// 权限确认请求（新装列全部权限；更新只列新增权限）。
-    struct PermissionRequest: Identifiable, Equatable {
+    nonisolated struct PermissionRequest: Identifiable, Equatable {
         let entry: MarketEntry
         let installed: PluginDto?
         /// 确认期间市场里的版本变了：按最新版本重新确认。
@@ -32,12 +32,12 @@ final class ExtensionsModel {
         var permissions: [String] { PluginMarket.permissionsToConfirm(entry, installed: installed) }
     }
 
-    enum Tab: Hashable {
+    nonisolated enum Tab: Hashable {
         case plugins, components
     }
 
     /// 由插件页根视图呈现的 Sheet（行滑动 / 详情页按钮共用）。
-    enum PluginSheet: Identifiable, Hashable {
+    nonisolated enum PluginSheet: Identifiable, Hashable {
         case settings(String)
         case auth(String)
         case loadError(String)

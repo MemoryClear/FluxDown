@@ -286,7 +286,7 @@ struct ConfigToggleRow: View {
 }
 
 /// 选项（`ConfigPickerRow` / `ConfigSegmentedRow` 共用）。
-struct SettingsOption: Identifiable, Hashable {
+nonisolated struct SettingsOption: Identifiable, Hashable {
     let id: String
     let label: String
 }
@@ -907,7 +907,7 @@ struct SettingsActionRow: View {
 
 /// 结果 / 状态行：图标 + 文字（语气不只靠颜色），文字可长按选择复制。
 struct SettingsStatusLine: View {
-    enum Tone { case success, warning, failure, neutral }
+    nonisolated enum Tone { case success, warning, failure, neutral }
 
     let text: String
     var tone: Tone = .neutral

@@ -6,7 +6,7 @@ import Foundation
 // 全部是值类型，不依赖 SwiftUI，可直接单测（见 `FluxDownTests/DownloadsDeriveTests.swift`）。
 
 /// 状态文件夹（范围条）；顺序即显示顺序（02-downloads §3.2）。
-enum StatusFolder: CaseIterable, Hashable {
+nonisolated enum StatusFolder: CaseIterable, Hashable {
     case all, active, completed, failed, paused
 
     func accepts(_ status: TaskStatus) -> Bool {
@@ -21,7 +21,7 @@ enum StatusFolder: CaseIterable, Hashable {
 }
 
 /// 列表筛选：状态文件夹 · 分类 · 队列范围 · 搜索词。
-struct DownloadsFilter: Hashable {
+nonisolated struct DownloadsFilter: Hashable {
     var folder: StatusFolder = .all
     var categoryId: String?
     /// 已规范化的队列 id（主队列 = `TaskQueue.main`）；nil = 全部队列。
@@ -35,7 +35,7 @@ struct DownloadsFilter: Hashable {
 func normalizedQueueId(_ id: String) -> String { id.isEmpty ? TaskQueue.main : id }
 
 /// 派生显示状态（§1.3：颜色 + 图形冗余）。
-enum TaskVisual: Hashable {
+nonisolated enum TaskVisual: Hashable {
     case downloading, queued, pending, preparing, verifying, paused, failed, seeding, missing, completed
 
     init(_ task: DownloadTask, queuePosition: Int) {
@@ -59,14 +59,14 @@ enum TaskVisual: Hashable {
 }
 
 /// 分组 / 排序 / 过滤之外决定列表顺序的偏好（不含密度与卡片字段：它们只影响行渲染）。
-struct ViewOrder: Hashable {
+nonisolated struct ViewOrder: Hashable {
     var groupBy: GroupBy
     var sortKey: SortKey
     var ascending: Bool
 }
 
 /// 行内进度条的输入：有分段 → 按真实字节区间；否则回退总进度（`SegmentMapView` 的两种形态）。
-struct ProgressBarModel: Equatable {
+nonisolated struct ProgressBarModel: Equatable {
     var spans: [SegmentSpan]
     var totalBytes: Int64
     /// 总进度；总大小未知 + 下载中 + 无分段 → 不定进度条。
@@ -75,7 +75,7 @@ struct ProgressBarModel: Equatable {
 }
 
 /// 一行任务的全部展示输入（派生时算好并按输入复用实例：未变化的任务得到相等的值，行视图据此跳过重算）。
-struct TaskItem: Identifiable, Equatable {
+nonisolated struct TaskItem: Identifiable, Equatable {
     let task: DownloadTask
     let speedDown: Int64
     let speedUp: Int64
@@ -100,7 +100,7 @@ struct TaskItem: Identifiable, Equatable {
 }
 
 /// 分区 / 分组标题（视图层解析为文案；与 Android `GroupLabel` 同构）。
-enum SectionTitle: Equatable {
+nonisolated enum SectionTitle: Equatable {
     case inFlight
     /// 选中 已完成 / 失败 / 已暂停 文件夹时换成该文件夹名。
     case history(StatusFolder?)
@@ -111,13 +111,13 @@ enum SectionTitle: Equatable {
     case queue(TaskQueue)
 }
 
-struct DoneOfTotal: Equatable {
+nonisolated struct DoneOfTotal: Equatable {
     let done: Int
     let total: Int
 }
 
-struct DownloadsSection: Identifiable, Equatable {
-    enum Kind: Equatable {
+nonisolated struct DownloadsSection: Identifiable, Equatable {
+    nonisolated enum Kind: Equatable {
         /// 「传输中」：右侧实时汇总下行速度 + 任务数。
         case inFlight
         case history
@@ -140,7 +140,7 @@ struct DownloadsSection: Identifiable, Equatable {
 }
 
 /// 派生出的列表：分区 + 可见任务 id（全选范围）+ 总任务数（区分「无任务」与「筛选后为空」）。
-struct DownloadsList: Equatable {
+nonisolated struct DownloadsList: Equatable {
     let sections: [DownloadsSection]
     let visibleIds: [String]
     let taskTotal: Int
@@ -151,20 +151,20 @@ struct DownloadsList: Equatable {
     var isEmpty: Bool { sections.allSatisfy { $0.count == 0 } }
 }
 
-struct CategoryPill: Equatable, Identifiable {
+nonisolated struct CategoryPill: Equatable, Identifiable {
     let category: TaskCategory
     let count: Int
     var id: String { category.id }
 }
 
-struct QueueFacet: Equatable, Identifiable {
+nonisolated struct QueueFacet: Equatable, Identifiable {
     let queue: TaskQueue
     let count: Int
     var id: String { queue.queueId }
 }
 
 /// 分面：文件夹计数（队列 / 搜索范围内）· 当前文件夹内的分类计数 · 各队列任务数。
-struct Facets: Equatable {
+nonisolated struct Facets: Equatable {
     /// 按 `StatusFolder.allCases` 顺序。
     let folderCounts: [Int]
     let categories: [CategoryPill]

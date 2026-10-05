@@ -18,7 +18,7 @@ private struct SessionRevokedAlert: ViewModifier {
     @State private var revoked: Revoked?
     @State private var warnCount = 0
 
-    private struct Revoked: Identifiable {
+    private nonisolated struct Revoked: Identifiable {
         let id: Int
         let reason: String
     }

@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// 文件类别（图标 + 类别色，§3.C / §6.2 / §6.4）。
-public enum FileKind: Sendable, Hashable, CaseIterable {
+public nonisolated enum FileKind: Sendable, Hashable, CaseIterable {
     case video, audio, document, image, program, archive, ebook, diskImage, application, torrent, other
 
     /// SF Symbol：行内类别图标（§6.4），磁盘镜像 / 应用 / 种子取 PC `TaskKind` 备用图标（§6.2）。
@@ -64,7 +64,7 @@ public enum FileKind: Sendable, Hashable, CaseIterable {
 }
 
 /// 任务图标右下角的状态角标（§3.C、§11.5：形状 + 对钩 / 三角 / 叹号，不只靠颜色）。
-public enum KindBadge: Sendable, Hashable, CaseIterable {
+public nonisolated enum KindBadge: Sendable, Hashable, CaseIterable {
     case none, completed, warning, failed
 
     fileprivate var symbolName: String? {

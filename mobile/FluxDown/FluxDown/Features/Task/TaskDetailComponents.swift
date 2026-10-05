@@ -3,7 +3,7 @@ import FluxUI
 import SwiftUI
 
 /// 一格大数字（数值 + 单位 + 说明）。
-struct TaskStatItem: Identifiable {
+nonisolated struct TaskStatItem: Identifiable {
     let label: String
     let value: String
     let unit: String

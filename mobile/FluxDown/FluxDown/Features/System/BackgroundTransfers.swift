@@ -36,7 +36,7 @@ final class BackgroundTransfers {
     /// 而后台里无法重新提交，过早结束会让下一个任务失去后台时间。
     private static let idleGrace: Duration = .seconds(3)
 
-    private enum AppPhase {
+    private nonisolated enum AppPhase {
         case active, inactive, background
     }
 

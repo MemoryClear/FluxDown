@@ -25,49 +25,69 @@ public struct SpeedWaveform: View {
         self.showsGrid = showsGrid
     }
 
-    private static let inset: CGFloat = 2
-
     public var body: some View {
-        Canvas { gc, size in
-            let ceiling = max(samples.max() ?? 0, secondary?.max() ?? 0)
-            if showsGrid { drawGrid(into: &gc, size: size) }
-            guard ceiling > 0 else {
-                drawBaseline(into: &gc, size: size)
-                return
-            }
-            if let secondary, secondary.count > 1 {
-                let line = Self.smoothPath(points(secondary, ceiling: ceiling, size: size), bottom: size.height - Self.inset)
-                gc.stroke(line, with: .color(.fdStatusSeeding), style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
-            }
-            if samples.count > 1 {
-                let line = Self.smoothPath(points(samples, ceiling: ceiling, size: size), bottom: size.height - Self.inset)
-                var area = line
-                area.addLine(to: CGPoint(x: size.width, y: size.height))
-                area.addLine(to: CGPoint(x: 0, y: size.height))
-                area.closeSubpath()
-                gc.fill(
-                    area,
-                    with: .linearGradient(
-                        Gradient(colors: [color.opacity(0.45), color.opacity(0)]),
-                        startPoint: .zero,
-                        endPoint: CGPoint(x: 0, y: size.height)
-                    )
-                )
-                gc.stroke(line, with: .color(color), style: StrokeStyle(lineWidth: 1.8, lineCap: .round, lineJoin: .round))
-            } else {
-                drawBaseline(into: &gc, size: size)
-            }
+        // Canvas 渲染闭包在 SwiftUI 渲染线程（`com.apple.SwiftUI.AsyncRenderer`）上执行：不能是 MainActor 隔离的。
+        // 绘制输入先在主线程取成 Sendable 值，闭包标 `@Sendable`，只调用 nonisolated 的 `WaveformScene.draw`。
+        let scene = WaveformScene(
+            samples: samples, secondary: secondary, color: color, showsGrid: showsGrid,
+            seedingColor: .fdStatusSeeding, separatorColor: Color(uiColor: .separator)
+        )
+        return Canvas { @Sendable gc, size in
+            scene.draw(into: &gc, size: size)
         }
         .accessibilityHidden(true)
     }
+}
 
-    private func points(_ values: [Double], ceiling: Double, size: CGSize) -> [CGPoint] {
-        let usable = max(size.height - 2 * Self.inset, 0)
+/// `SpeedWaveform` 的绘制输入（主线程取好的纯值）与绘制实现；`nonisolated` 以便在渲染线程调用。
+private nonisolated struct WaveformScene: Sendable {
+    let samples: [Double]
+    let secondary: [Double]?
+    let color: Color
+    let showsGrid: Bool
+    let seedingColor: Color
+    let separatorColor: Color
+
+    private static let inset: CGFloat = 2
+
+    func draw(into gc: inout GraphicsContext, size: CGSize) {
+        let ceiling = max(samples.max() ?? 0, secondary?.max() ?? 0)
+        if showsGrid { drawGrid(into: &gc, size: size) }
+        guard ceiling > 0 else {
+            drawBaseline(into: &gc, size: size)
+            return
+        }
+        if let secondary, secondary.count > 1 {
+            let line = Self.smoothPath(Self.points(secondary, ceiling: ceiling, size: size), bottom: size.height - Self.inset)
+            gc.stroke(line, with: .color(seedingColor), style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
+        }
+        if samples.count > 1 {
+            let line = Self.smoothPath(Self.points(samples, ceiling: ceiling, size: size), bottom: size.height - Self.inset)
+            var area = line
+            area.addLine(to: CGPoint(x: size.width, y: size.height))
+            area.addLine(to: CGPoint(x: 0, y: size.height))
+            area.closeSubpath()
+            gc.fill(
+                area,
+                with: .linearGradient(
+                    Gradient(colors: [color.opacity(0.45), color.opacity(0)]),
+                    startPoint: .zero,
+                    endPoint: CGPoint(x: 0, y: size.height)
+                )
+            )
+            gc.stroke(line, with: .color(color), style: StrokeStyle(lineWidth: 1.8, lineCap: .round, lineJoin: .round))
+        } else {
+            drawBaseline(into: &gc, size: size)
+        }
+    }
+
+    private static func points(_ values: [Double], ceiling: Double, size: CGSize) -> [CGPoint] {
+        let usable = max(size.height - 2 * inset, 0)
         let lastIndex = CGFloat(max(values.count - 1, 1))
         return values.enumerated().map { index, value in
             CGPoint(
                 x: size.width * CGFloat(index) / lastIndex,
-                y: size.height - Self.inset - CGFloat(min(max(value, 0) / ceiling, 1)) * usable
+                y: size.height - inset - CGFloat(min(max(value, 0) / ceiling, 1)) * usable
             )
         }
     }
@@ -106,7 +126,7 @@ public struct SpeedWaveform: View {
             let y = size.height - Self.inset - usable * fraction
             line.move(to: CGPoint(x: 0, y: y))
             line.addLine(to: CGPoint(x: size.width, y: y))
-            gc.stroke(line, with: .color(Color(uiColor: .separator)), style: StrokeStyle(lineWidth: 0.5, dash: [3, 4]))
+            gc.stroke(line, with: .color(separatorColor), style: StrokeStyle(lineWidth: 0.5, dash: [3, 4]))
         }
     }
 }

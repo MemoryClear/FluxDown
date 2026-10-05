@@ -36,7 +36,7 @@ public struct SpeedAreaChart: View {
         self.timeLabel = timeLabel
     }
 
-    private struct Point: Identifiable {
+    private nonisolated struct Point: Identifiable {
         let id: Int
         let value: Double
     }

@@ -50,12 +50,13 @@ enum WebhookErrorText {
 }
 
 /// 「发送测试」的展示结果；行内测试归属发起的端点（`endpointId`）。
-struct WebhookTestReport: Equatable {
+nonisolated struct WebhookTestReport: Equatable {
     var endpointId: String
     var success: Bool
     var text: String
 
     /// 测试回执 → 文案（GPUI `test_result_text`；行内与编辑器共用）。
+    @MainActor
     static func make(endpointId: String, response: WebhookTestResponse) -> WebhookTestReport {
         if response.success {
             let status = response.statusCode == 0 ? L("mobileWebhookStatusOk") : String(response.statusCode)
@@ -69,6 +70,7 @@ struct WebhookTestReport: Equatable {
         return WebhookTestReport(endpointId: endpointId, success: false, text: L("webhookTestFail", ["error": error]))
     }
 
+    @MainActor
     static func make(endpointId: String, error: HostError) -> WebhookTestReport {
         WebhookTestReport(endpointId: endpointId, success: false, text: L("webhookTestFail", ["error": WebhookErrorText.detail(error)]))
     }

@@ -16,13 +16,13 @@ struct NetworkPage: View {
     @State private var siteAuth = SiteAuthModel()
 
     /// 系统代理检测的触发条件：切到系统模式 / 切换主机 / 连接恢复时重新检测。
-    private struct DetectKey: Hashable {
+    private nonisolated struct DetectKey: Hashable {
         let hostID: String
         let isLive: Bool
         let isSystemMode: Bool
     }
 
-    private struct SiteAuthKey: Hashable {
+    private nonisolated struct SiteAuthKey: Hashable {
         let hostID: String
         let isLive: Bool
     }
@@ -237,7 +237,7 @@ private struct NetworkTestRow: View {
         }
         .settingsRow(NetworkRow.test.id)
         .fluxAnimation(.smooth, value: test)
-        .sensoryFeedback(trigger: test) { _, new in
+        .sensoryFeedback(trigger: test) { @Sendable _, new in
             switch new {
             case .success: FluxHaptic.success.sensoryFeedback
             case .failure: FluxHaptic.error.sensoryFeedback

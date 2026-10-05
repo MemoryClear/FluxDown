@@ -406,7 +406,7 @@ struct RssEditorSheet: View {
         return values
     }
 
-    private struct QueueChoice: Identifiable {
+    private nonisolated struct QueueChoice: Identifiable {
         let id: String
         let label: String
     }

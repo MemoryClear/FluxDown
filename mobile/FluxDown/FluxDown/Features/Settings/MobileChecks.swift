@@ -39,8 +39,8 @@ nonisolated struct MobileCheck: Identifiable, Equatable, Sendable {
 
 /// 一次性网络路径快照（`NWPath` 的 Sendable 投影）。
 nonisolated struct MobileNetworkSnapshot: Equatable, Sendable {
-    enum Reachability: Sendable { case satisfied, unsatisfied, requiresConnection }
-    enum Interface: Sendable { case wifi, cellular, wired, other, none }
+    nonisolated enum Reachability: Sendable { case satisfied, unsatisfied, requiresConnection }
+    nonisolated enum Interface: Sendable { case wifi, cellular, wired, other, none }
 
     var reachability: Reachability
     var interface: Interface

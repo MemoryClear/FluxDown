@@ -10,7 +10,7 @@ import SwiftUI
 @MainActor
 @Observable
 final class QueueEditorModel {
-    enum LoadState: Equatable {
+    nonisolated enum LoadState: Equatable {
         case loading
         case loaded
         /// 主机上已找不到该队列（被删除）。

@@ -8,7 +8,7 @@ struct QueueScheduleSection: View {
     @Binding var draft: QueueDraft
     let issue: QueueDraft.Issue?
 
-    private enum TimeField: Hashable {
+    private nonisolated enum TimeField: Hashable {
         case start, stop
     }
 

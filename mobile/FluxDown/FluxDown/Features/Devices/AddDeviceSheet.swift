@@ -21,8 +21,8 @@ struct AddDeviceSheet: View {
 }
 
 private struct AddDeviceContent: View {
-    enum Tab: Hashable { case account, local }
-    enum Field: Hashable { case address, code }
+    nonisolated enum Tab: Hashable { case account, local }
+    nonisolated enum Field: Hashable { case address, code }
 
     @Environment(AppContainer.self) private var container
     @Environment(\.dismiss) private var dismiss

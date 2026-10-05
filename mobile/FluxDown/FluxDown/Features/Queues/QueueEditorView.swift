@@ -3,7 +3,7 @@ import FluxUI
 import SwiftUI
 
 /// 表单内可聚焦的输入（数字键盘没有「完成」键，用键盘工具栏收起）。
-enum QueueEditorField: Hashable {
+nonisolated enum QueueEditorField: Hashable {
     case name, speed, upload, concurrent, segments, dir, userAgent
 }
 

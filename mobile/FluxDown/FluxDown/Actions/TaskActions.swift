@@ -4,7 +4,7 @@ import SwiftUI
 import UIKit
 
 /// 需要确认 / 输入的任务对话框（由根视图的 `.taskActionDialogs()` 统一呈现）。
-enum TaskDialog: Identifiable {
+nonisolated enum TaskDialog: Identifiable {
     /// 删除确认：保留文件 / 连同文件（PC 同两档）。
     case delete([DownloadTask], onDone: (@MainActor () -> Void)?)
     case redownload(DownloadTask)

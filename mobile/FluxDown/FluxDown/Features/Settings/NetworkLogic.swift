@@ -6,7 +6,7 @@ import Foundation
 // MARK: - 代理模式
 
 /// `proxy_mode` 的取值（顺序即选择列表顺序，同 GPUI / Web）。
-enum NetworkProxyMode: String, CaseIterable, Identifiable, Sendable {
+nonisolated enum NetworkProxyMode: String, CaseIterable, Identifiable, Sendable {
     case none, system, manual, auto
 
     var id: String { rawValue }
@@ -84,14 +84,14 @@ enum NetworkProxyTest {
 // MARK: - 行目录
 
 /// 本页的每一行（页面渲染与设置搜索共用同一份可见性判定）。
-enum NetworkRow: String, CaseIterable, Identifiable {
+nonisolated enum NetworkRow: String, CaseIterable, Identifiable {
     case mode, type, host, port, username, password, noList, test
     case siteAuth, siteAuthAdd, siteAuthClear
 
     var id: String { "network.\(rawValue)" }
 
     /// 搜索面包屑里的分组名文案键。
-    enum Group {
+    nonisolated enum Group {
         case mode, manual, siteAuth
 
         var titleKey: String {

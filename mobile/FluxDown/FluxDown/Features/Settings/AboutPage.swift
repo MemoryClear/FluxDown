@@ -179,13 +179,17 @@ private struct BrandMark: View {
     var body: some View {
         let d = min(dot, 10)
         let gap = d / 2
-        let rows = CGFloat(brandGlyph.count)
-        let cols = CGFloat(brandGlyph.first?.count ?? 0)
-        Canvas { context, _ in
-            for (r, line) in brandGlyph.enumerated() {
+        let glyph = brandGlyph
+        let rows = CGFloat(glyph.count)
+        let cols = CGFloat(glyph.first?.count ?? 0)
+        let accentColor = accent.color
+        // Canvas 渲染闭包在 SwiftUI 渲染线程执行：标 `@Sendable`（nonisolated），只捕获主线程先取好的 Sendable 值，
+        // 不碰 `self` / MainActor 全局，否则默认 MainActor 隔离会让它在渲染线程触发隔离断言。
+        return Canvas { @Sendable context, _ in
+            for (r, line) in glyph.enumerated() {
                 for (c, ch) in line.enumerated() where ch != "." {
                     let rect = CGRect(x: CGFloat(c) * (d + gap), y: CGFloat(r) * (d + gap), width: d, height: d)
-                    let color: Color = ch == "o" ? accent.color : .primary
+                    let color: Color = ch == "o" ? accentColor : .primary
                     context.fill(Path(ellipseIn: rect), with: .color(color))
                 }
             }

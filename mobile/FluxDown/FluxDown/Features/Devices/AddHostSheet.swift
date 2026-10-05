@@ -9,7 +9,7 @@ struct AddHostSheet: View {
     @Environment(AppContainer.self) private var container
     @Environment(\.dismiss) private var dismiss
 
-    private enum Field: Hashable { case name, address, key }
+    private nonisolated enum Field: Hashable { case name, address, key }
 
     @State private var name = ""
     @State private var address = ""

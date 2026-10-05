@@ -9,12 +9,12 @@ import UniformTypeIdentifiers
 /// 本机与远端主机同一路径；BT 文件选择（X1）由引擎的选择请求自行弹出。单个失败不影响后续文件。
 @MainActor
 enum TorrentImport {
-    struct Failure: Hashable {
+    nonisolated struct Failure: Hashable {
         let fileName: String
         let message: String
     }
 
-    struct Outcome: Hashable {
+    nonisolated struct Outcome: Hashable {
         var created = 0
         var failures: [Failure] = []
     }

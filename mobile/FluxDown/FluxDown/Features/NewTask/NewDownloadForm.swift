@@ -2,15 +2,15 @@ import FluxDomain
 import Foundation
 import Observation
 
-enum ThreadMode: Hashable { case auto, preset, custom }
+nonisolated enum ThreadMode: Hashable { case auto, preset, custom }
 
 /// 高级面板里已改动的分区（用于 N1 入口副标题与提示）。
-enum AdvancedItem: Hashable {
+nonisolated enum AdvancedItem: Hashable {
     case auth, proxy, userAgent, cookie, referrer, checksum, headers, tls
 }
 
 /// 一行自定义请求头；稳定 id 作为列表 key，输入不会因重排丢焦点。
-struct HeaderDraft: Identifiable, Hashable {
+nonisolated struct HeaderDraft: Identifiable, Hashable {
     let id: Int
     var key = ""
     var value = ""

@@ -4,26 +4,26 @@ import SwiftUI
 
 /// 顶层标签（README §4.1）：下载 / 订阅 / 设备 / 设置。全局搜索不是标签：各根页右上角按钮以 `SheetRoute.search` 呈现。
 /// `newTask` 仅 iOS 27 的 `Tab(role: .prominent)` 使用：选中即弹新建 Sheet 并回弹到原标签。
-enum AppTab: Hashable {
+nonisolated enum AppTab: Hashable {
     case downloads, rss, devices, settings, newTask
 }
 
 /// 下载栈推入页。iPad（regular 宽度）下任务详情进入右栏，由 `selectedTaskId` 驱动。
-enum DownloadsRoute: Hashable {
+nonisolated enum DownloadsRoute: Hashable {
     case task(String)
     /// D6：任务组详情。
     case group(String)
 }
 
 /// 设置栈推入页（顺序见 03-settings §1.1；对齐 PC `build_pages`，桌面专属项省略）。
-enum SettingsRoute: Hashable {
+nonisolated enum SettingsRoute: Hashable {
     case account, general, appearance, notify
     case download, bt, ed2k, network, extensions, webhook, api
     case diagnostics, about
 }
 
 /// 一次性的跨页意图：全局搜索命令等发起，目标页就绪（所在标签被选中、无其它 Sheet）后消费并清空。
-enum AppIntent: Hashable {
+nonisolated enum AppIntent: Hashable {
     /// 订阅页：新建订阅（R3 创建）。
     case newRssSource
     /// 设备页：添加设备（配对）。
@@ -39,7 +39,7 @@ enum AppIntent: Hashable {
 }
 
 /// 全局 Sheet（同一时刻最多一个；SwiftUI 只允许单一呈现）。
-enum SheetRoute: Identifiable, Hashable {
+nonisolated enum SheetRoute: Identifiable, Hashable {
     /// N1：`prefill` = 预填链接（粘贴 / 分享 / magnet:// 唤起）。
     case newDownload(prefill: String)
     /// D9：全局活动面板。

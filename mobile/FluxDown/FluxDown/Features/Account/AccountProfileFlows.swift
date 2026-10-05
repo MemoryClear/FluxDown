@@ -14,7 +14,7 @@ private func trimmed(_ value: String) -> String { AccountRules.trimmed(value) }
 @MainActor
 @Observable
 final class OriginIdEditor {
-    enum Check: Sendable, Hashable { case idle, checking, available, taken, invalid }
+    nonisolated enum Check: Sendable, Hashable { case idle, checking, available, taken, invalid }
 
     let current: Int64?
 
@@ -130,7 +130,7 @@ final class OriginIdEditor {
 @MainActor
 @Observable
 final class EmailChangeFlow {
-    enum Step: Sendable, Hashable { case old, new }
+    nonisolated enum Step: Sendable, Hashable { case old, new }
 
     let userId: String
     let currentEmail: String
@@ -265,7 +265,7 @@ final class EmailChangeFlow {
 @MainActor
 @Observable
 final class PasswordChangeFlow {
-    enum Mode: Sendable, Hashable { case password, code }
+    nonisolated enum Mode: Sendable, Hashable { case password, code }
 
     let userId: String
     let email: String

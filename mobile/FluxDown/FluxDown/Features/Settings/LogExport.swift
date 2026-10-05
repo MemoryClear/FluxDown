@@ -261,7 +261,7 @@ struct LogsSection: View {
         }
     }
 
-    private struct LogRefreshKey: Hashable {
+    private nonisolated struct LogRefreshKey: Hashable {
         var host: String
         var live: Bool
     }

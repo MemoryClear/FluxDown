@@ -8,7 +8,7 @@ import SwiftUI
 @MainActor
 @Observable
 final class PluginAuthModel {
-    enum Action: String {
+    nonisolated enum Action: String {
         case begin, poll, logout, status
     }
 

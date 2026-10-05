@@ -8,7 +8,7 @@ import Observation
 @MainActor
 @Observable
 final class RssEditorModel {
-    enum Tab: Int, CaseIterable, Identifiable {
+    nonisolated enum Tab: Int, CaseIterable, Identifiable {
         case basic, filter, advanced
         var id: Int { rawValue }
 
@@ -21,14 +21,14 @@ final class RssEditorModel {
         }
     }
 
-    enum Load: Equatable {
+    nonisolated enum Load: Equatable {
         case loading
         case ready
         case failed(String)
     }
 
     /// 表单字段（文本框保持原始输入，保存时再校验 / 转换）。
-    struct Form: Equatable {
+    nonisolated struct Form: Equatable {
         var name = ""
         var url = ""
         var saveDir = ""
@@ -77,7 +77,7 @@ final class RssEditorModel {
     }
 
     /// 验证状态（`validate` 是慢方法：按钮转圈，不阻塞其它输入）。
-    enum Validation: Equatable {
+    nonisolated enum Validation: Equatable {
         case idle
         case running
         case passed(title: String, itemCount: Int)
@@ -85,7 +85,7 @@ final class RssEditorModel {
     }
 
     /// 校验 / RPC 错误：落在哪个页签与字段下。
-    struct FieldError: Equatable {
+    nonisolated struct FieldError: Equatable {
         var tab: Tab
         var message: String
     }

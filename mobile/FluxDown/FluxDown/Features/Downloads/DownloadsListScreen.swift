@@ -71,7 +71,7 @@ struct DownloadsListScreen: View {
                 Text(L("mobileClearFinishedMessage", ["n": clearIds.count]))
             }
             .sensoryFeedback(.selection, trigger: model.selection)
-            .sensoryFeedback(.warning, trigger: model.chrome.showsOfflineBanner) { _, shown in shown }
+            .sensoryFeedback(.warning, trigger: model.chrome.showsOfflineBanner) { @Sendable _, shown in shown }
             .task(id: searchText) {
                 // 搜索防抖 150ms（trim + 小写在派生里做）。
                 guard searchText != model.filter.query else { return }

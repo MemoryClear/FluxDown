@@ -1,12 +1,12 @@
 import SwiftUI
 
 /// 范围条计数的文字语气（§9.5：失败计数用加深失败色，下载中计数用 accentText）。
-public enum ScopeCountTone: Sendable, Hashable {
+public nonisolated enum ScopeCountTone: Sendable, Hashable {
     case secondary, accent, failure
 }
 
 /// `GlassScopeBar` 的一项。
-public struct ScopeItem<ID: Hashable>: Identifiable {
+public nonisolated struct ScopeItem<ID: Hashable>: Identifiable {
     public let id: ID
     public let title: String
     /// 计数；`nil` 或 0 不显示。

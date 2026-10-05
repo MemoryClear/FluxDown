@@ -12,7 +12,7 @@ import UIKit
 @MainActor
 @Observable
 final class RssItemsModel {
-    enum Phase: Equatable {
+    nonisolated enum Phase: Equatable {
         /// 首次拉取中（尚无条目）。
         case loading
         case loaded
@@ -20,7 +20,7 @@ final class RssItemsModel {
     }
 
     /// 页内横幅（批量结果 / 新条目提示 / 失败）。
-    struct Feedback: Equatable {
+    nonisolated struct Feedback: Equatable {
         var text: String
         var tone: BannerTone
         var systemImage: String

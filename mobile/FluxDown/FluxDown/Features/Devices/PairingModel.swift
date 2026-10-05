@@ -12,14 +12,14 @@ import OSLog
 @MainActor
 @Observable
 final class PairingModel {
-    struct Verify: Equatable {
+    nonisolated struct Verify: Equatable {
         var token: String
         var sas: String
         var peerName: String
         var peerFingerprint: String
     }
 
-    enum Step: Equatable {
+    nonisolated enum Step: Equatable {
         /// 表单（本机配对码 + 发现列表 + 手动地址）。
         case form
         /// SAS 核对：等待用户确认或拒绝。

@@ -17,7 +17,7 @@ struct ComponentsSections: View {
 @MainActor
 @Observable
 final class ComponentController {
-    struct Progress: Equatable {
+    nonisolated struct Progress: Equatable {
         var installing = false
         var downloaded: Int64 = 0
         var total: Int64 = 0
@@ -262,7 +262,7 @@ private struct ComponentCardBody: View {
     }
 
     /// 版本列表只在「受支持且连接就绪」首次成立时懒拉一次，之后靠刷新按钮。
-    private struct LazyKey: Hashable {
+    private nonisolated struct LazyKey: Hashable {
         let supported: Bool
         let ready: Bool
     }

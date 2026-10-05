@@ -14,13 +14,13 @@ import Observation
 @MainActor
 @Observable
 final class DevicesModel {
-    enum Phase: Equatable {
+    nonisolated enum Phase: Equatable {
         case idle, loading, loaded
         case failed(HostError)
     }
 
     /// 云端设备的同步指纹：只含会改变列表呈现的字段。
-    struct CloudSig: Hashable {
+    nonisolated struct CloudSig: Hashable {
         var deviceId: String
         var name: String
         var isOnline: Bool
@@ -42,7 +42,7 @@ final class DevicesModel {
     }
 
     /// `.onChange(of:)` 的触发键：任一项变化都意味着需要重新对齐一次。
-    struct SyncKey: Hashable {
+    nonisolated struct SyncKey: Hashable {
         var host: String
         var live: Bool
         var cloudEligible: Bool
@@ -52,7 +52,7 @@ final class DevicesModel {
     }
 
     /// 远程任务目标设备的展示信息。
-    struct Target: Equatable {
+    nonisolated struct Target: Equatable {
         var name: String
         var online: Bool
     }

@@ -4,7 +4,7 @@ import SwiftUI
 // 固定 pt 只用于品牌大数字，并经 `@ScaledMetric` 随 Dynamic Type 缩放。
 
 /// 品牌大数字档位（§4.2 表）。
-public enum FluxStatSize: Sendable, Hashable, CaseIterable {
+public nonisolated enum FluxStatSize: Sendable, Hashable, CaseIterable {
     /// 详情英雄三栏统计值 26 · bold rounded。
     case hero
     /// 速度页磁贴 21 · bold rounded。

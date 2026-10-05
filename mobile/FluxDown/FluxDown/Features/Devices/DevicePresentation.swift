@@ -73,7 +73,7 @@ enum DevicePresentation {
 }
 
 /// 当前主机卡的派生事实（任务状态计数 O(n) 一次遍历）。
-struct HostFacts: Equatable {
+nonisolated struct HostFacts: Equatable {
     var version: String?
     var diskFree: UInt64?
     var active: Int

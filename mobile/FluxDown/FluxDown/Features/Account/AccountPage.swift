@@ -372,7 +372,7 @@ struct AccountPage: View {
 
 // MARK: - Sheet 路由
 
-private enum AccountSheet: Identifiable {
+private nonisolated enum AccountSheet: Identifiable {
     case login, register
     case nickname(current: String)
     case originId(current: Int64?)

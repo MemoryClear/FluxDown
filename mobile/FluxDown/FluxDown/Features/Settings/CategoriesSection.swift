@@ -6,7 +6,7 @@ import SwiftUI
 // 列表 = `CustomCategoryDto.fromPreference(form.pref)`；每次变更写回整张重排后的列表（position = 下标）。
 
 /// 分类编辑器的呈现目标（新建 / 编辑某条）。
-enum GeneralCategoryTarget: Identifiable {
+nonisolated enum GeneralCategoryTarget: Identifiable {
     case new
     case edit(CustomCategoryDto)
 

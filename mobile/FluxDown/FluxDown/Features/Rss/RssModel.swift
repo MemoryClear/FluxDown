@@ -5,7 +5,7 @@ import Observation
 import UIKit
 
 /// 订阅列表排序（R1 ⋯ 菜单）。`manual` = 主机顺序（`position`）。
-enum RssFeedSort: String, CaseIterable, Identifiable {
+nonisolated enum RssFeedSort: String, CaseIterable, Identifiable {
     case manual, name, unread, lastFetch
 
     var id: String { rawValue }
@@ -21,7 +21,7 @@ enum RssFeedSort: String, CaseIterable, Identifiable {
 }
 
 /// R3 呈现目标。
-enum RssEditorTarget: Identifiable, Hashable {
+nonisolated enum RssEditorTarget: Identifiable, Hashable {
     case create
     case edit(sourceId: String)
 

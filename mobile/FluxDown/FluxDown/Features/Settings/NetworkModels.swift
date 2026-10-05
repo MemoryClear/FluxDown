@@ -11,7 +11,7 @@ import Observation
 @MainActor
 @Observable
 final class NetworkProxyModel {
-    enum Detection: Equatable {
+    nonisolated enum Detection: Equatable {
         case idle
         case detecting
         case detected(SystemProxyDto)
@@ -24,7 +24,7 @@ final class NetworkProxyModel {
         }
     }
 
-    enum Test: Equatable {
+    nonisolated enum Test: Equatable {
         case idle
         case running
         case success(latencyMs: Int64)
@@ -84,7 +84,7 @@ final class NetworkProxyModel {
 @MainActor
 @Observable
 final class SiteAuthModel {
-    enum Phase: Equatable {
+    nonisolated enum Phase: Equatable {
         case loading
         case loaded
         /// 首次加载失败（已有数据时的刷新失败保持 `.loaded`，不打断列表）。

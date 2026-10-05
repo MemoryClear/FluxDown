@@ -259,7 +259,7 @@ struct AccountCloudFeatures: View {
     // MARK: 状态行
 
     private struct StatusLine {
-        enum Tone {
+        nonisolated enum Tone {
             case neutral, accent, success, warning, failure
 
             var color: Color {
