@@ -2,7 +2,7 @@ package com.fluxdown.core.model
 
 /*
  * 主机投影的 Kotlin 侧模型：字段与 `native/protocol` 的 wire DTO 一一对应（camelCase 同名），
- * 由主机适配层（UniFFI `native/mobile` 绑定 / 演示主机）在边界一次性转换：
+ * 由主机适配层（`:bridge` 的 UniFFI 绑定适配）在边界一次性转换：
  * u64→Long、u32→Int、i32 状态码→枚举、Unix 秒字符串→Long。UI 只读这些不可变类型。
  */
 
@@ -190,15 +190,14 @@ sealed interface HostRef {
     val displayName: String
 
     data class Local(override val displayName: String) : HostRef {
-        override val id: String get() = "local"
+        override val id: String get() = ID
+
+        companion object {
+            const val ID = "local"
+        }
     }
 
     data class Remote(override val id: String, override val displayName: String, val endpoint: String) : HostRef
-
-    /** 无引擎时的演示主机：数据由客户端模拟，界面显式标注。 */
-    data class Demo(override val displayName: String) : HostRef {
-        override val id: String get() = "demo"
-    }
 }
 
 /** RSS 订阅（`RssSourceDto` 的 UI 子集）。 */

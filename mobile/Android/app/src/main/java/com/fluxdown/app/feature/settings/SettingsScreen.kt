@@ -27,6 +27,8 @@ import androidx.compose.ui.unit.dp
 import com.fluxdown.app.R
 import com.fluxdown.app.data.AppearanceState
 import com.fluxdown.app.data.ThemeMode
+import com.fluxdown.app.feature.devices.localizedName
+import com.fluxdown.app.feature.devices.localizedSubtitle
 import com.fluxdown.app.i18n.str
 import com.fluxdown.app.nav.LocalNavigator
 import com.fluxdown.app.nav.Route
@@ -70,7 +72,7 @@ fun SettingsScreen() {
     val context = LocalContext.current
     val version = remember(context) { context.appVersionName() }
 
-    val hostTitle = host.title()
+    val hostTitle = host.localizedName()
     val switchHostDescription = str(R.string.mobileSettingsSwitchHost, "name" to hostTitle)
 
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
@@ -98,7 +100,7 @@ fun SettingsScreen() {
                     row(hasIcon = true) {
                         FluxListRow(
                             title = hostTitle,
-                            subtitle = host.subtitle(),
+                            subtitle = host.localizedSubtitle(),
                             icon = if (host is HostRef.Remote) FluxIcons.Server else FluxIcons.Smartphone,
                             trailing = { ConnectionBadge() },
                             chevron = true,
@@ -168,19 +170,6 @@ fun SettingsScreen() {
             }
         }
     }
-}
-
-@Composable
-private fun HostRef.title(): String = when (this) {
-    is HostRef.Demo -> str(R.string.mobileDemoHost)
-    is HostRef.Local, is HostRef.Remote -> displayName
-}
-
-@Composable
-private fun HostRef.subtitle(): String = when (this) {
-    is HostRef.Demo -> str(R.string.mobileDemoHostSubtitle)
-    is HostRef.Local -> str(R.string.mobileHostLocalEngine)
-    is HostRef.Remote -> endpoint
 }
 
 /** 连接状态读数：圆点 + 文字；只在 [Connection] 变化时重组。 */

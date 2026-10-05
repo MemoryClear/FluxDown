@@ -25,6 +25,17 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import com.fluxdown.app.R
+import com.fluxdown.app.feature.devices.localizedName
+import com.fluxdown.app.feature.devices.localizedSubtitle
+import com.fluxdown.app.feature.devices.rememberHostActions
+import com.fluxdown.app.nav.LocalNavigator
+import com.fluxdown.app.nav.SheetRoute
+import com.fluxdown.app.shell.hostState
+import com.fluxdown.core.model.HostRef
+import com.fluxdown.core.store.Connection
+import com.fluxdown.fluxui.controls.FluxSectionFoot
+import com.fluxdown.fluxui.overlay.FluxSheetFooter
+import androidx.compose.runtime.derivedStateOf
 import com.fluxdown.app.actions.LocalTaskActions
 import com.fluxdown.app.i18n.fill
 import com.fluxdown.app.shell.LocalAppContainer
@@ -50,11 +61,12 @@ import com.fluxdown.fluxui.theme.FluxTheme
 // ── 主机切换 ─────────────────────────────────────────────────────────────────
 
 /**
- * 主机切换器。目前只有当前主机（演示主机 / 之后的本机），没有可切换的远程主机：
- * 不放假主机，也不放无效的「添加主机」按钮（远程主机需要引擎桥接，见集成说明）。
+ * 主机切换器：本机在前、已保存的远程主机在后；当前主机打勾并带连接状态点。
+ * 点按 = 切换（toast 回执）；长按远程主机 = 移除（确认框）；底部「添加主机」打开 [SheetRoute.AddHost]。
  */
 @Composable
 fun HostSwitchSheet(visible: Boolean, onDismiss: () -> Unit) {
+    val nav = LocalNavigator.current
     val title = stringResource(R.string.mobileHostSwitchTitle)
     val sub = stringResource(R.string.mobileHostSwitchSub)
     FluxSheet(
@@ -63,6 +75,17 @@ fun HostSwitchSheet(visible: Boolean, onDismiss: () -> Unit) {
         detent = FluxSheetDetent.Wrap,
         title = title,
         header = { FluxSheetHeader(title = title, subtitle = sub, onClose = onDismiss) },
+        footer = {
+            FluxSheetFooter {
+                FluxButton(
+                    text = stringResource(R.string.mobileHostAdd),
+                    onClick = { nav.openSheet(SheetRoute.AddHost) },
+                    variant = ButtonVariant.Secondary,
+                    icon = FluxIcons.Plus,
+                    fullWidth = true,
+                )
+            }
+        },
     ) {
         HostSwitchBody(onDismiss)
     }
@@ -71,38 +94,67 @@ fun HostSwitchSheet(visible: Boolean, onDismiss: () -> Unit) {
 @Composable
 private fun ColumnScope.HostSwitchBody(onDismiss: () -> Unit) {
     val container = LocalAppContainer.current
-    val view = LocalDownloadsView.current
+    val actions = rememberHostActions()
     val c = FluxTheme.colors
-    val host by container.host.collectAsState()
-    val online = view.live
-    val name = host.title()
-    val sub = host.subtitle()
-    val subtitle = if (online || sub.isEmpty()) sub else stringResource(R.string.mobileHostOfflineSubtitle).fill("subtitle" to sub)
-    val state = stringResource(if (online) R.string.mobileHostOnline else R.string.mobileHostOffline)
-    val current = stringResource(R.string.mobileHostCurrent)
+    val hosts by container.hosts.collectAsState()
+    val current by container.host.collectAsState()
+    val state = hostState()
+    val connection by remember { derivedStateOf { state.value.connection } }
+    val ordered = remember(hosts) { hosts.sortedBy { it !is HostRef.Local } }
+    val switchingId = actions.switchingId
+
+    val (tone, stateText) = when (connection) {
+        Connection.Live -> Tone.Mint to stringResource(R.string.mobileHostOnline)
+        Connection.Connecting -> Tone.Amber to stringResource(R.string.mobileHostConnConnecting)
+        Connection.Stale -> Tone.Amber to stringResource(R.string.mobileHostConnStale)
+        is Connection.Failed -> Tone.Coral to stringResource(R.string.mobileHostOffline)
+    }
+    val currentLabel = stringResource(R.string.mobileHostCurrent)
+    val offlineSubtitle = stringResource(R.string.mobileHostOfflineSubtitle)
 
     GlassSection(footer = stringResource(R.string.mobileHostListFootnote)) {
-        row(hasIcon = true) {
-            FluxListRow(
-                title = name,
-                subtitle = subtitle.ifEmpty { null },
-                leading = {
-                    Box(
-                        Modifier.size(36.dp).clip(RoundedCornerShape(11.dp)).background(c.glass2),
-                        contentAlignment = Alignment.Center,
-                    ) { FluxIcon(FluxIcons.Smartphone, null, size = 20.dp, tint = c.inkMuted) }
-                },
-                trailing = {
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                        FluxPresenceDot(tone = if (online) Tone.Mint else Tone.Neutral, glow = online)
-                        FluxIcon(FluxIcons.Check, current, size = 20.dp, tint = c.accentHi)
-                    }
-                },
-                selected = true,
-                onClick = onDismiss,
-                modifier = Modifier.semantics { stateDescription = state },
-            )
+        ordered.forEach { ref ->
+            row(hasIcon = true) {
+                val isCurrent = ref.id == current.id
+                val base = ref.localizedSubtitle()
+                val subtitle = if (isCurrent && connection != Connection.Live) offlineSubtitle.fill("subtitle" to base) else base
+                FluxListRow(
+                    title = ref.localizedName(),
+                    subtitle = subtitle.ifEmpty { null },
+                    leading = {
+                        Box(
+                            Modifier.size(36.dp).clip(RoundedCornerShape(11.dp)).background(c.glass2),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            FluxIcon(
+                                if (ref is HostRef.Remote) FluxIcons.Server else FluxIcons.Smartphone,
+                                null,
+                                size = 20.dp,
+                                tint = c.inkMuted,
+                            )
+                        }
+                    },
+                    trailing = when {
+                        isCurrent -> ({
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                FluxPresenceDot(tone = tone, glow = connection == Connection.Live)
+                                FluxIcon(FluxIcons.Check, currentLabel, size = 20.dp, tint = c.accentHi)
+                            }
+                        })
+                        switchingId == ref.id -> ({ FluxPresenceDot(tone = Tone.Amber, glow = true) })
+                        else -> null
+                    },
+                    selected = isCurrent,
+                    enabled = switchingId == null || switchingId == ref.id,
+                    onClick = { actions.switchTo(ref) { ok -> if (ok) onDismiss() } },
+                    onLongClick = (ref as? HostRef.Remote)?.let { remote -> { actions.confirmRemove(remote) } },
+                    modifier = if (isCurrent) Modifier.semantics { stateDescription = stateText } else Modifier,
+                )
+            }
         }
+    }
+    if (ordered.any { it is HostRef.Remote }) {
+        FluxSectionFoot(stringResource(R.string.mobileHostRemoveHint), Modifier.padding(horizontal = 6.dp, vertical = 8.dp))
     }
 }
 

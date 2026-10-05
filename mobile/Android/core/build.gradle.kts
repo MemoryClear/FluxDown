@@ -2,7 +2,7 @@ plugins {
     alias(libs.plugins.android.library)
 }
 
-// :core —— 主机契约（FluxClient，与未来 UniFFI `native/mobile` 一一对应）+ 快照/事件状态仓库 + 纯函数格式化。
+// :core —— 主机契约（HostSession，由 :bridge 以 UniFFI `native/mobile` 实现）+ 快照/事件状态仓库 + 纯函数格式化。
 // 不依赖 Compose / UI；JVM 单测覆盖状态迁移。
 android {
     namespace = "com.fluxdown.core"

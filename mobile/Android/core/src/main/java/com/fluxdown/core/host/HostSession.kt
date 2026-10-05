@@ -18,10 +18,9 @@ import kotlinx.coroutines.flow.Flow
  * 一台主机的会话端口：方法与 `fluxdown_protocol` 的 `daemon.* / agent.*` 一一对应。
  *
  * 实现方：
- * - UniFFI `native/mobile` 绑定（本机进程内 daemon + agent / 远端 `--server` 的 `/rpc`）。
+ * - UniFFI `native/mobile` 绑定（`:bridge` 的 `RustHostSession`）：本机进程内 daemon + agent / 远端 `--server` 的 `/rpc`。
  *   Rust 侧负责握手、epoch/sequence 游标、缓冲、断档重同步、重连退避与 800ms 离线宽限，
  *   只向这里推送“已被接受”的信号，Kotlin 不重复实现游标（避免镜像从 3 份变 4 份）。
- * - 演示主机（无引擎时的界面演示）。
  *
  * 所有命令失败抛 [HostException]；慢方法（目录浏览、预解析等）由调用方显示加载态。
  */
@@ -170,4 +169,5 @@ class HostException(
     val reason: String? = null,
     val retryable: Boolean = false,
     message: String? = null,
-) : Exception(message ?: reason ?: code.name)
+    cause: Throwable? = null,
+) : Exception(message ?: reason ?: code.name, cause)

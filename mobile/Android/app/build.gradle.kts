@@ -83,6 +83,12 @@ android {
         targetSdk = 37
         versionCode = 1
         versionName = "0.1.0"
+        // 只打包 :bridge 实际编译了 libfluxdown_mobile.so 的 ABI（JNA aar 自带 armeabi / mips 等无对应引擎库的 ABI，
+        // 留着会让这些设备装得上却在加载引擎时崩溃）。与 :bridge 同源：Gradle 属性 fluxdown.abis。
+        ndk {
+            abiFilters += providers.gradleProperty("fluxdown.abis").orElse("arm64-v8a,x86_64").get()
+                .split(',').map { it.trim() }.filter { it.isNotEmpty() }
+        }
     }
 
     buildTypes {
@@ -110,6 +116,7 @@ android {
 dependencies {
     implementation(project(":core"))
     implementation(project(":fluxui"))
+    implementation(project(":bridge"))
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.core.ktx)

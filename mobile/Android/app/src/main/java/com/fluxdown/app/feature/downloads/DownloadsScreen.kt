@@ -55,6 +55,7 @@ import androidx.compose.foundation.text.BasicText
 import android.view.accessibility.AccessibilityManager
 import com.fluxdown.app.R
 import com.fluxdown.app.actions.LocalTaskActions
+import com.fluxdown.app.feature.devices.localizedName
 import com.fluxdown.app.i18n.fill
 import com.fluxdown.app.i18n.str
 import com.fluxdown.app.nav.AppNavigator
@@ -123,11 +124,10 @@ internal fun GroupLabel.resolve(): String = when {
 }
 
 @Composable
-internal fun HostRef.title(): String = if (this is HostRef.Demo) stringResource(R.string.mobileDemoHost) else displayName
+internal fun HostRef.title(): String = localizedName()
 
 @Composable
 internal fun HostRef.subtitle(): String = when (this) {
-    is HostRef.Demo -> stringResource(R.string.mobileDemoHostSubtitle)
     is HostRef.Remote -> endpoint
     is HostRef.Local -> ""
 }

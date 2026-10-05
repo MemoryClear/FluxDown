@@ -27,8 +27,7 @@ output-metadata.json
 *.hprof
 *.trace
 
-# Rust 引擎经 cargo-ndk 生成的 .so（构建时产出，不入库）
-/app/src/main/jniLibs/
+# Rust 引擎经 cargo-ndk 生成的 .so / UniFFI 绑定位于 :bridge 的 build/ 下（构建时产出，不入库）
 
 # 签名材料（严禁入库）
 *.jks

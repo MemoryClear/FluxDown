@@ -50,6 +50,7 @@ import com.fluxdown.app.R
 import com.fluxdown.app.actions.LocalTaskActions
 import com.fluxdown.app.actions.TaskActions
 import com.fluxdown.app.feature.devices.DevicesScreen
+import com.fluxdown.app.feature.devices.AddHostSheet
 import com.fluxdown.app.feature.downloads.ActivitySheet
 import com.fluxdown.app.feature.downloads.DownloadsRailContext
 import com.fluxdown.app.feature.downloads.DownloadsRailFooter
@@ -71,6 +72,7 @@ import com.fluxdown.app.nav.AppTab
 import com.fluxdown.app.nav.LocalNavigator
 import com.fluxdown.app.nav.Route
 import com.fluxdown.app.nav.SheetRoute
+import com.fluxdown.app.service.DownloadServiceEffect
 import com.fluxdown.core.model.TaskStatus
 import com.fluxdown.fluxui.chrome.FluxDock
 import com.fluxdown.fluxui.chrome.FluxDockBadge
@@ -140,6 +142,8 @@ fun AppShell() {
 
     // 回到前台：文件跟踪重扫（10s 节流，对齐 RescanThrottle；空闲静默期间不轮询）
     LifecycleEventEffect(Lifecycle.Event.ON_START) { container.rescanOnForeground() }
+    // 本机有活跃 / 排队任务 → 前台服务（dataSync）；首次下载时请求通知权限
+    DownloadServiceEffect()
     val portal = remember { FluxPortalState() }
 
     CompositionLocalProvider(
@@ -292,6 +296,7 @@ private fun Sheets() {
     MoveToQueueSheet(route = sheet as? SheetRoute.MoveToQueue, onDismiss = nav::closeSheet)
     ViewOptionsSheet(visible = sheet == SheetRoute.ViewOptions, onDismiss = nav::closeSheet)
     HostSwitchSheet(visible = sheet == SheetRoute.HostSwitch, onDismiss = nav::closeSheet)
+    AddHostSheet(visible = sheet == SheetRoute.AddHost, onDismiss = nav::closeSheet)
     ActivitySheet(visible = sheet == SheetRoute.Activity, onDismiss = nav::closeSheet)
 }
 

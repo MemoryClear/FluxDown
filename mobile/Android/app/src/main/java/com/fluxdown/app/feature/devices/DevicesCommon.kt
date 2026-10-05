@@ -29,17 +29,16 @@ import com.fluxdown.fluxui.material.FluxGlassKind
 import com.fluxdown.fluxui.material.fluxGlass
 import com.fluxdown.fluxui.theme.FluxTheme
 
-/** 主机显示名：演示主机走 i18n，其余沿用主机自带名称。 */
+/** 主机显示名：本机走 i18n（存储里的 displayName 不随语言变化），远端沿用用户起的名称。 */
 @Composable
 fun HostRef.localizedName(): String = when (this) {
-    is HostRef.Demo -> str(R.string.mobileDemoHost)
-    is HostRef.Local, is HostRef.Remote -> displayName
+    is HostRef.Local -> str(R.string.mobileHostLocalName)
+    is HostRef.Remote -> displayName
 }
 
-/** 主机副标题：演示 = 模拟数据说明；本机 = 进程内引擎；远端 = 地址。 */
+/** 主机副标题：本机 = 进程内引擎；远端 = 地址。 */
 @Composable
 fun HostRef.localizedSubtitle(): String = when (this) {
-    is HostRef.Demo -> str(R.string.mobileDemoHostSubtitle)
     is HostRef.Local -> str(R.string.mobileHostLocalEngine)
     is HostRef.Remote -> endpoint
 }
