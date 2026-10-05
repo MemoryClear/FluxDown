@@ -16,6 +16,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.foundation.layout.Column
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalContext
+import com.fluxdown.fluxui.controls.FluxFieldAction
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -205,20 +212,122 @@ internal fun DownloadPage() {
 private fun GlassSectionScope.saveLocationRows(f: Form) {
     if (f.has("default_save_dir")) {
         row {
+            val container = LocalAppContainer.current
+            val hostRef by container.host.collectAsStateWithLifecycle()
             FluxFieldRow(
                 title = str(R.string.defaultSaveDir),
                 subtitle = str(R.string.defaultSaveDirDesc),
             ) {
-                CommitTextField(
-                    value = f.value("default_save_dir").orEmpty(),
-                    onCommit = { f.editor.set("default_save_dir", it.trim()) },
-                    enabled = !f.readOnly,
-                    placeholder = str(R.string.mobileSaveDirUnset),
-                )
+                if (hostRef is com.fluxdown.core.model.HostRef.Local) {
+                    LocalSaveDirPicker(f)
+                } else {
+                    // 远端主机：路径在服务器上，只能手填（手机无法浏览服务器目录）
+                    CommitTextField(
+                        value = f.value("default_save_dir").orEmpty(),
+                        onCommit = { f.editor.set("default_save_dir", it.trim()) },
+                        enabled = !f.readOnly,
+                        placeholder = str(R.string.mobileSaveDirUnset),
+                    )
+                }
             }
         }
     }
     switchRow(f, "download.remember_last_save_dir", R.string.rememberLastSaveDir, R.string.rememberLastSaveDirDesc)
+}
+
+/**
+ * 本机主机的保存目录：只读展示 + 系统目录选择器（SAF，映射为绝对路径）+ 快捷“系统 Download/FluxDown”
+ * + 偏离默认时一键恢复。不提供手填：手填路径极易写成不可写目录（引擎下载时才报 EPERM）。
+ *
+ * 能否写入只看系统真实结果（[isLocalDirWritable]）；共享存储里需要“所有文件访问”的目录，
+ * 不可写时引导授权，而不是在应用层另设白名单。系统选择器本身禁止选 Download 根 / Android/data
+ * 等目录（Android 11+ 隐私限制），可在其下新建子文件夹选择，或直接用快捷项。
+ */
+@Composable
+private fun LocalSaveDirPicker(f: Form) {
+    val context = LocalContext.current
+    val overlays = LocalFluxOverlays.current
+    val haptics = com.fluxdown.fluxui.theme.FluxTheme.haptics
+    val current = f.value("default_save_dir").orEmpty()
+    val defaultDir = remember(context) { com.fluxdown.app.ui.defaultLocalSaveDir(context).path }
+    val publicDir = remember { com.fluxdown.app.ui.publicDownloadSaveDir().path }
+    val notWritable = str(R.string.mobileSaveDirNotWritable)
+    val unmappable = str(R.string.mobilePickDirUnmappable)
+    val grantTitle = str(R.string.mobileAllFilesTitle)
+    val grantDesc = str(R.string.mobileAllFilesDescNative)
+    val grantAction = str(R.string.mobileGoGrant)
+    val cancel = str(R.string.cancel)
+
+    fun apply(dir: String) {
+        when {
+            com.fluxdown.app.ui.isLocalDirWritable(dir) -> if (dir != current) {
+                haptics.tick()
+                f.editor.set("default_save_dir", dir)
+            }
+            com.fluxdown.app.ui.canRequestAllFilesAccess(dir) -> {
+                haptics.reject()
+                overlays.showDialog(
+                    com.fluxdown.fluxui.overlay.FluxDialogSpec(
+                        title = grantTitle,
+                        message = grantDesc,
+                        icon = FluxIcons.FolderOpen,
+                        buttons = listOf(
+                            com.fluxdown.fluxui.overlay.FluxDialogButton(cancel),
+                            com.fluxdown.fluxui.overlay.FluxDialogButton(grantAction, com.fluxdown.fluxui.overlay.FluxDialogButtonStyle.Primary) {
+                                context.startActivity(com.fluxdown.app.ui.allFilesAccessIntent(context))
+                            },
+                        ),
+                    ),
+                )
+            }
+            else -> {
+                haptics.reject()
+                overlays.toast(notWritable.fill("dir" to dir), com.fluxdown.fluxui.overlay.FluxToastKind.Error)
+            }
+        }
+    }
+
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val path = com.fluxdown.app.ui.treeUriToPath(uri)
+        if (path == null) {
+            haptics.reject()
+            overlays.toast(unmappable, com.fluxdown.fluxui.overlay.FluxToastKind.Warn)
+        } else {
+            apply(path)
+        }
+    }
+    val shown = current.ifEmpty { defaultDir }.trimEnd('/')
+    val modified = shown != defaultDir.trimEnd('/')
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        FluxField(
+            value = shown,
+            onValueChange = {},
+            readOnly = true,
+            mono = true,
+            singleLine = false,
+            enabled = !f.readOnly,
+            trailing = {
+                Row {
+                    if (modified) {
+                        FluxFieldAction(FluxIcons.RotateCcw, str(R.string.restoreDefaultPath), onClick = { apply(defaultDir) })
+                    }
+                    FluxFieldAction(FluxIcons.FolderOpen, str(R.string.browse), onClick = { launcher.launch(null) })
+                }
+            },
+        )
+        if (shown != publicDir && !f.readOnly) {
+            com.fluxdown.fluxui.chrome.FluxPill(
+                text = str(R.string.mobileUsePublicDownloadDir),
+                selected = false,
+                onClick = { apply(publicDir) },
+                icon = FluxIcons.Download,
+                small = true,
+                toggleable = false,
+            )
+        }
+    }
 }
 
 private fun GlassSectionScope.behaviorRows(f: Form, queues: List<com.fluxdown.core.model.Queue>) {

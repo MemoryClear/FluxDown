@@ -3,7 +3,6 @@ package com.fluxdown.app
 import android.app.Application
 import android.content.Context
 import android.os.Build
-import android.os.Environment
 import android.util.Log
 import androidx.datastore.preferences.preferencesDataStore
 import com.fluxdown.app.data.AppearanceRepo
@@ -276,8 +275,7 @@ class AppContainer(context: Context) {
     private suspend fun openLocalSession(): HostSession {
         val (dataDir, saveDir) = withContext(Dispatchers.IO) {
             val data = File(appContext.filesDir, "fluxdown").also { it.mkdirs() }
-            val save = appContext.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
-                ?: File(appContext.filesDir, "downloads")
+            val save = com.fluxdown.app.ui.defaultLocalSaveDir(appContext)
             save.mkdirs()
             data.path to save.path
         }

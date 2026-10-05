@@ -2435,5 +2435,8 @@
   "mobileDlNotifChannelDesc": "Shown while downloads run on this phone so they keep going in the background",
   "mobileDlNotifActive": "{n} downloading",
   "mobileDlNotifWaiting": "{n} waiting",
-  "mobileDlNotifSpeed": "↓ {speed}"
+  "mobileDlNotifSpeed": "↓ {speed}",
+  "mobileSaveDirNotWritable": "Can't write to \"{dir}\". Android only allows the app's own folder or a folder you pick with Browse.",
+  "mobileUsePublicDownloadDir": "Use system Download/FluxDown",
+  "mobileAllFilesDescNative": "Android only lets FluxDown write here with \"All files access\". Grant it in system settings, then choose the folder again. The app folder and Download/FluxDown work without it."
 }

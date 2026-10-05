@@ -217,17 +217,3 @@ internal fun isValidSaveDir(dir: String): Boolean {
     val d = dir.trim()
     return d.isEmpty() || d.startsWith("/") || d.startsWith("\\\\") || Regex("^[A-Za-z]:[\\\\/]").containsMatchIn(d)
 }
-
-/** SAF 目录树 URI → 绝对路径（`primary:Download/X` → `/storage/emulated/0/Download/X`）；无法映射为 null。 */
-internal fun treeUriToPath(uri: Uri): String? {
-    val docId = runCatching { DocumentsContract.getTreeDocumentId(uri) }.getOrNull() ?: return null
-    val volume = docId.substringBefore(':')
-    val rel = docId.substringAfter(':', "").trim('/')
-    val base = when {
-        volume == "primary" -> "/storage/emulated/0"
-        volume.isNotEmpty() && docId.contains(':') && volume != "raw" && volume != "home" -> "/storage/$volume"
-        volume == "raw" -> return rel.takeIf { docId.substringAfter(':').startsWith("/") }?.let { "/$it" }
-        else -> return null
-    }
-    return if (rel.isEmpty()) base else "$base/$rel"
-}

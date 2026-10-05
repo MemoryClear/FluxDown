@@ -171,6 +171,12 @@ private fun NewDownloadSheetImpl(visible: Boolean, prefill: String, onDismiss: (
             haptics.reject()
             return
         }
+        // 本机主机：目录不可写（分区存储外 / 拼错路径）在提交前拦住，避免引擎报 EPERM
+        if (container.host.value is com.fluxdown.core.model.HostRef.Local && !com.fluxdown.app.ui.isLocalDirWritable(form.saveDir)) {
+            haptics.reject()
+            overlays.toast(context.str(R.string.mobileSaveDirNotWritable, "dir" to form.saveDir.trim()), FluxToastKind.Error)
+            return
+        }
         if (!checksumValid(form)) {
             haptics.reject()
             advancedOpen = true
@@ -309,7 +315,7 @@ private fun NewDownloadContent(form: NewDownloadState, onOpenAdvanced: () -> Uni
     }
     val dirLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
-        val path = treeUriToPath(uri)
+        val path = com.fluxdown.app.ui.treeUriToPath(uri)
         if (path == null) {
             haptics.reject()
             overlays.toast(unmappable, FluxToastKind.Warn)
