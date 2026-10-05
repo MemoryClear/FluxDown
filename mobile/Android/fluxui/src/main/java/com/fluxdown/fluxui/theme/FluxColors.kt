@@ -6,8 +6,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.colorspace.ColorSpaces
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.pow
 import kotlin.math.sqrt
 
 /** 文件分类（分类色点只做辅助提示；权威信号是图块内的类别图标）。 */
@@ -177,12 +179,16 @@ private fun minContrast(text: Color, a: Color, b: Color) = min(contrast(text, a)
 /**
  * 强调色护栏（§2.3）：保证按钮标签对渐变两端 ≥ 4.5:1，accentHi 对 canvas ≥ 4.5:1。
  * 纯函数；`lerp` 即 Oklab 插值，与 CSS `color-mix(in oklab)` 等价。
+ *
+ * 浅色模式为满足白字对比度需要压暗强调色：只沿 OKLab 明度轴移动并保持彩度（[withOklabLightness]），
+ * 不向黑色混合——混黑会同时削掉约 25% 彩度，蓝色会变成发灰的牛仔蓝，看起来“不活跃”。
  */
 fun resolveAccent(seed: Color, dark: Boolean, canvas: Color): AccentSlots {
     val inkOn = Color(0xFF04101F)
     val white = Color.White
-    var fa = if (dark) lerp(seed, white, .24f) else lerp(seed, white, .08f)
-    var fb = if (dark) seed else lerp(seed, Color.Black, .12f)
+    val l0 = seed.oklabLightness()
+    var fa = if (dark) lerp(seed, white, .24f) else seed.withOklabLightness(l0 + (1f - l0) * .08f)
+    var fb = if (dark) seed else seed.withOklabLightness(l0 * .88f)
     val pref = if (dark) inkOn else white
     val alt = if (dark) white else inkOn
     var on = pref
@@ -190,28 +196,98 @@ fun resolveAccent(seed: Color, dark: Boolean, canvas: Color): AccentSlots {
         if (minContrast(alt, fa, fb) >= 4.5f) {
             on = alt
         } else {
-            val to = if (dark) white else Color.Black
+            val step = if (dark) .01f else -.01f
+            val sourceA = if (dark) fa else seed
+            val startA = if (dark) fa.oklabLightness() else l0 + (1f - l0) * .08f
+            val startB = if (dark) l0 else l0 * .88f
             var i = 0
-            while (i < 40 && minContrast(pref, fa, fb) < 4.5f) {
-                fa = lerp(fa, to, .04f)
-                fb = lerp(fb, to, .04f)
+            // 每次从原色映射，避免反复 sRGB 量化和色域裁剪累计损失彩度。
+            while (i < 100 && minContrast(pref, fa, fb) < 4.5f) {
                 i++
+                fa = sourceA.withOklabLightness(startA + step * i)
+                fb = seed.withOklabLightness(startB + step * i)
             }
         }
     }
-    var hi = if (dark) lerp(seed, white, .24f) else lerp(seed, Color.Black, .12f)
+    var hi = if (dark) lerp(seed, white, .24f) else seed.withOklabLightness(l0 * .88f)
     if (!dark) {
-        var k = .12f
-        while (contrast(hi, canvas) < 4.5f && k < .8f) {
-            k += .02f
-            hi = lerp(seed, Color.Black, k)
+        var i = 0
+        while (i < 100 && contrast(hi, canvas) < 4.5f) {
+            i++
+            hi = seed.withOklabLightness(l0 * .88f - .01f * i)
         }
     }
     return AccentSlots(fa, fb, on, hi)
 }
 
+/** OKLab 明度 L（0..1）。 */
+internal fun Color.oklabLightness(): Float = toOklab()[0].toFloat()
+
+/**
+ * 只把 OKLab 明度改为 [lightness]（夹到 0..1），保持色相与彩度；目标超出 sRGB 色域时
+ * 按比例二分收缩彩度直到落回色域（不做逐通道截断，避免色相偏移）。α 保持不变。
+ */
+internal fun Color.withOklabLightness(lightness: Float): Color {
+    val lab = toOklab()
+    val l = lightness.coerceIn(0f, 1f).toDouble()
+    var k = 1.0
+    if (!inSrgbGamut(oklabToLinear(l, lab[1], lab[2]))) {
+        var lo = 0.0
+        var hi = 1.0
+        repeat(20) {
+            val mid = (lo + hi) / 2
+            if (inSrgbGamut(oklabToLinear(l, lab[1] * mid, lab[2] * mid))) lo = mid else hi = mid
+        }
+        k = lo
+    }
+    val lin = oklabToLinear(l, lab[1] * k, lab[2] * k)
+    return Color(linearToSrgb(lin[0]), linearToSrgb(lin[1]), linearToSrgb(lin[2]), alpha)
+}
+
+private const val GAMUT_EPS = 1e-4
+
+private fun inSrgbGamut(lin: DoubleArray): Boolean = lin.all { it >= -GAMUT_EPS && it <= 1 + GAMUT_EPS }
+
+private fun srgbToLinear(c: Float): Double {
+    val d = c.toDouble()
+    return if (d <= 0.04045) d / 12.92 else ((d + 0.055) / 1.055).pow(2.4)
+}
+
+private fun linearToSrgb(c: Double): Float {
+    val d = c.coerceIn(0.0, 1.0)
+    return (if (d <= 0.0031308) 12.92 * d else 1.055 * d.pow(1 / 2.4) - 0.055).toFloat()
+}
+
+/** sRGB → OKLab（Björn Ottosson 参考矩阵）。 */
+private fun Color.toOklab(): DoubleArray {
+    val s = convert(ColorSpaces.Srgb)
+    val r = srgbToLinear(s.red)
+    val g = srgbToLinear(s.green)
+    val b = srgbToLinear(s.blue)
+    val l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b)
+    val m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b)
+    val q = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b)
+    return doubleArrayOf(
+        0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * q,
+        1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * q,
+        0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * q,
+    )
+}
+
+/** OKLab → 线性 sRGB（可能越界，由调用方判定色域）。 */
+private fun oklabToLinear(lightness: Double, a: Double, b: Double): DoubleArray {
+    val l = (lightness + 0.3963377774 * a + 0.2158037573 * b).pow(3)
+    val m = (lightness - 0.1055613458 * a - 0.0638541728 * b).pow(3)
+    val q = (lightness - 0.0894841775 * a - 1.2914855480 * b).pow(3)
+    return doubleArrayOf(
+        4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * q,
+        -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * q,
+        -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * q,
+    )
+}
+
 /** OKLab 彩度 sqrt(a²+b²)，用于判定壁纸取色是否过灰（< 0.04 回退品牌蓝）。 */
 fun Color.oklabChroma(): Float {
-    val c = convert(androidx.compose.ui.graphics.colorspace.ColorSpaces.Oklab)
+    val c = convert(ColorSpaces.Oklab)
     return sqrt(c.green * c.green + c.blue * c.blue)
 }

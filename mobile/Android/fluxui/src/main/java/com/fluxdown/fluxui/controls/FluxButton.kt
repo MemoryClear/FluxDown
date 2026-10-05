@@ -33,7 +33,6 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.boundsInRoot
@@ -54,6 +53,7 @@ import com.fluxdown.fluxui.icons.FluxIcons
 import com.fluxdown.fluxui.material.FluxGlass
 import com.fluxdown.fluxui.material.FluxGlassKind
 import com.fluxdown.fluxui.material.fluxGlass
+import com.fluxdown.fluxui.material.fluxAccentSurface
 import com.fluxdown.fluxui.material.fluxGlow
 import com.fluxdown.fluxui.theme.FluxText
 import com.fluxdown.fluxui.theme.FluxTheme
@@ -62,15 +62,22 @@ import com.fluxdown.fluxui.theme.fluxPressable
 /** 按钮变体（§12.23）：主 / 次 / 幽灵 / 危险（危险没有实心红底，只有 coral 字与描边）。 */
 enum class ButtonVariant { Primary, Secondary, Ghost, Danger }
 
-/** 按钮尺寸：高 / 圆角 / 水平内边距 / 图标。`Sm`、`Xs` 视觉不足 48dp，命中区自动补足。 */
-enum class ButtonSize(internal val height: Dp, internal val radius: Dp, internal val hPad: Dp, internal val icon: Dp, internal val spinner: Dp) {
-    Default(48.dp, 24.dp, 22.dp, 20.dp, 22.dp),
-    Sm(36.dp, 18.dp, 16.dp, 20.dp, 18.dp),
-    Xs(30.dp, 15.dp, 12.dp, 16.dp, 16.dp),
+/** 按钮尺寸：高 / 圆角 / 水平内边距 / 图标 / 主按钮投影高度。`Sm`、`Xs` 视觉不足 48dp，命中区自动补足。 */
+enum class ButtonSize(
+    internal val height: Dp,
+    internal val radius: Dp,
+    internal val hPad: Dp,
+    internal val icon: Dp,
+    internal val spinner: Dp,
+    internal val lift: Dp,
+) {
+    Default(48.dp, 24.dp, 22.dp, 20.dp, 22.dp, 6.dp),
+    Sm(36.dp, 18.dp, 16.dp, 20.dp, 18.dp, 4.dp),
+    Xs(30.dp, 15.dp, 12.dp, 16.dp, 16.dp, 3.dp),
 }
 
 /**
- * 按钮。按压 `scale .97`（`press` 弹簧），禁用 α .38，主按钮带 CTA 辉光。
+ * 按钮。按压 `scale .97`（`press` 弹簧），禁用 α .38，主按钮为强调色实心面（[fluxAccentSurface]，带向下投影）。
  * 高度只设下限（200% 字体时标签可折 2 行）；[loading] 时标签隐藏（保持宽度）并显示旋转环，点击被忽略。
  */
 @Composable
@@ -101,7 +108,6 @@ fun FluxButton(
         (if (size == ButtonSize.Default) t.weight(t.body, 600).copy(letterSpacing = (-0.005f).em) else t.weight(t.sm, 600))
             .copy(textAlign = TextAlign.Center)
     }
-    val edge = remember(c) { lerp(c.accent, Color.White, 0.3f) }
 
     Box(
         modifier
@@ -114,9 +120,7 @@ fun FluxButton(
         contentAlignment = Alignment.Center,
     ) {
         val surface = when (variant) {
-            ButtonVariant.Primary -> Modifier
-                .fluxGlow(c.accent.copy(alpha = 0.6f), 11.dp, shape, spread = (-4).dp, dy = 4.dp)
-                .fluxAccentFill(shape, c.accentFillA, c.accentFillB, edge)
+            ButtonVariant.Primary -> Modifier.fluxAccentSurface(c, shape, lift = size.lift)
             ButtonVariant.Secondary -> Modifier
                 .fluxGlass(FluxGlass.G3, shape, kind = FluxGlassKind.Flat, strongLine = true)
             ButtonVariant.Danger -> Modifier
@@ -222,7 +226,8 @@ fun FluxIconButton(
 data class SplitMenuAction(val label: String, val onClick: () -> Unit)
 
 /**
- * 分裂按钮（§12.24）：主区执行默认动作，箭头区请求菜单。两区独立按压（叠白 α .14）。
+ * 分裂按钮（§12.24）：主区执行默认动作，箭头区请求菜单。两区独立按压（叠 `onAccent` α .12 状态层），
+ * 两区之间是上下内缩的 1dp `onAccent` 细分隔线。
  * 本组件不依赖浮层：点箭头区回调 [onMenuClick]，参数为箭头区在根坐标系的包围盒，由应用以它作锚点弹出菜单。
  * [menuActions] 仅用于 TalkBack 自定义动作（视觉菜单由应用负责）。
  */
@@ -240,7 +245,6 @@ fun FluxSplitButton(
     val c = FluxTheme.colors
     val t = FluxTheme.type
     val shape = remember { RoundedCornerShape(26.dp) }
-    val edge = remember(c) { lerp(c.accent, Color.White, 0.3f) }
     val mainSource = remember { MutableInteractionSource() }
     val arrowSource = remember { MutableInteractionSource() }
     val mainPressed by mainSource.collectIsPressedAsState()
@@ -252,8 +256,7 @@ fun FluxSplitButton(
         modifier
             .alpha(if (enabled) 1f else 0.38f)
             .fluxFocusRing(shape)
-            .fluxGlow(c.accent.copy(alpha = 0.6f), 11.dp, shape, spread = (-4).dp, dy = 4.dp)
-            .fluxAccentFill(shape, c.accentFillA, c.accentFillB, edge)
+            .fluxAccentSurface(c, shape, lift = 6.dp)
             .clip(shape)
             .heightIn(min = 52.dp)
             .height(IntrinsicSize.Min),
@@ -263,7 +266,7 @@ fun FluxSplitButton(
                 .weight(1f)
                 .fillMaxHeight()
                 .clickable(interactionSource = mainSource, indication = null, enabled = enabled, role = Role.Button, onClick = onClick)
-                .drawBehind { if (mainPressed) drawRect(Color.White.copy(alpha = 0.14f)) }
+                .drawBehind { if (mainPressed) drawRect(c.onAccent.copy(alpha = 0.12f)) }
                 .padding(start = 24.dp, end = 20.dp),
             contentAlignment = Alignment.Center,
         ) {
@@ -281,10 +284,13 @@ fun FluxSplitButton(
                     arrowCoords[0]?.boundsInRoot()?.let(onMenuClick)
                 }
                 .drawBehind {
-                    if (arrowPressed) drawRect(Color.White.copy(alpha = 0.14f))
-                    val hw = 0.5.dp.toPx()
-                    drawRect(Color.Black.copy(alpha = 0.2f), size = Size(hw, size.height))
-                    drawRect(Color.White.copy(alpha = 0.22f), topLeft = Offset(hw, 0f), size = Size(1.dp.toPx(), size.height))
+                    if (arrowPressed) drawRect(c.onAccent.copy(alpha = 0.12f))
+                    val inset = 14.dp.toPx()
+                    drawRect(
+                        c.onAccent.copy(alpha = 0.28f),
+                        topLeft = Offset(0f, inset),
+                        size = Size(1.dp.toPx(), (size.height - 2 * inset).coerceAtLeast(0f)),
+                    )
                 }
                 .semantics {
                     contentDescription = menuLabel

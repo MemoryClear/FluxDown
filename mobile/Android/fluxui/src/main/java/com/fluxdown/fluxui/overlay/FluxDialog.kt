@@ -27,7 +27,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.graphicsLayer
@@ -45,12 +44,12 @@ import com.fluxdown.fluxui.icons.FluxIcon
 import com.fluxdown.fluxui.material.FluxBlur
 import com.fluxdown.fluxui.material.FluxGlass
 import com.fluxdown.fluxui.material.fluxGlass
-import com.fluxdown.fluxui.material.fluxGlow
+import com.fluxdown.fluxui.material.fluxAccentSurface
 import com.fluxdown.fluxui.theme.FluxText
 import com.fluxdown.fluxui.theme.FluxTheme
 import com.fluxdown.fluxui.theme.fluxPressable
 
-/** 对话框按钮样式：Primary = 强调渐变；Secondary = 幽灵（取消）；Destructive = 危险描边。 */
+/** 对话框按钮样式：Primary = 强调色实心面；Secondary = 幽灵（取消）；Destructive = 危险描边。 */
 enum class FluxDialogButtonStyle { Primary, Secondary, Destructive }
 
 /**
@@ -230,9 +229,7 @@ private fun DialogButton(button: FluxDialogButton, modifier: Modifier, onClick: 
         .heightIn(min = 48.dp)
         .fluxPressable(onClick, role = Role.Button, interactionSource = source)
     val styled = when (button.style) {
-        FluxDialogButtonStyle.Primary -> base
-            .fluxGlow(c.accent.copy(alpha = 0.6f), 11.dp, shape, spread = (-4).dp, dy = 4.dp)
-            .background(Brush.verticalGradient(listOf(c.accentFillA, c.accentFillB)), shape)
+        FluxDialogButtonStyle.Primary -> base.fluxAccentSurface(c, shape, lift = 4.dp)
         FluxDialogButtonStyle.Secondary -> base
             .background(if (pressed) c.glass2 else Color.Transparent, shape)
         FluxDialogButtonStyle.Destructive -> base

@@ -25,7 +25,6 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.graphics.Shape
@@ -207,26 +206,6 @@ internal fun InlineSpinner(size: Dp, color: Color, modifier: Modifier = Modifier
         rotate(rot?.value ?: 0f) {
             drawArc(color, -90f, 90f, false, tl, d, style = Stroke(sw, cap = StrokeCap.Round))
         }
-    }
-}
-
-/** 垂直渐变填充（主按钮 / 开关 ON）：强调渐变 + 顶沿 1dp 内高光 + 0.5dp 提亮描边。 */
-internal fun Modifier.fluxAccentFill(
-    shape: Shape,
-    fillA: Color,
-    fillB: Color,
-    edge: Color,
-    highlight: Boolean = true,
-): Modifier = drawWithCache {
-    val outline = shape.createOutline(size, layoutDirection, this)
-    val fill = Brush.verticalGradient(listOf(fillA, fillB))
-    val hl = Brush.verticalGradient(0f to Color.White.copy(alpha = 0.5f), 0.14f to Color.Transparent)
-    val hw = 0.5.dp.toPx()
-    val hl1 = 1.dp.toPx()
-    onDrawBehind {
-        drawOutline(outline, fill)
-        if (highlight) drawOutline(outline, hl, style = Stroke(hl1))
-        drawOutline(outline, edge, style = Stroke(hw))
     }
 }
 

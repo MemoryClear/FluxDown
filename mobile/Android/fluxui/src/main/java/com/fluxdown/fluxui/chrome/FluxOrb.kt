@@ -30,17 +30,11 @@ import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.BlurEffect
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.CompositingStrategy
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.PathOperation
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.PointerInputChange
@@ -60,7 +54,6 @@ import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.fluxdown.fluxui.icons.FluxIcon
 import com.fluxdown.fluxui.icons.FluxIcons
@@ -68,8 +61,7 @@ import com.fluxdown.fluxui.material.FluxBlur
 import com.fluxdown.fluxui.material.FluxGlass
 import com.fluxdown.fluxui.material.FluxGlassKind
 import com.fluxdown.fluxui.material.fluxGlass
-import com.fluxdown.fluxui.material.fluxGlow
-import com.fluxdown.fluxui.theme.FluxColors
+import com.fluxdown.fluxui.material.fluxAccentSurface
 import com.fluxdown.fluxui.theme.FluxGlassMode
 import com.fluxdown.fluxui.theme.FluxText
 import com.fluxdown.fluxui.theme.FluxTheme
@@ -115,7 +107,7 @@ fun rememberFluxOrbState(): FluxOrbState = remember { FluxOrbState() }
 private val OrbSize = 64.dp
 
 /**
- * 新建球（01 §12.3）：64dp 强调色球，全应用唯一的 CTA 辉光（§5.5）。
+ * 新建球（01 §12.3）：64dp 强调色球（[fluxAccentSurface]，全应用最高的投影层级，§5.5）。
  *
  * - 点按 → [onClick]；按住 [com.fluxdown.fluxui.theme.FluxMotion.orbHoldMs]（380ms）→ `longPress` 触感 + 扇形展开
  *   （由 [FluxOrbFanLayer] 绘制），手指滑过扇形项每进入新项 `tick`，在项上松手 → `confirm` + [onAction]，落空则收起。
@@ -254,7 +246,7 @@ fun FluxOrb(
                     scaleY = s
                 },
         ) {
-            // 强调色球：辉光 + 渐变 + 内光（选择模式淡出）。
+            // 强调色球：投影 + 渐变 + 内光（选择模式淡出）。
             Box(
                 Modifier
                     .fillMaxSize()
@@ -262,8 +254,7 @@ fun FluxOrb(
                         alpha = 1f - sel.value.coerceIn(0f, 1f)
                         compositingStrategy = CompositingStrategy.ModulateAlpha
                     }
-                    .orbGlows(c)
-                    .orbSurface(c),
+                    .fluxAccentSurface(c, CircleShape, lift = 10.dp),
             )
             if (glassComposed) {
                 Box(
@@ -294,63 +285,6 @@ fun FluxOrb(
                 )
             }
         }
-    }
-}
-
-/** 外辉光：全应用唯一允许的 CTA 辉光（深色两层，浅色一层）。σ = CSS 模糊半径 / 2。 */
-private fun Modifier.orbGlows(c: FluxColors): Modifier =
-    if (c.dark) {
-        this
-            .fluxGlow(c.accentGlow, 23.dp, CircleShape, spread = (-6).dp)
-            .fluxGlow(c.accent.copy(alpha = 0.70f), 14.dp, CircleShape, spread = (-2).dp, dy = 6.dp)
-    } else {
-        this.fluxGlow(c.accent.copy(alpha = 0.60f), 12.dp, CircleShape, spread = (-4).dp, dy = 6.dp)
-    }
-
-/** 球面：径向渐变 + 顶部内高光 + 底部内阴影（仅深色）+ 0.5dp 外圈。 */
-private fun Modifier.orbSurface(c: FluxColors): Modifier = drawWithCache {
-    val w = size.width
-    val r = w / 2f
-    val center = Offset(r, size.height / 2f)
-    val fill = Brush.radialGradient(
-        0f to lerp(c.accentHi, Color.White, 0.18f),
-        0.34f to c.accentFillA,
-        1f to c.accentFillB,
-        center = Offset(w * 0.30f, size.height * 0.18f),
-        radius = w * 1.2f,
-    )
-    val circle = Path().apply { addOval(Rect(center, r)) }
-    val hlDy = 1.5.dp.toPx()
-    val topCrescent = Path.combine(
-        PathOperation.Difference,
-        circle,
-        Path().apply { addOval(Rect(Offset(center.x, center.y + hlDy), r)) },
-    )
-    val hlAlpha = if (c.dark) 0.55f else 0.50f
-    val ring = lerp(c.accent, Color.White, 0.4f)
-    val hw = 0.5.dp.toPx()
-    var innerLayer: androidx.compose.ui.graphics.layer.GraphicsLayer? = null
-    if (c.dark) {
-        val shift = 8.dp.toPx()
-        val bottomCrescent = Path.combine(
-            PathOperation.Difference,
-            circle,
-            Path().apply { addOval(Rect(Offset(center.x, center.y - shift), r)) },
-        )
-        val sigma = 8.dp.toPx()
-        val layerSize = IntSize(size.width.toInt(), size.height.toInt())
-        innerLayer = obtainGraphicsLayer().apply {
-            renderEffect = BlurEffect(sigma, sigma, TileMode.Decal)
-            record(this@drawWithCache, layoutDirection, layerSize) {
-                drawPath(bottomCrescent, c.accent)
-            }
-        }
-    }
-    onDrawBehind {
-        drawCircle(fill, radius = r, center = center)
-        innerLayer?.let { layer -> clipPath(circle) { drawLayer(layer) } }
-        drawPath(topCrescent, Color.White.copy(alpha = hlAlpha))
-        drawCircle(ring, radius = r + hw / 2f, center = center, style = Stroke(hw))
     }
 }
 

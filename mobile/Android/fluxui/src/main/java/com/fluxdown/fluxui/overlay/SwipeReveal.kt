@@ -52,7 +52,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import com.fluxdown.fluxui.icons.FluxIcon
-import com.fluxdown.fluxui.material.fluxGlow
+import com.fluxdown.fluxui.material.fluxAccentSurface
 import com.fluxdown.fluxui.theme.FluxText
 import com.fluxdown.fluxui.theme.FluxTheme
 import com.fluxdown.fluxui.theme.fluxPressable
@@ -62,7 +62,7 @@ import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-/** 动作盘语气：Accent（渐变 + 辉光）· Danger（coral）· Warn（amber）· Neutral（glass3）。 */
+/** 动作盘语气：Accent（强调色实心面）· Danger（coral）· Warn（amber）· Neutral（glass3）。 */
 enum class FluxSwipeTone { Neutral, Accent, Danger, Warn }
 
 /** 滑出动作盘：宽 68、r17、图标 20 + 11/600 标签。 */
@@ -283,25 +283,26 @@ fun SwipeReveal(
     }
 }
 
+/** [accent] = 强调色实心面（[fluxAccentSurface]，忽略 [bg] / [border]）。 */
 @Immutable
-private class SwipeToneStyle(val bg: Brush, val solid: Color, val border: Color, val fg: Color, val glow: Color?)
+private class SwipeToneStyle(val bg: Brush, val solid: Color, val border: Color, val fg: Color, val accent: Boolean = false)
 
 @Composable
 private fun rememberSwipeTones(): Map<FluxSwipeTone, SwipeToneStyle> {
     val c = FluxTheme.colors
     return remember(c) {
         mapOf(
-            FluxSwipeTone.Neutral to SwipeToneStyle(Brush.verticalGradient(listOf(c.glass3, c.glass3)), c.glass3, c.hairlineStrong, c.ink, null),
+            FluxSwipeTone.Neutral to SwipeToneStyle(Brush.verticalGradient(listOf(c.glass3, c.glass3)), c.glass3, c.hairlineStrong, c.ink),
             FluxSwipeTone.Accent to SwipeToneStyle(
-                Brush.verticalGradient(listOf(c.accentFillA, c.accentFillB)), c.accent, Color.Transparent, c.onAccent, c.accentGlow,
+                Brush.verticalGradient(listOf(c.accentFillA, c.accentFillB)), c.accent, Color.Transparent, c.onAccent, accent = true,
             ),
             FluxSwipeTone.Danger to SwipeToneStyle(
                 Brush.verticalGradient(listOf(c.coral.copy(alpha = 0.22f).compositeOver(c.glass2), c.coral.copy(alpha = 0.22f).compositeOver(c.glass2))),
-                c.coral, c.coral.copy(alpha = 0.40f), c.coralText, null,
+                c.coral, c.coral.copy(alpha = 0.40f), c.coralText,
             ),
             FluxSwipeTone.Warn to SwipeToneStyle(
                 Brush.verticalGradient(listOf(c.amber.copy(alpha = 0.20f).compositeOver(c.glass2), c.amber.copy(alpha = 0.20f).compositeOver(c.glass2))),
-                c.amber, c.amber.copy(alpha = 0.36f), c.amberText, null,
+                c.amber, c.amber.copy(alpha = 0.36f), c.amberText,
             ),
         )
     }
@@ -335,6 +336,7 @@ private fun ActionSide(
     onAction: (FluxSwipeAction) -> Unit,
 ) {
     if (actions.isEmpty()) return
+    val c = FluxTheme.colors
     val type = FluxTheme.type
     val shape = FluxTheme.shapes.tileLg
     val labelStyle = remember(type) { type.weight(type.micro, 600).copy(letterSpacing = 0.02.em) }
@@ -359,9 +361,13 @@ private fun ActionSide(
                         scaleX = s
                         scaleY = s
                     }
-                    .then(if (tone.glow != null) Modifier.fluxGlow(tone.glow, 10.dp, shape, spread = (-4).dp) else Modifier)
-                    .background(tone.bg, shape)
-                    .border(0.5.dp, tone.border, shape)
+                    .then(
+                        if (tone.accent) {
+                            Modifier.fluxAccentSurface(c, shape)
+                        } else {
+                            Modifier.background(tone.bg, shape).border(0.5.dp, tone.border, shape)
+                        },
+                    )
                     .fluxPressable({ onAction(a) }, role = Role.Button)
                     .padding(horizontal = 4.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,

@@ -53,6 +53,7 @@ import com.fluxdown.fluxui.icons.FluxIcons
 import com.fluxdown.fluxui.material.FluxBlur
 import com.fluxdown.fluxui.material.FluxGlass
 import com.fluxdown.fluxui.material.FluxGlassKind
+import com.fluxdown.fluxui.material.fluxAccentSurface
 import com.fluxdown.fluxui.material.fluxGlass
 import com.fluxdown.fluxui.material.fluxGlow
 import com.fluxdown.fluxui.theme.FluxScaleGroup
@@ -158,7 +159,7 @@ private fun DefaultBrandMark(name: String) {
     }
 }
 
-/** 全宽主按钮（`.btn.primary`：accentFillA → accentFillB 渐变 + 顶沿内光 + 外圈 + 柔辉光）。 */
+/** 全宽主按钮（`.btn.primary`：强调色实心面 [fluxAccentSurface] + 向下投影）。 */
 @Composable
 private fun RailPrimaryButton(label: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val c = FluxTheme.colors
@@ -170,19 +171,7 @@ private fun RailPrimaryButton(label: String, onClick: () -> Unit, modifier: Modi
             .fillMaxWidth()
             .height(48.dp)
             .fluxPressable(onClick = onClick, role = Role.Button)
-            .fluxGlow(c.accent.copy(alpha = 0.60f), 11.dp, shape, spread = (-4).dp, dy = 4.dp)
-            .drawWithCache {
-                val fill = Brush.verticalGradient(listOf(c.accentFillA, c.accentFillB))
-                val outline = shape.createOutline(size, layoutDirection, this)
-                val hl = Brush.verticalGradient(0f to Color.White.copy(alpha = 0.5f), 0.16f to Color.Transparent)
-                val ring = lerp(c.accent, Color.White, 0.3f)
-                val hw = 0.5.dp.toPx()
-                onDrawBehind {
-                    drawOutline(outline, fill)
-                    drawOutline(outline, hl, style = Stroke(1.dp.toPx()))
-                    drawOutline(outline, ring, style = Stroke(hw))
-                }
-            }
+            .fluxAccentSurface(c, shape, lift = 6.dp)
             .padding(horizontal = 22.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
         verticalAlignment = Alignment.CenterVertically,
