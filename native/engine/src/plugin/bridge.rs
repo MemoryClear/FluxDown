@@ -1495,6 +1495,7 @@ fn ytdlp_option_kind(name: &str) -> Option<YtdlpOpt> {
         | "--convert-thumbnails"
         | "--impersonate"
         | "--print"
+        | "--parse-metadata"
         | "--compat-options"
         | "--video-password"
         | "--username"
@@ -1833,6 +1834,12 @@ mod tests {
                 "node",
                 "--cookies",
                 "cookies.txt",
+                "--parse-metadata",
+                "automatic_captions:(?P<automatic_captions>)",
+                "--parse-metadata",
+                "heatmap:(?P<heatmap>)",
+                "--parse-metadata",
+                "subtitles:(?P<subtitles>)",
                 "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
             ],
             vec![
