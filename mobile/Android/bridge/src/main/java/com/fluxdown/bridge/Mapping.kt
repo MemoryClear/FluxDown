@@ -88,6 +88,7 @@ internal fun HostSnapshotDto.toCore() = HostSnapshot(
     cloudDevices = cloudDevices.map { it.toCore() },
     linkDevices = linkDevices.map { it.toCore() },
     categories = categories.map { it.toCore() },
+    sections = sections,
 )
 
 internal fun HostEventDto.toCore(): HostEvent = when (this) {
@@ -120,6 +121,8 @@ internal fun HostEventDto.toCore(): HostEvent = when (this) {
     is HostEventDto.CloudDevicesChanged -> HostEvent.CloudDevicesChanged(devices.map { it.toCore() })
     is HostEventDto.LinkedDevicesChanged -> HostEvent.LinkedDevicesChanged(devices.map { it.toCore() })
     is HostEventDto.CategoriesChanged -> HostEvent.CategoriesChanged(categories.map { it.toCore() })
+    is HostEventDto.SectionChanged -> HostEvent.SectionChanged(name, json)
+    is HostEventDto.Notice -> HostEvent.Notice(name, json)
 }
 
 internal fun HostInfoDto.toCore() = HostInfo(

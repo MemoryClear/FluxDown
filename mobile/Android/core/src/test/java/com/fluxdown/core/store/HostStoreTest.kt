@@ -107,4 +107,38 @@ class HostStoreTest {
         advanceUntilIdle()
         assertEquals(20L, s.state.value.speeds.getValue("a").down)
     }
+
+    @Test
+    fun sectionChangedReplacesTheSectionImmediatelyAndNoticesDoNotTouchState() = runTest {
+        val s = store()
+        s.apply(
+            HostSignal.Snapshot(
+                HostSnapshot(
+                    info = HostInfo("t", "1", 7, emptySet()),
+                    daemonConnected = true,
+                    tasks = emptyList(),
+                    runtime = emptyMap(),
+                    queues = emptyList(),
+                    queuePositions = emptyMap(),
+                    groups = emptyList(),
+                    stats = RuntimeStats(),
+                    priorityTaskId = null,
+                    pendingSelections = emptyList(),
+                    config = emptyMap(),
+                    configRevision = 1,
+                    rssSources = emptyList(),
+                    cloudDevices = emptyList(),
+                    linkDevices = emptyList(),
+                    sections = mapOf("agent.gateway" to """{"takeoverEnabled":false}"""),
+                ),
+            ),
+        )
+        assertEquals("""{"takeoverEnabled":false}""", s.state.value.sections["agent.gateway"])
+        s.apply(HostSignal.Event(HostEvent.SectionChanged("agent.gateway", """{"takeoverEnabled":true}""")))
+        assertEquals("""{"takeoverEnabled":true}""", s.state.value.sections["agent.gateway"])
+        val before = s.state.value
+        s.apply(HostSignal.Event(HostEvent.Notice("captureTasksStarted", """["t1"]""")))
+        advanceUntilIdle()
+        assertEquals(before, s.state.value)
+    }
 }

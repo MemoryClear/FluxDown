@@ -77,6 +77,18 @@ class MappingTest {
     }
 
     @Test
+    fun sectionAndNoticeEventsKeepNameAndJson() {
+        assertEquals(
+            HostEvent.SectionChanged("agent.gateway", """{"takeoverEnabled":true}"""),
+            HostEventDto.SectionChanged("agent.gateway", """{"takeoverEnabled":true}""").toCore(),
+        )
+        assertEquals(
+            HostEvent.Notice("duplicateTorrent", """{"type":"duplicateTorrent"}"""),
+            HostEventDto.Notice("duplicateTorrent", """{"type":"duplicateTorrent"}""").toCore(),
+        )
+    }
+
+    @Test
     fun selectionOutcomesRoundTrip() {
         val outcomes = listOf(
             SelectionOutcome.Hls(2),

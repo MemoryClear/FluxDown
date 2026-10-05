@@ -17,6 +17,7 @@ mod link;
 mod local;
 mod projection;
 mod remote;
+pub mod sections;
 mod session;
 
 #[cfg(test)]

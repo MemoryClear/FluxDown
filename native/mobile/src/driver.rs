@@ -356,11 +356,11 @@ impl Driver {
                         need_resync = true;
                         break;
                     }
-                    FrameOutcome::Applied(signal) => {
-                        if let Some(signal) = signal
-                            && let Err(stop) = self.emit(signal).await
-                        {
-                            return SessionEnd::Stop(stop);
+                    FrameOutcome::Applied(signals) => {
+                        for signal in signals {
+                            if let Err(stop) = self.emit(signal).await {
+                                return SessionEnd::Stop(stop);
+                            }
                         }
                     }
                 }
@@ -459,14 +459,16 @@ impl Driver {
             };
             match event {
                 LinkEvent::Frame(frame) => match projection.accept(*frame) {
-                    FrameOutcome::Skip | FrameOutcome::Applied(None) => {}
+                    FrameOutcome::Skip => {}
                     FrameOutcome::Resync(reason) => {
                         tracing::debug!(?reason, "cursor requires resync");
                         return LiveEnd::Resync;
                     }
-                    FrameOutcome::Applied(Some(signal)) => {
-                        if let Err(stop) = self.emit(signal).await {
-                            return LiveEnd::End(SessionEnd::Stop(stop));
+                    FrameOutcome::Applied(signals) => {
+                        for signal in signals {
+                            if let Err(stop) = self.emit(signal).await {
+                                return LiveEnd::End(SessionEnd::Stop(stop));
+                            }
                         }
                     }
                 },

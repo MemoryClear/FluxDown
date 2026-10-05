@@ -317,4 +317,5 @@ private class UnavailableSession(private val error: HostException) : HostSession
     override suspend fun patchConfig(expectedRevision: Long, values: Map<String, String>): Unit = throw error
     override suspend fun refreshRssSource(sourceId: String): Unit = throw error
     override suspend fun setRssSourceEnabled(sourceId: String, enabled: Boolean): Unit = throw error
+    override suspend fun call(method: String, paramsJson: String?): String = throw error
 }

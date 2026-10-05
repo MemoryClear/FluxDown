@@ -54,6 +54,9 @@ internal class RustHostSession(private val session: HostSession) : HostPort {
     override suspend fun refreshRssSource(sourceId: String) = guarded { session.refreshRssSource(sourceId) }
     override suspend fun setRssSourceEnabled(sourceId: String, enabled: Boolean) =
         guarded { session.setRssSourceEnabled(sourceId, enabled) }
+
+    override suspend fun call(method: String, paramsJson: String?): String =
+        guarded { session.call(method, paramsJson) }
 }
 
 private fun CreateTaskRequest.toDto() = CreateTaskRequestDto(

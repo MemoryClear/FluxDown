@@ -57,6 +57,10 @@ interface HostSession {
     // daemon.rss.*
     suspend fun refreshRssSource(sourceId: String)
     suspend fun setRssSourceEnabled(sourceId: String, enabled: Boolean)
+
+    // 通用通道：任意 `daemon.*` / `agent.*` 方法（其它前缀抛 InvalidArgument）。
+    /** [paramsJson] 与返回值都是协议 serde wire 的 JSON 文本（camelCase）；无结果时返回 `"null"`。 */
+    suspend fun call(method: String, paramsJson: String? = null): String
 }
 
 /** `CreateTaskRequest` 的移动端子集（N1 / N2）；空串 = 由引擎推断 / 跟随全局。 */
@@ -117,6 +121,8 @@ data class HostSnapshot(
     val linkDevices: List<LinkDevice>,
     /** 偏好 `custom_categories` 解析结果（空 / 损坏已由 Rust 回退内置基线）。 */
     val categories: List<Category> = Category.BUILTIN,
+    /** 其余 `AgentSnapshot` / `DaemonSnapshot` 分区：键见 `sections.rs`，值为协议 serde wire 的 JSON 字符串。 */
+    val sections: Map<String, String> = emptyMap(),
 )
 
 /** 移动端订阅的事件子集（`DaemonEvent` / `WsServerMsg` 经 Rust 侧归一）。 */
@@ -153,6 +159,12 @@ sealed interface HostEvent {
     data class CloudDevicesChanged(val devices: List<CloudDevice>) : HostEvent
     data class LinkedDevicesChanged(val devices: List<LinkDevice>) : HostEvent
     data class CategoriesChanged(val categories: List<Category>) : HostEvent
+
+    /** 通用分区变化（键见 Rust `native/mobile/src/sections.rs`）：[json] 是该分区的完整新值（协议 serde wire）。 */
+    data class SectionChanged(val name: String, val json: String) : HostEvent
+
+    /** 一次性通知（不进快照）：[name] 为 serde 变体名，[json] 为载荷。 */
+    data class Notice(val name: String, val json: String) : HostEvent
 }
 
 /** `ApplicationErrorCode`。 */

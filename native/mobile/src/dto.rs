@@ -508,10 +508,17 @@ pub struct HostSnapshotDto {
     pub cloud_devices: Vec<CloudDeviceDto>,
     pub link_devices: Vec<LinkDeviceDto>,
     pub categories: Vec<CategoryDto>,
+    /// 其余 `AgentSnapshot` / `DaemonSnapshot` 分区：键见 [`crate::sections`]，值为协议 serde
+    /// wire（camelCase）的 JSON 字符串。
+    pub sections: HashMap<String, String>,
 }
 
 impl HostSnapshotDto {
-    pub(crate) fn from_agent(info: &HostInfoDto, snapshot: &proto::AgentSnapshot) -> Self {
+    pub(crate) fn from_agent(
+        info: &HostInfoDto,
+        snapshot: &proto::AgentSnapshot,
+        sections: HashMap<String, String>,
+    ) -> Self {
         let daemon = &snapshot.daemon;
         Self {
             info: info.clone(),
@@ -546,6 +553,7 @@ impl HostSnapshotDto {
                 .map(LinkDeviceDto::from)
                 .collect(),
             categories: CategoryDto::from_preferences(&snapshot.preferences),
+            sections,
         }
     }
 }
@@ -636,6 +644,16 @@ pub enum HostEventDto {
     },
     CategoriesChanged {
         categories: Vec<CategoryDto>,
+    },
+    /// 通用分区变化（键见 [`crate::sections`]）：`json` 是该分区的完整新值。
+    SectionChanged {
+        name: String,
+        json: String,
+    },
+    /// 一次性通知（不进快照）：`name` 为 serde 变体名，`json` 为载荷。
+    Notice {
+        name: String,
+        json: String,
     },
 }
 

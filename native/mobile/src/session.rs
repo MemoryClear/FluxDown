@@ -159,6 +159,28 @@ fn encode<T: Serialize>(value: &T, what: &str) -> Result<Value, FluxError> {
         .map_err(|error| FluxError::internal(format!("encode {what} failed: {error}")))
 }
 
+/// 通用调用的前置校验：只放行 `daemon.*` / `agent.*`（`system.*` 属会话层，不对外开放），
+/// 参数必须是合法 JSON；JSON `null` 等同于无参数。
+fn prepare_call(method: &str, params_json: Option<&str>) -> Result<Option<Value>, FluxError> {
+    let namespaced = ["daemon.", "agent."].iter().any(|prefix| {
+        method
+            .strip_prefix(prefix)
+            .is_some_and(|rest| !rest.is_empty())
+    });
+    if !namespaced {
+        return Err(FluxError::invalid_argument(format!(
+            "method {method:?} is not allowed: only daemon.* and agent.* can be called"
+        )));
+    }
+    let Some(text) = params_json else {
+        return Ok(None);
+    };
+    let value = serde_json::from_str::<Value>(text).map_err(|error| {
+        FluxError::invalid_argument(format!("params of {method} are not valid JSON: {error}"))
+    })?;
+    Ok((!value.is_null()).then_some(value))
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl HostSession {
     /// 拉取式信号流：首个为 `Snapshot`；`None` = 会话已永久关闭（`Fatal` 之后、
@@ -170,6 +192,20 @@ impl HostSession {
             () = self.cancel.cancelled() => None,
             signal = signals.recv() => signal,
         }
+    }
+
+    /// 通用 RPC 通道：调用协议里任意 `daemon.*` / `agent.*` 方法。`params_json` 与返回值都是
+    /// 协议 serde wire 的 JSON 文本（camelCase；结果为空时返回 `"null"`）。连接恢复期间的排队 /
+    /// 超时语义与其它命令一致；方法前缀或参数 JSON 不合法返回 `InvalidArgument`。
+    pub async fn call(
+        &self,
+        method: String,
+        params_json: Option<String>,
+    ) -> Result<String, FluxError> {
+        let params = prepare_call(&method, params_json.as_deref())?;
+        let value = self.ready_caller().await?.call(&method, params).await?;
+        serde_json::to_string(&value)
+            .map_err(|error| FluxError::internal(format!("encode {method} result failed: {error}")))
     }
 
     // daemon.task.*
@@ -571,6 +607,120 @@ mod tests {
                 code: ErrorCodeDto::NotFound,
                 ..
             }
+        ));
+    }
+
+    #[tokio::test]
+    async fn generic_call_passes_params_and_returns_result_json() {
+        let (session, recorder, _link) = ready().await;
+        recorder.reply(
+            "daemon.rss.listSources",
+            Ok(json!([{ "sourceId": "s1", "enabled": true }])),
+        );
+        recorder.reply("agent.gateway.get", Ok(Value::Null));
+
+        let listed = session
+            .call("daemon.rss.listSources".to_owned(), None)
+            .await
+            .expect("list");
+        assert_eq!(
+            serde_json::from_str::<Value>(&listed).expect("json"),
+            json!([{ "sourceId": "s1", "enabled": true }])
+        );
+        let empty = session
+            .call(
+                "agent.gateway.get".to_owned(),
+                Some(r#"{"verbose":true}"#.to_owned()),
+            )
+            .await
+            .expect("agent call");
+        assert_eq!(empty, "null");
+        let null_params = session
+            .call("daemon.queue.list".to_owned(), Some("null".to_owned()))
+            .await
+            .expect("null params");
+        assert_eq!(null_params, r#"{"ok":true}"#);
+
+        let calls = recorder.calls();
+        assert_eq!(calls[0], ("daemon.rss.listSources".to_owned(), Value::Null));
+        assert_eq!(
+            calls[1],
+            ("agent.gateway.get".to_owned(), json!({ "verbose": true }))
+        );
+        assert_eq!(calls[2], ("daemon.queue.list".to_owned(), Value::Null));
+    }
+
+    #[tokio::test]
+    async fn generic_call_validates_before_touching_the_connection() {
+        let (session, recorder, _link) = ready().await;
+        for method in [
+            "system.snapshot",
+            "system.shutdown",
+            "rss.listSources",
+            "daemon.",
+            "agent.",
+            "",
+            "xdaemon.task.list",
+        ] {
+            let error = session
+                .call(method.to_owned(), None)
+                .await
+                .expect_err("method outside daemon./agent. is rejected");
+            assert!(
+                matches!(
+                    error,
+                    FluxError::Rpc {
+                        code: ErrorCodeDto::InvalidArgument,
+                        ..
+                    }
+                ),
+                "{method:?}: {error:?}"
+            );
+        }
+        let bad_json = session
+            .call("daemon.task.get".to_owned(), Some("{not json".to_owned()))
+            .await
+            .expect_err("invalid params JSON");
+        assert!(matches!(
+            bad_json,
+            FluxError::Rpc {
+                code: ErrorCodeDto::InvalidArgument,
+                ..
+            }
+        ));
+        assert!(recorder.calls().is_empty(), "nothing reached the host");
+    }
+
+    #[tokio::test]
+    async fn generic_call_surfaces_rpc_errors_and_closed_sessions() {
+        let (session, recorder, _link) = ready().await;
+        recorder.reply(
+            "daemon.rss.createSource",
+            Err(FluxError::Rpc {
+                code: ErrorCodeDto::InvalidArgument,
+                reason: None,
+                retryable: false,
+                detail: "bad url".to_owned(),
+            }),
+        );
+        let error = session
+            .call(
+                "daemon.rss.createSource".to_owned(),
+                Some(r#"{"url":"nope"}"#.to_owned()),
+            )
+            .await
+            .expect_err("host error");
+        assert!(matches!(
+            error,
+            FluxError::Rpc {
+                code: ErrorCodeDto::InvalidArgument,
+                ..
+            }
+        ));
+        session.disconnect();
+        assert!(matches!(
+            session.call("daemon.task.list".to_owned(), None).await,
+            Err(FluxError::Closed)
         ));
     }
 

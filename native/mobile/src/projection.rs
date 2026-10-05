@@ -4,6 +4,8 @@
 //! 端口自 `crates/app/src/agent_client.rs`（`forward_event`）与 `web/src/lib/rpc/cursor.ts`；
 //! 纯同步、无 IO，便于单测。
 
+use std::collections::HashMap;
+
 use fluxdown_protocol::{
     AgentEvent, AgentSnapshot, DaemonEvent, EventFrame, ServiceEvent, Snapshot, SnapshotBody,
     WsServerMsg, accepted_runtime_status, apply_agent_event,
@@ -14,6 +16,7 @@ use crate::dto::{
     HostSnapshotDto, LinkDeviceDto, QueueDto, RssSourceDto, RuntimeStatsDto, SelectionRequestDto,
     positions_map, string_map,
 };
+use crate::sections::{self, Section};
 
 /// 游标判定为必须重同步的原因。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -28,15 +31,14 @@ pub(crate) enum ResyncReason {
 
 /// 单帧判定结果。
 #[derive(Debug, PartialEq)]
-// 载荷是短命的 FFI 信号值，装箱只会多一次分配。
-#[allow(clippy::large_enum_variant)]
 pub(crate) enum FrameOutcome {
     /// 重复或过期帧：丢弃。
     Skip,
     /// 需要重新拉取快照。
     Resync(ResyncReason),
-    /// 已接受并推进投影；可能没有需要下发的信号（移动端不渲染的事件）。
-    Applied(Option<HostSignalDto>),
+    /// 已接受并推进投影；按序下发 0..n 个信号：类型化事件 → 分区变化 → 一次性通知
+    /// （移动端不渲染也无分区 / 通知的事件为空）。
+    Applied(Vec<HostSignalDto>),
 }
 
 /// 快照被拒绝（不是 agent 角色的快照）。
@@ -50,6 +52,8 @@ pub(crate) struct Projection {
     sequence: u64,
     /// 最近一次下发的分类，用于只在变化时发 `CategoriesChanged`。
     categories: Vec<CategoryDto>,
+    /// 各分区最近一次下发的 JSON（按 [`Section::index`]），用于只在变化时发 `SectionChanged`。
+    sections: Vec<String>,
 }
 
 impl Projection {
@@ -62,12 +66,14 @@ impl Projection {
             return Err(SnapshotRejected);
         };
         let categories = CategoryDto::from_preferences(&agent.preferences);
+        let sections = sections::render_all(&agent);
         Ok(Self {
             info,
             snapshot: *agent,
             epoch: snapshot.epoch,
             sequence: snapshot.sequence,
             categories,
+            sections,
         })
     }
 
@@ -81,12 +87,18 @@ impl Projection {
     }
 
     pub(crate) fn snapshot_dto(&self) -> HostSnapshotDto {
-        HostSnapshotDto::from_agent(&self.info, &self.snapshot)
+        let sections: HashMap<String, String> = Section::ALL
+            .iter()
+            .zip(&self.sections)
+            .map(|(section, json)| (section.key().to_owned(), json.clone()))
+            .collect();
+        HostSnapshotDto::from_agent(&self.info, &self.snapshot, sections)
     }
 
     fn snapshot_signal(&mut self) -> HostSignalDto {
-        // 整表替换后分类基线也同步，避免随后的 PreferencesChanged 误判为变化。
+        // 整表替换后分类 / 分区基线也同步，避免随后的增量事件误判为变化。
         self.categories = CategoryDto::from_preferences(&self.snapshot.preferences);
+        self.sections = sections::render_all(&self.snapshot);
         HostSignalDto::Snapshot {
             snapshot: self.snapshot_dto(),
         }
@@ -108,7 +120,29 @@ impl Projection {
             return FrameOutcome::Resync(ResyncReason::ForeignService);
         };
         self.sequence = frame.sequence;
-        FrameOutcome::Applied(self.translate(event))
+        FrameOutcome::Applied(self.process(event))
+    }
+
+    /// 应用事件并产出该帧的全部信号。
+    fn process(&mut self, event: &AgentEvent) -> Vec<HostSignalDto> {
+        let mut signals: Vec<HostSignalDto> = self.translate(event).into_iter().collect();
+        for section in sections::affected(event) {
+            let json = section.json(&self.snapshot);
+            let Some(sent) = self.sections.get_mut(section.index()) else {
+                continue;
+            };
+            if *sent != json {
+                sent.clone_from(&json);
+                signals.push(event_signal(HostEventDto::SectionChanged {
+                    name: section.key().to_owned(),
+                    json,
+                }));
+            }
+        }
+        if let Some((name, json)) = sections::notice(event) {
+            signals.push(event_signal(HostEventDto::Notice { name, json }));
+        }
+        signals
     }
 
     /// 应用事件并归一为信号。无法逐项表达的整表替换直接下发新快照。
@@ -162,8 +196,9 @@ impl Projection {
                 self.categories.clone_from(&categories);
                 Some(event_signal(HostEventDto::CategoriesChanged { categories }))
             }
-            // 移动端不渲染的 agent 状态（同步 / 网关 / 远程任务 / 捕获 / 外壳 / 电源 /
-            // 局域网配对 / 一次性通知）：只推进投影，不下发。
+            // 无类型化 DTO 的 agent 状态（同步 / 网关 / 远程任务 / 捕获 / 外壳 / 电源 /
+            // 局域网配对 / 一次性通知）：这里只推进投影，分区变化与通知由 `process` 经
+            // `sections` 通道下发。
             AgentEvent::SyncChanged(_)
             | AgentEvent::GatewayChanged(_)
             | AgentEvent::LinkPairingRequestsChanged(_)
@@ -327,8 +362,9 @@ impl Projection {
             } => Some(event_signal(HostEventDto::PriorityTaskChanged {
                 task_id: (!priority_task_id.is_empty()).then(|| priority_task_id.clone()),
             })),
-            // 其余引擎消息（插件 / 组件 / webhook / 局域网配对 / 旧版选择请求 / 分段拆分 /
-            // CDN 活动 / RSS 条目……）移动端不渲染；选择请求走 `DaemonEvent::SelectionPending`。
+            // 其余引擎消息：状态类由分区覆盖，一次性类（插件熔断 / 重复种子 / RSS 条目 / 组件进度……）
+            // 由 `sections::notice` 转发；分段拆分 / `Pong` 不转发；旧版选择请求走
+            // `DaemonEvent::SelectionPending`。
             _ => None,
         }
     }
@@ -429,7 +465,7 @@ mod tests {
     };
 
     use super::fixtures::{EPOCH, daemon_frame, frame, snapshot, task};
-    use super::{FrameOutcome, Projection, ResyncReason, runtime_dtos, task_dtos};
+    use super::{FrameOutcome, Projection, ResyncReason, Section, runtime_dtos, task_dtos};
     use crate::dto::{HostEventDto, HostInfoDto, HostSignalDto};
 
     fn info() -> HostInfoDto {
@@ -443,6 +479,26 @@ mod tests {
 
     fn projection(sequence: u64, tasks: Vec<fluxdown_protocol::TaskDto>) -> Projection {
         Projection::from_snapshot(info(), snapshot(sequence, tasks)).expect("agent snapshot")
+    }
+
+    /// 该帧下发的全部事件（必须是 `Applied` 且只含 `Event` 信号）。
+    fn events(outcome: FrameOutcome) -> Vec<HostEventDto> {
+        let FrameOutcome::Applied(signals) = outcome else {
+            panic!("expected Applied, got {outcome:?}");
+        };
+        signals
+            .into_iter()
+            .map(|signal| match signal {
+                HostSignalDto::Event { event } => event,
+                other => panic!("unexpected signal {other:?}"),
+            })
+            .collect()
+    }
+
+    fn only_event(outcome: FrameOutcome) -> HostEventDto {
+        let mut all = events(outcome);
+        assert_eq!(all.len(), 1, "{all:?}");
+        all.remove(0)
     }
 
     fn progress(task_id: &str, status: i32, speed: i64, error: &str) -> DaemonEvent {
@@ -502,11 +558,11 @@ mod tests {
         ));
         assert_eq!(
             outcome,
-            FrameOutcome::Applied(Some(HostSignalDto::Event {
+            FrameOutcome::Applied(vec![HostSignalDto::Event {
                 event: HostEventDto::TaskDeleted {
                     task_id: "a".to_owned()
                 }
-            }))
+            }])
         );
         assert_eq!(projection.sequence(), 6);
         assert!(task_dtos(&projection).is_empty());
@@ -563,18 +619,15 @@ mod tests {
     fn task_progress_carries_speed_and_patches_projection() {
         let mut projection = projection(1, vec![task("a", 1)]);
         let outcome = projection.accept(daemon_frame(2, progress("a", 1, 1234, "")));
-        let FrameOutcome::Applied(Some(HostSignalDto::Event {
-            event:
-                HostEventDto::TaskProgress {
-                    task_id,
-                    status,
-                    downloaded_bytes,
-                    speed,
-                    upload_speed,
-                    uploaded_bytes,
-                    ..
-                },
-        })) = outcome
+        let HostEventDto::TaskProgress {
+            task_id,
+            status,
+            downloaded_bytes,
+            speed,
+            upload_speed,
+            uploaded_bytes,
+            ..
+        } = only_event(outcome)
         else {
             panic!("expected a TaskProgress event");
         };
@@ -588,14 +641,11 @@ mod tests {
     fn deleted_sentinel_passes_through_and_removes_task() {
         let mut projection = projection(1, vec![task("a", 1)]);
         let outcome = projection.accept(daemon_frame(2, progress("a", 4, 0, "deleted")));
-        let FrameOutcome::Applied(Some(HostSignalDto::Event {
-            event:
-                HostEventDto::TaskProgress {
-                    status,
-                    error_message,
-                    ..
-                },
-        })) = outcome
+        let HostEventDto::TaskProgress {
+            status,
+            error_message,
+            ..
+        } = only_event(outcome)
         else {
             panic!("sentinel must be forwarded as TaskProgress");
         };
@@ -632,23 +682,20 @@ mod tests {
             2,
             DaemonEvent::TaskRuntimeChanged(runtime("a", 5, 2)),
         ));
-        assert!(matches!(first, FrameOutcome::Applied(Some(_))));
+        assert_eq!(events(first).len(), 1);
         // 同序号 / 更旧序号：不下发，但游标推进。
         let stale = projection.accept(daemon_frame(
             3,
             DaemonEvent::TaskRuntimeChanged(runtime("a", 5, 1)),
         ));
-        assert_eq!(stale, FrameOutcome::Applied(None));
+        assert_eq!(stale, FrameOutcome::Applied(Vec::new()));
         assert_eq!(projection.sequence(), 3);
         // 空分段保留上一次分段。
         let merged = projection.accept(daemon_frame(
             4,
             DaemonEvent::TaskRuntimeChanged(runtime("a", 6, 0)),
         ));
-        let FrameOutcome::Applied(Some(HostSignalDto::Event {
-            event: HostEventDto::TaskRuntimeChanged { runtime },
-        })) = merged
-        else {
+        let HostEventDto::TaskRuntimeChanged { runtime } = only_event(merged) else {
             panic!("expected merged runtime");
         };
         assert_eq!((runtime.sample_sequence, runtime.segments.len()), (6, 2));
@@ -662,7 +709,7 @@ mod tests {
             2,
             DaemonEvent::TaskRuntimeChanged(runtime("ghost", 1, 1)),
         ));
-        assert_eq!(outcome, FrameOutcome::Applied(None));
+        assert_eq!(outcome, FrameOutcome::Applied(Vec::new()));
     }
 
     #[test]
@@ -679,11 +726,11 @@ mod tests {
         ));
         assert_eq!(
             positions,
-            FrameOutcome::Applied(Some(HostSignalDto::Event {
+            FrameOutcome::Applied(vec![HostSignalDto::Event {
                 event: HostEventDto::QueuePositionsChanged {
                     positions: [("a".to_owned(), 2)].into_iter().collect()
                 }
-            }))
+            }])
         );
         let priority = projection.accept(daemon_frame(
             3,
@@ -694,9 +741,9 @@ mod tests {
         ));
         assert_eq!(
             priority,
-            FrameOutcome::Applied(Some(HostSignalDto::Event {
+            FrameOutcome::Applied(vec![HostSignalDto::Event {
                 event: HostEventDto::PriorityTaskChanged { task_id: None }
-            }))
+            }])
         );
         let missing = projection.accept(daemon_frame(
             4,
@@ -707,11 +754,14 @@ mod tests {
                 }],
             }),
         ));
+        let FrameOutcome::Applied(signals) = missing else {
+            panic!("expected Applied");
+        };
         assert!(matches!(
-            missing,
-            FrameOutcome::Applied(Some(HostSignalDto::Event {
+            signals.as_slice(),
+            [HostSignalDto::Event {
                 event: HostEventDto::FileMissingChanged { .. }
-            }))
+            }]
         ));
         assert!(task_dtos(&projection)[0].file_missing);
     }
@@ -724,8 +774,11 @@ mod tests {
             ..Default::default()
         };
         let outcome = projection.accept(frame(2, AgentEvent::DaemonSnapshotReplaced(replacement)));
-        let FrameOutcome::Applied(Some(HostSignalDto::Snapshot { snapshot })) = outcome else {
-            panic!("expected a Snapshot signal");
+        let FrameOutcome::Applied(signals) = outcome else {
+            panic!("expected Applied");
+        };
+        let [HostSignalDto::Snapshot { snapshot }] = signals.as_slice() else {
+            panic!("expected a single Snapshot signal");
         };
         assert_eq!(snapshot.tasks.len(), 1);
         assert_eq!(snapshot.tasks[0].task_id, "b");
@@ -743,7 +796,12 @@ mod tests {
                     .collect(),
             }),
         ));
-        assert_eq!(unchanged, FrameOutcome::Applied(None));
+        // 偏好变化但分类不变：只有 `agent.preferences` 分区变化，没有 `CategoriesChanged`。
+        let events_unchanged = events(unchanged);
+        assert!(matches!(
+            events_unchanged.as_slice(),
+            [HostEventDto::SectionChanged { name, .. }] if name == "agent.preferences"
+        ));
 
         let custom = serde_json::json!([{ "id": "x", "name": "X", "position": 0 }]).to_string();
         let changed = projection.accept(frame(
@@ -758,21 +816,241 @@ mod tests {
                 .collect(),
             }),
         ));
-        let FrameOutcome::Applied(Some(HostSignalDto::Event {
-            event: HostEventDto::CategoriesChanged { categories },
-        })) = changed
+        let events = events(changed);
+        let [
+            HostEventDto::CategoriesChanged { categories },
+            HostEventDto::SectionChanged { name, .. },
+        ] = events.as_slice()
         else {
-            panic!("expected CategoriesChanged");
+            panic!("expected CategoriesChanged + SectionChanged, got {events:?}");
         };
+        assert_eq!(name, "agent.preferences");
         assert_eq!(categories.len(), 1);
         assert_eq!(categories[0].id, "x");
     }
 
     #[test]
-    fn unrendered_agent_events_advance_cursor_silently() {
+    fn capture_tasks_started_is_forwarded_as_notice_and_advances_cursor() {
         let mut projection = projection(1, Vec::new());
-        let outcome = projection.accept(frame(2, AgentEvent::CaptureTasksStarted(Vec::new())));
-        assert_eq!(outcome, FrameOutcome::Applied(None));
+        let outcome = projection.accept(frame(
+            2,
+            AgentEvent::CaptureTasksStarted(vec!["t1".to_owned()]),
+        ));
+        assert_eq!(
+            only_event(outcome),
+            HostEventDto::Notice {
+                name: "captureTasksStarted".to_owned(),
+                json: r#"["t1"]"#.to_owned(),
+            }
+        );
         assert_eq!(projection.sequence(), 2);
+    }
+
+    #[test]
+    fn events_without_dto_section_or_notice_advance_cursor_silently() {
+        let mut projection = projection(1, Vec::new());
+        let outcome = projection.accept(frame(2, AgentEvent::LinkedDevicesChanged(Vec::new())));
+        assert_eq!(
+            only_event(outcome),
+            HostEventDto::LinkedDevicesChanged {
+                devices: Vec::new()
+            }
+        );
+        let outcome = projection.accept(daemon_frame(3, DaemonEvent::Engine(WsServerMsg::Pong {})));
+        assert_eq!(outcome, FrameOutcome::Applied(Vec::new()));
+        assert_eq!(projection.sequence(), 3);
+    }
+
+    fn section_events(outcome: FrameOutcome) -> Vec<(String, String)> {
+        events(outcome)
+            .into_iter()
+            .filter_map(|event| match event {
+                HostEventDto::SectionChanged { name, json } => Some((name, json)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn snapshot_carries_every_section_key() {
+        let projection = projection(1, Vec::new());
+        let snapshot = projection.snapshot_dto();
+        assert_eq!(snapshot.sections.len(), Section::ALL.len());
+        for section in Section::ALL {
+            assert!(
+                snapshot.sections.contains_key(section.key()),
+                "{}",
+                section.key()
+            );
+        }
+        assert_eq!(snapshot.sections["agent.session"], "null");
+        assert_eq!(snapshot.sections["daemon.plugins"], "[]");
+    }
+
+    #[test]
+    fn section_is_emitted_on_change_and_not_on_noop() {
+        let mut projection = projection(1, Vec::new());
+        let gateway = fluxdown_protocol::GatewayStatusDto {
+            takeover_enabled: true,
+            ..Default::default()
+        };
+        let changed = projection.accept(frame(2, AgentEvent::GatewayChanged(gateway.clone())));
+        let sections = section_events(changed);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].0, "agent.gateway");
+        let decoded: serde_json::Value =
+            serde_json::from_str(&sections[0].1).expect("section json");
+        assert_eq!(decoded["takeoverEnabled"], true);
+        assert_eq!(
+            projection.snapshot_dto().sections["agent.gateway"],
+            sections[0].1,
+            "snapshot reflects the emitted section"
+        );
+
+        // 同值重放：序列化结果不变，不下发，游标照常推进。
+        let noop = projection.accept(frame(3, AgentEvent::GatewayChanged(gateway)));
+        assert_eq!(noop, FrameOutcome::Applied(Vec::new()));
+        assert_eq!(projection.sequence(), 3);
+    }
+
+    #[test]
+    fn daemon_sections_follow_daemon_events() {
+        let mut projection = projection(1, Vec::new());
+        let revision = projection.accept(daemon_frame(
+            2,
+            DaemonEvent::RssChanged {
+                source_id: "s1".to_owned(),
+                item_revision: 4,
+            },
+        ));
+        assert_eq!(
+            section_events(revision),
+            vec![(
+                "daemon.rssItemRevisions".to_owned(),
+                r#"{"s1":4}"#.to_owned()
+            )]
+        );
+        let cleared = projection.accept(daemon_frame(3, DaemonEvent::WebhooksCleared));
+        assert_eq!(cleared, FrameOutcome::Applied(Vec::new()));
+        let plugins = projection.accept(daemon_frame(4, DaemonEvent::PluginsChanged(Vec::new())));
+        assert_eq!(plugins, FrameOutcome::Applied(Vec::new()));
+    }
+
+    #[test]
+    fn logout_clears_account_sections_in_one_frame() {
+        let mut projection = projection(1, Vec::new());
+        let session: fluxdown_protocol::AgentSessionDto =
+            serde_json::from_value(serde_json::json!({
+                "user": { "id": "u1", "email": "a@example.com" },
+                "currentPlan": null,
+                "device": { "id": "d1", "deviceId": "dev-1" }
+            }))
+            .expect("session fixture");
+        let login = projection.accept(frame(
+            2,
+            AgentEvent::SessionChanged(Box::new(Some(session))),
+        ));
+        let names: Vec<String> = section_events(login).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, ["agent.session"]);
+
+        let logout = projection.accept(frame(3, AgentEvent::SessionChanged(Box::new(None))));
+        let sections = section_events(logout);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0], ("agent.session".to_owned(), "null".to_owned()));
+    }
+
+    #[test]
+    fn engine_notifications_are_forwarded_with_variant_name_and_flat_json() {
+        let mut projection = projection(1, Vec::new());
+        let duplicate = projection.accept(daemon_frame(
+            2,
+            DaemonEvent::Engine(WsServerMsg::DuplicateTorrent {
+                task_id: "n".to_owned(),
+                existing_task_id: "e".to_owned(),
+                existing_name: "Ubuntu".to_owned(),
+            }),
+        ));
+        let HostEventDto::Notice { name, json } = only_event(duplicate) else {
+            panic!("expected a Notice");
+        };
+        assert_eq!(name, "duplicateTorrent");
+        let decoded: serde_json::Value = serde_json::from_str(&json).expect("notice json");
+        assert_eq!(decoded["existingTaskId"], "e");
+        assert_eq!(decoded["existingName"], "Ubuntu");
+
+        let revoked = projection.accept(frame(
+            3,
+            AgentEvent::SessionRevoked(fluxdown_protocol::ErrorReason::SessionExpired),
+        ));
+        assert_eq!(
+            only_event(revoked),
+            HostEventDto::Notice {
+                name: "sessionRevoked".to_owned(),
+                json: r#""sessionExpired""#.to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn plugin_auto_disable_notice_is_accompanied_by_plugins_section_change() {
+        let mut snapshot = snapshot(1, Vec::new());
+        if let fluxdown_protocol::SnapshotBody::Agent(agent) = &mut snapshot.body {
+            agent.daemon.plugins = vec![
+                serde_json::from_value(serde_json::json!({
+                    "identity": "p1", "name": "P1", "version": "1.0.0", "enabled": true,
+                    "devMode": false, "disabledReason": "None", "settings": [],
+                    "settingsValues": {}
+                }))
+                .expect("plugin fixture"),
+            ];
+        }
+        let mut projection = Projection::from_snapshot(info(), snapshot).expect("agent snapshot");
+        let outcome = projection.accept(daemon_frame(
+            2,
+            DaemonEvent::Engine(WsServerMsg::PluginAutoDisabled {
+                identity: "p1".to_owned(),
+                reason: "CircuitBreaker".to_owned(),
+            }),
+        ));
+        let events = events(outcome);
+        assert!(matches!(
+            events.as_slice(),
+            [
+                HostEventDto::SectionChanged { name, .. },
+                HostEventDto::Notice { name: notice, .. }
+            ] if name == "daemon.plugins" && notice == "pluginAutoDisabled"
+        ));
+    }
+
+    #[test]
+    fn snapshot_replacement_resets_section_baseline() {
+        let mut projection = projection(1, Vec::new());
+        projection.accept(frame(
+            2,
+            AgentEvent::GatewayChanged(fluxdown_protocol::GatewayStatusDto {
+                takeover_enabled: true,
+                ..Default::default()
+            }),
+        ));
+        // 整表替换后基线与新快照一致：同值事件不再下发。
+        let replaced = projection.accept(daemon_frame(
+            3,
+            DaemonEvent::SnapshotReplaced(fluxdown_protocol::DaemonSnapshot::default()),
+        ));
+        let FrameOutcome::Applied(signals) = replaced else {
+            panic!("expected Applied");
+        };
+        let [HostSignalDto::Snapshot { snapshot }] = signals.as_slice() else {
+            panic!("expected only a Snapshot");
+        };
+        assert_eq!(snapshot.sections.len(), Section::ALL.len());
+        let same = projection.accept(frame(
+            4,
+            AgentEvent::GatewayChanged(fluxdown_protocol::GatewayStatusDto {
+                takeover_enabled: true,
+                ..Default::default()
+            }),
+        ));
+        assert_eq!(same, FrameOutcome::Applied(Vec::new()));
     }
 }

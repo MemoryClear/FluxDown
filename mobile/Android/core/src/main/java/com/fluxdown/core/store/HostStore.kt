@@ -60,6 +60,8 @@ data class HostState(
     val cloudDevices: List<CloudDevice> = emptyList(),
     val linkDevices: List<LinkDevice> = emptyList(),
     val categories: List<Category> = Category.BUILTIN,
+    /** 通用分区（键见 Rust `sections.rs`）：协议 serde wire 的 JSON 字符串。 */
+    val sections: Map<String, String> = emptyMap(),
 ) {
     val isReadOnly: Boolean get() = connection != Connection.Live
 
@@ -202,6 +204,12 @@ class HostStore(
                 w.categories = e.categories
                 return true
             }
+            is HostEvent.SectionChanged -> {
+                w.sections = w.sections + (e.name to e.json)
+                return true
+            }
+            // Android 目前没有一次性通知的消费方；不进 state，也不触发发布。
+            is HostEvent.Notice -> Unit
         }
         return false
     }
@@ -294,6 +302,7 @@ class HostStore(
         var cloudDevices: List<CloudDevice> = emptyList()
         var linkDevices: List<LinkDevice> = emptyList()
         var categories: List<Category> = Category.BUILTIN
+        var sections: Map<String, String> = emptyMap()
 
         fun toState() = HostState(
             connection = connection,
@@ -315,6 +324,7 @@ class HostStore(
             cloudDevices = cloudDevices,
             linkDevices = linkDevices,
             categories = categories,
+            sections = sections,
         )
 
         companion object {
@@ -335,6 +345,7 @@ class HostStore(
                 cloudDevices = s.cloudDevices
                 linkDevices = s.linkDevices
                 categories = s.categories
+                sections = s.sections
                 history = prev.history
                 prev.taskHistory.forEach { (k, v) -> if (k in tasks) taskHistory[k] = v }
                 if (!s.daemonConnected) runtime.clear()
