@@ -72,12 +72,22 @@ const MAX_CONCURRENT_YTDLP: usize = 2;
 const MAX_YTDLP_ARGS: usize = 512;
 /// yt-dlp 单参数字节上限。
 const MAX_YTDLP_ARG_LEN: usize = 8 * 1024;
-/// yt-dlp stdout 回传上限（`-J` 播放列表 JSON 可较大；超限截断）。
+/// yt-dlp stdout 回传默认上限（`-J` 播放列表 JSON 可较大；超限截断）。
 /// 4 MiB 对 YouTube 单视频不够：其 `-J` 常超 4 MiB（`automatic_captions` 单字段
 /// 即可 ~4 MiB），截断导致插件 JSON 解析失败（"Unexpected end of JSON input"）。
 /// 本上限本身即可解除已发布插件的该故障；插件另用 `--parse-metadata` 剔除重字段
-/// （需插件重新发布才生效），此处提升到 16 MiB 作为其他站点大输出的兜底。
+/// （需插件重新发布才生效），此处默认提升到 16 MiB 作为其他站点大输出的兜底。
+///
+/// 运行期可覆盖（见 [`ytdlp_stdout_cap`]）：config `component.ytdlp.stdout_cap`
+/// （全局，字节）、`plugin.<id>.ytdlp.stdout_cap`（单插件，优先）或环境变量
+/// `YTDLP_STDOUT_CAP`（改默认值，无人值守部署用）。
 const YTDLP_STDOUT_CAP: usize = 16 * 1024 * 1024;
+/// stdout 上限的允许区间：低于 1 MiB 会让正常 `-J` 频繁被截；高于 64 MiB 有
+/// 内存/明文占用风险。越界一律夹到区间内（不报错，保证下载不因配置写错而失败）。
+const YTDLP_STDOUT_CAP_MIN: usize = 1024 * 1024;
+const YTDLP_STDOUT_CAP_MAX: usize = 64 * 1024 * 1024;
+/// 全局 stdout 上限的 config 键；单插件键为 `plugin.<id>.ytdlp.stdout_cap`。
+const CONFIG_YTDLP_STDOUT_CAP: &str = "component.ytdlp.stdout_cap";
 /// yt-dlp stderr 回传上限（超限截断）。
 const YTDLP_STDERR_CAP: usize = 256 * 1024;
 
@@ -1083,7 +1093,8 @@ impl PluginBridge for EngineBridge {
                 });
             }
         };
-        let (stdout, truncated_stdout) = truncate_utf8(&output.stdout, YTDLP_STDOUT_CAP);
+        let stdout_cap = ytdlp_stdout_cap(&self.db, plugin_id).await;
+        let (stdout, truncated_stdout) = truncate_utf8(&output.stdout, stdout_cap);
         let (stderr, truncated_stderr) = truncate_utf8(&output.stderr, YTDLP_STDERR_CAP);
         let code = output.status.code().unwrap_or(-1);
         if code == 0 {
@@ -1351,6 +1362,62 @@ fn truncate_utf8(bytes: &[u8], cap: usize) -> (String, bool) {
         end -= 1;
     }
     (s[..end].to_string(), true)
+}
+
+/// 解析生效的 yt-dlp stdout 回传上限（字节）。
+///
+/// 优先级（高→低）：单插件 config `plugin.<id>.ytdlp.stdout_cap` → 全局 config
+/// `component.ytdlp.stdout_cap` → 环境变量 `YTDLP_STDOUT_CAP`（仅改默认值）→
+/// 常量 [`YTDLP_STDOUT_CAP`]。任何来源都夹到 `[MIN, MAX]`；解析失败回退下一级
+/// （不报错——配置写错不应让下载失败）。
+async fn ytdlp_stdout_cap(db: &Db, plugin_id: &str) -> usize {
+    let per_plugin = format!("plugin.{plugin_id}.ytdlp.stdout_cap");
+    if let Ok(Some(v)) = db.get_config(&per_plugin).await
+        && let Some(n) = parse_cap(&v)
+    {
+        return clamp_cap(n);
+    }
+    if let Ok(Some(v)) = db.get_config(CONFIG_YTDLP_STDOUT_CAP).await
+        && let Some(n) = parse_cap(&v)
+    {
+        return clamp_cap(n);
+    }
+    if let Some(n) = env_cap() {
+        return n;
+    }
+    YTDLP_STDOUT_CAP
+}
+
+/// 解析 `YTDLP_STDOUT_CAP` 环境变量（字节或带 `k`/`m` 后缀，如 `16m`）。
+fn env_cap() -> Option<usize> {
+    std::env::var("YTDLP_STDOUT_CAP")
+        .ok()
+        .and_then(|v| parse_cap(&v))
+        .map(clamp_cap)
+}
+
+/// 解析上限字符串：纯十进制字节，或 `<n>k` / `<n>m`（大小写不敏感，1024 进制）。
+fn parse_cap(v: &str) -> Option<usize> {
+    let t = v.trim().to_ascii_lowercase();
+    if t.is_empty() {
+        return None;
+    }
+    let (num, mult) = match t.strip_suffix('k') {
+        Some(n) => (n, 1024usize),
+        None => match t.strip_suffix('m') {
+            Some(n) => (n, 1024 * 1024),
+            None => (t.as_str(), 1),
+        },
+    };
+    num.trim()
+        .parse::<usize>()
+        .ok()
+        .map(|n| n.saturating_mul(mult))
+}
+
+/// 夹到允许区间。
+fn clamp_cap(n: usize) -> usize {
+    n.clamp(YTDLP_STDOUT_CAP_MIN, YTDLP_STDOUT_CAP_MAX)
 }
 
 /// yt-dlp 选项的取值形态。白名单按「是否带值、带几个值」建表，才能分清选项值与
@@ -1689,9 +1756,10 @@ fn has_percent_env_var(v: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        arg_reject_reason, collect_response_headers, is_globally_routable_unicast,
-        normalize_explicit_auth_ref, plugin_workspace, truncate_utf8, validate_ffmpeg_args,
-        validate_ytdlp_args, ytdlp_args_reject_reason,
+        YTDLP_STDOUT_CAP_MAX, YTDLP_STDOUT_CAP_MIN, arg_reject_reason, clamp_cap,
+        collect_response_headers, is_globally_routable_unicast, normalize_explicit_auth_ref,
+        parse_cap, plugin_workspace, truncate_utf8, validate_ffmpeg_args, validate_ytdlp_args,
+        ytdlp_args_reject_reason,
     };
     use std::net::IpAddr;
     #[cfg(unix)]
@@ -2016,6 +2084,20 @@ mod tests {
         let (s, t) = truncate_utf8("啊啊".as_bytes(), 4);
         assert_eq!(s, "啊");
         assert!(t);
+    }
+
+    #[test]
+    fn parse_cap_accepts_bytes_and_suffixes_and_clamps() {
+        assert_eq!(parse_cap("4194304"), Some(4 * 1024 * 1024));
+        assert_eq!(parse_cap("16m"), Some(16 * 1024 * 1024));
+        assert_eq!(parse_cap("512k"), Some(512 * 1024));
+        assert_eq!(parse_cap("  8M  "), Some(8 * 1024 * 1024));
+        assert_eq!(parse_cap("bogus"), None);
+        assert_eq!(parse_cap(""), None);
+        // 夹到允许区间。
+        assert_eq!(clamp_cap(0), YTDLP_STDOUT_CAP_MIN);
+        assert_eq!(clamp_cap(usize::MAX), YTDLP_STDOUT_CAP_MAX);
+        assert_eq!(clamp_cap(16 * 1024 * 1024), 16 * 1024 * 1024);
     }
 
     #[test]
