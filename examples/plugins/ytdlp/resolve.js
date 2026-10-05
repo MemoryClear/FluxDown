@@ -498,6 +498,12 @@ globalThis.resolve = async (ctx) => {
   // 附加参数（高级）：追加到命令末尾（URL 之前）。FluxDown bridge 按白名单校验（仅放行规范长选项全名）。
   var extra = parseExtraArgs(flux.settings.extraArgs);
   for (var ei = 0; ei < extra.length; ei++) args.push(extra[ei]);
+  // 剔除 -J 里的重字段（automatic_captions / heatmap / subtitles）：YouTube 单个
+  // 视频的 -J 常超 4 MiB（automatic_captions 单字段 ~4 MiB），会撞 FluxDown 的
+  // stdout 回传上限导致 JSON 解析失败；这些字段本插件并不消费，剥掉后输出降到 ~200 KB。
+  args.push('--parse-metadata', 'automatic_captions:(?P<automatic_captions>)');
+  args.push('--parse-metadata', 'heatmap:(?P<heatmap>)');
+  args.push('--parse-metadata', 'subtitles:(?P<subtitles>)');
   args.push(ctx.url);
 
   if (verbose) {
