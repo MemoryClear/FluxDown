@@ -81,6 +81,7 @@ cargo nextest run -p fluxdown_engine <filter>   # 引擎单测（协议/分段/D
 cargo test -p fluxdown_api            # HTTP API（axum/aria2/MCP/OpenAPI 漂移守卫）
 cargo test -p fluxdown_agent          # agent（Gateway / server 模式 / 兼容 API）；server 模式带 SPA：--features web-ui
 cargo test -p fluxdown_cli            # CLI（退出码/尺寸解析 doctest）
+cargo test -p fluxdown_mobile         # 原生移动端核心（会话游标 / 重连 / DTO 映射 / 进程内本机主机端到端）
 flutter test                          # Dart 测试
 PG_TEST_URL=postgres://postgres:pw@localhost/postgres cargo test -p fluxdown_engine -- --ignored pg_smoke
 # 插件相关（feature 门控）：
@@ -97,7 +98,7 @@ cargo run -p fluxdown_cli -- add <url> --local   # B 模式：内嵌引擎独立
 cd web && bun run dev                 # Web SPA localhost:5173（/rpc、/api、/ping、/demo 代理到 :17800 的 agent --server）；bun run build → web/dist
 cd website && npm run dev             # 官网 Astro localhost:4321
 cd fluxDown && npm run dev            # 扩展开发（Chrome）；dev:firefox / build / zip
-cd mobile/Android && ./gradlew :core:testDebugUnitTest :app:assembleDebug   # 原生 Android（JAVA_HOME = Android Studio 自带 JBR）
+cd mobile/Android && ./gradlew :core:testDebugUnitTest :bridge:testDebugUnitTest :app:assembleDebug   # 原生 Android（JAVA_HOME = Android Studio 自带 JBR；:bridge 经 cargo-ndk 编译 fluxdown_mobile）
 
 # ── OpenAPI / 图标 / 发布 ──
 cargo run -p fluxdown_api --example gen_openapi > website-v2/public/openapi.json   # 改 API 后重生成
@@ -135,6 +136,7 @@ git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z   # 触发发布流水�
 - `fluxdown_engine_protocol`：引擎模型与 protocol DTO 的无状态、无损转换边界；宿主使用命名函数，API/agent/UI 不依赖它。
 - `fluxdown_daemon`：`fluxdownd` 纯下载核心；独占 engine/下载 DB，拥有任务、队列、组、下载设置、RSS、插件、Webhook 与选择。
 - `fluxdown_agent`：`fluxdown-agent` 官方 UI Gateway 与 FluxCloud owner；拥有 Token、设备身份、同步、远程任务、捕获与兼容 API，只经 protocol RPC 调 daemon。
+- `fluxdown_mobile`（`native/mobile`）：原生移动端（Android / iOS）唯一 Rust 入口，UniFFI 导出 `FluxCore` / `HostSession`；本机主机 = 进程内 `fluxdown_daemon::runtime::run_with` + `fluxdown_agent` 嵌入模式（`start_embedded` / `LocalConnection`，不起 TCP 网关、NMH、自启、子进程），远端主机 = WebSocket `/rpc` + 访问密钥。握手、epoch/sequence 游标、缓冲、重同步、重连退避与 800ms 离线宽限都在这里，Kotlin / Swift 只应用已接受的信号。手写零 unsafe，UniFFI 宏胶水为独立审计边界。
 - `fluxdown_link`（`native/link`）：局域网直连 L1 协议（身份 / 配对 SAS / mDNS / 直连传输 / 地址解析），持久化经 `LinkStorage` trait 注入；agent 为生产宿主，引擎仅保留 `DbLinkStorage` 给 Flutter hub。零引擎、零数据库、零 UI 依赖。
 - `fluxdown_logfile`（`native/logfile`）：desktop 与 agent 共用的诊断日志文件（轮转 + 重复限流 + panic hook），零第三方依赖；`log` / `tracing` 适配留在各宿主。细节见 `.omp/knowledge/ops.md`「日志系统」。
 - **feature 门控**：`plugins`、`components`（默认关；desktop/server 开，mobile/CLI 关）。**关插件时下载主链路零行为变化**（注入 no-op `PluginManager`）。
@@ -184,7 +186,8 @@ git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z   # 触发发布流水�
 | 开机自启语义（`lib/src/services/autostart_service.dart`） | `native/agent/src/platform/autostart.rs`：「已启用」都要尊重系统级禁用（Windows `StartupApproved`、XDG `Hidden` / `X-GNOME-Autostart-enabled`），启动时自动迁移只改启动目标、**绝不**改系统启用状态；细节见 `.omp/knowledge/clients.md`「开机自启」 |
 | 文件跟踪重扫节流（`crates/downloads/src/model/file_rescan.rs::RescanThrottle`） | `web/src/lib/rescanThrottle.ts`（`RescanThrottle`）：逐条对齐 10s 冷却 / 尾沿排队 / 合并 / 尾沿后重计冷却；测试复用同组用例（`rescanThrottle.test.ts`） |
 | `native/protocol/src/agent.rs::CustomCategoryDto::builtin_defaults`（内置分类基线） | `mobile/Android/core/.../model/Category.kt::BUILTIN`（同序同扩展名；仅作主机未下发分类时的展示基线，匹配规则来源仍是主机快照） |
-| `native/protocol/src/event.rs` 的 reducer（`apply_daemon_event` / `apply_engine_message`） | `mobile/Android/core/.../store/HostStore.kt`（移动端渲染子集，`HostStoreTest` 覆盖删除哨兵 / 旧采样丢弃 / 非活跃清段 / Stale 只读）；UniFFI 接入后游标与重同步留在 Rust，Kotlin 只应用已接受的事件 |
+| `native/protocol/src/event.rs` 的 reducer（`apply_daemon_event` / `apply_engine_message`） | `mobile/Android/core/.../store/HostStore.kt`（移动端渲染子集，`HostStoreTest` 覆盖删除哨兵 / 旧采样丢弃 / 非活跃清段 / Stale 只读）；游标与重同步在 `native/mobile`，Kotlin 只应用已接受的事件 |
+| `native/mobile/src/dto.rs`（UniFFI DTO） | `mobile/Android/core/.../model/*.kt` + `host/HostSession.kt` 与 `mobile/Android/bridge/.../Mapping.kt`（字段逐一对应，`:bridge` `MappingTest` 覆盖） |
 
 ---
 
