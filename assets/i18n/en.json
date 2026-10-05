@@ -946,6 +946,7 @@
   "themeImportNotObject": "The top level must be a JSON object",
   "themeImportUnsupportedFormat": "Unsupported theme format",
   "themeImportSaveFailed": "Could not save to the theme library",
+  "themeImportTooLarge": "The theme file is too large to sync (over 64 KB)",
   "themeDiagMigrated": "Converted from an older format",
   "themeDiagUnknownKey": "Unknown keys (kept)",
   "themeDiagInvalidValue": "Invalid values (ignored)",

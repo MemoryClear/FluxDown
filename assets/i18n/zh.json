@@ -946,6 +946,7 @@
   "themeImportNotObject": "顶层必须是 JSON 对象",
   "themeImportUnsupportedFormat": "不支持的主题格式",
   "themeImportSaveFailed": "无法保存到主题库",
+  "themeImportTooLarge": "主题文件过大，超出同步上限（64 KB）",
   "themeDiagMigrated": "已从旧格式转换",
   "themeDiagUnknownKey": "未知键（已保留）",
   "themeDiagInvalidValue": "非法值（已忽略）",
