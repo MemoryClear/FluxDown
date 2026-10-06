@@ -328,7 +328,11 @@ async fn shutdown_closes_event_streams_and_releases_the_agent_data_directory() {
     );
 
     let connection = connect(&agent).await;
-    let observer = tokio::spawn(async move { connection.next_event().await.map(|_| ()) });
+    let observer = tokio::spawn(async move {
+        let event = connection.next_event().await.map(|_| ());
+        connection.close().await;
+        event
+    });
     agent.shutdown().await;
     let ended = tokio::time::timeout(STEP, observer)
         .await
@@ -340,9 +344,20 @@ async fn shutdown_closes_event_streams_and_releases_the_agent_data_directory() {
     );
 
     // 关停后同一目录可以再次启动（锁已释放），并重新拿到快照。
-    let restarted = start_embedded(config, CancellationToken::new())
-        .await
-        .expect("restart embedded agent on the same directories");
+    let mut restarted = None;
+    for _ in 0..50 {
+        match start_embedded(config.clone(), CancellationToken::new()).await {
+            Ok(agent) => {
+                restarted = Some(agent);
+                break;
+            }
+            Err(AgentStartError::DataDirLocked(_)) => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(other) => panic!("unexpected start error: {other:?}"),
+        }
+    }
+    let restarted = restarted.expect("restart embedded agent on the same directories");
     let connection = connect(&restarted).await;
     let (_, snapshot) = success(
         connection
