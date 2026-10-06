@@ -378,6 +378,10 @@ async fn resolve_selectors_prioritize_resolution_and_prefer_avc1() {
             if (!fmtTrue.includes("bestvideo[ext=mp4]+bestaudio[ext=m4a]") || !fmtTrue.includes("bestvideo+bestaudio")) {{
                 throw new Error("buildFormat(true) 格式链不合预期: " + fmtTrue);
             }}
+            var fmtFalse = buildFormat(false);
+            if (fmtFalse !== "bestvideo+bestaudio/best") {{
+                throw new Error("buildFormat(false) 格式链不合预期: " + fmtFalse);
+            }}
             var formats = [
                 {{ format_id: "2160_vp9", url: "http://example.com/2160_vp9", height: 2160, vcodec: "vp09", ext: "webm", tbr: 20000 }},
                 {{ format_id: "1080_avc", url: "http://example.com/1080_avc", height: 1080, vcodec: "avc1.640028", ext: "mp4", tbr: 5000 }},
@@ -394,8 +398,17 @@ async fn resolve_selectors_prioritize_resolution_and_prefer_avc1() {
             if (!pick1080 || pick1080.format_id !== "1080_avc") {{
                 throw new Error("pickVideoAtOrBelow(1080) 未优先选择 avc1: " + JSON.stringify(pick1080));
             }}
-            // 3. 平台白名单判定：新增的社交平台必须命中
-            for (var u of ["https://instagram.com/p/123", "https://x.com/user/status/1", "https://tiktok.com/@u/video/1", "https://reddit.com/r/v/comments/1", "https://facebook.com/watch?v=1"]) {{
+            // 3. 平台白名单判定：主流支持平台必须命中
+            for (var u of [
+                "https://www.youtube.com/watch?v=1",
+                "https://www.bilibili.com/video/BV1",
+                "https://www.nicovideo.jp/watch/sm1",
+                "https://www.twitch.tv/videos/1",
+                "https://vimeo.com/1",
+                "https://www.dailymotion.com/video/x1",
+                "https://soundcloud.com/artist/track",
+                "https://www.acfun.cn/v/ac1"
+            ]) {{
                 if (!detectPlatform(u)) throw new Error("detectPlatform 未能识别: " + u);
             }}
             return {{

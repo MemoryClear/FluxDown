@@ -360,11 +360,6 @@ var PLATFORMS = [
   { id: 'dailymotion', hosts: ['dailymotion.com', 'dai.ly'], cookieKey: 'cookiesGeneric' },
   { id: 'soundcloud', hosts: ['soundcloud.com'], cookieKey: 'cookiesGeneric' },
   { id: 'acfun', hosts: ['acfun.cn'], cookieKey: 'cookiesGeneric' },
-  { id: 'instagram', hosts: ['instagram.com'], cookieKey: 'cookiesGeneric' },
-  { id: 'twitter', hosts: ['twitter.com', 'x.com'], cookieKey: 'cookiesGeneric' },
-  { id: 'tiktok', hosts: ['tiktok.com'], cookieKey: 'cookiesGeneric' },
-  { id: 'reddit', hosts: ['reddit.com', 'redd.it'], cookieKey: 'cookiesGeneric' },
-  { id: 'facebook', hosts: ['facebook.com', 'fb.watch'], cookieKey: 'cookiesGeneric' },
 ];
 
 // 由下载 URL 主机名判定平台。返回 PLATFORMS 表项，未命中白名单则 null（防御性：
@@ -470,7 +465,7 @@ globalThis.resolve = async (ctx) => {
 
   var platform = detectPlatform(ctx.url);
   if (!platform) {
-    throw new Error('该链接不在本插件支持的平台白名单内（仅 YouTube / Bilibili / Niconico / Twitch / Vimeo / Dailymotion / SoundCloud / AcFun / Instagram / Twitter(X) / TikTok / Reddit / Facebook）: ' + ctx.url);
+    throw new Error('该链接不在本插件支持的平台白名单内（仅 YouTube / Bilibili / Niconico / Twitch / Vimeo / Dailymotion / SoundCloud / AcFun）: ' + ctx.url);
   }
   var fmt = buildFormat(flux.settings.preferMp4);
   var ck = await buildCookieContext(ctx, platform);
