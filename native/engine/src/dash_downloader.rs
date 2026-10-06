@@ -285,28 +285,82 @@ pub(crate) async fn ffmpeg_copy_to_mp4(
         .kill_on_drop(true)
         .output();
 
-    let result: std::process::Output = tokio::select! {
+    let mut result: std::process::Output = tokio::select! {
+        _ = cancel_token.cancelled() => {
+            // The future is dropped here; kill_on_drop ensures the child is killed.
+            if let Err(error) = tokio::fs::remove_file(output).await
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                crate::logger::report_warning("dash-download", "remove_temporary_file", &error);
+            }
+            return Err(DownloadError::Cancelled);
+        }
+        o = output_fut => match o {
+            Ok(o) => o,
+            Err(e) => {
+                if let Err(error) = tokio::fs::remove_file(output).await
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    crate::logger::report_warning("dash-download", "remove_temporary_file", &error);
+                }
+                return Err(DownloadError::Other(format!("failed to run ffmpeg: {e}")));
+            }
+        },
+    };
+
+    // 若 stream copy 失败（如音频轨为 Opus/Vorbis 无法直接 copy 封入 mp4），且存在独立音频轨：
+    // 回退尝试视频流复制 + 音频转码为通用 AAC（-c:v copy -c:a aac -b:a 192k），消除 QuickTime 无声
+    // 与容器不兼容。
+    if !result.status.success() && audio.is_some() && !cancel_token.is_cancelled() {
+        if let Err(error) = tokio::fs::remove_file(output).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::logger::report_warning("dash-download", "remove_temporary_file", &error);
+        }
+        let mut retry_cmd = Command::new(ffmpeg);
+        crate::proc::no_console_window(&mut retry_cmd);
+        retry_cmd.arg("-y").arg("-i").arg(video);
+        if let Some(audio) = audio {
+            retry_cmd.arg("-i").arg(audio);
+            retry_cmd.args(["-map", "0:v:0", "-map", "1:a:0"]);
+        }
+        let retry_output_fut = retry_cmd
+            .args([
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-movflags",
+                "+faststart",
+                "-f",
+                "mp4",
+            ])
+            .arg(output)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .output();
+
+        let retry_result = tokio::select! {
             _ = cancel_token.cancelled() => {
-                // The future is dropped here; kill_on_drop ensures the child is killed.
-    if let Err(error) = tokio::fs::remove_file(output).await
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        crate::logger::report_warning("dash-download", "remove_temporary_file", &error);
-    }
+                if let Err(error) = tokio::fs::remove_file(output).await
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    crate::logger::report_warning("dash-download", "remove_temporary_file", &error);
+                }
                 return Err(DownloadError::Cancelled);
             }
-            o = output_fut => match o {
-                Ok(o) => o,
-                Err(e) => {
-    if let Err(error) = tokio::fs::remove_file(output).await
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        crate::logger::report_warning("dash-download", "remove_temporary_file", &error);
-    }
-                    return Err(DownloadError::Other(format!("failed to run ffmpeg: {e}")));
-                }
-            },
+            o = retry_output_fut => o.ok(),
         };
+        if let Some(r) = retry_result
+            && r.status.success()
+        {
+            result = r;
+        }
+    }
 
     if !result.status.success() {
         if let Err(error) = tokio::fs::remove_file(output).await
@@ -612,6 +666,24 @@ async fn run_dash_download_inner(p: &DownloadParams) -> Result<i64, DownloadErro
     if audio_bytes > 0 {
         let audio_path = build_audio_path(&dest_path);
         let expected = (video_bytes + audio_bytes).max(0) as u64;
+        let total_downloaded = video_bytes + audio_bytes;
+        p.db.update_task_status(&p.task_id, 5, "").await?;
+        if p.progress_tx
+            .send(ProgressUpdate {
+                task_id: p.task_id.clone(),
+                downloaded_bytes: total_downloaded,
+                total_bytes: total_downloaded,
+                status: 5,
+                error_message: String::new(),
+                file_name: String::new(),
+                segment_details: None,
+                ..Default::default()
+            })
+            .await
+            .is_err()
+        {
+            tracing::debug!("download progress receiver closed");
+        }
         match mux_audio_video(
             &dest_path,
             &audio_path,
@@ -648,6 +720,9 @@ async fn run_dash_download_inner(p: &DownloadParams) -> Result<i64, DownloadErro
                     audio_path.display(),
                     dest_path.display(),
                 );
+                if let Err(e) = p.db.update_task_status(&p.task_id, 1, "").await {
+                    crate::logger::report_warning("dash-download", "update_task_status", &e);
+                }
                 // Don't fail the download — both files are valid, just not merged
                 mux_succeeded = false;
             }
@@ -1209,6 +1284,24 @@ async fn run_track_pair_inner(p: &DownloadParams, audio_url: &str) -> Result<i64
     let mut mux_succeeded = true;
     if audio_bytes > 0 {
         let expected = (video_bytes + audio_bytes).max(0) as u64;
+        let pair_actual = video_bytes + audio_bytes;
+        p.db.update_task_status(&p.task_id, 5, "").await?;
+        if p.progress_tx
+            .send(ProgressUpdate {
+                task_id: p.task_id.clone(),
+                downloaded_bytes: pair_actual,
+                total_bytes: pair_actual,
+                status: 5,
+                error_message: String::new(),
+                file_name: String::new(),
+                segment_details: None,
+                ..Default::default()
+            })
+            .await
+            .is_err()
+        {
+            tracing::debug!("download progress receiver closed");
+        }
         match mux_audio_video(
             &dest_path,
             &audio_path,
@@ -1239,6 +1332,9 @@ async fn run_track_pair_inner(p: &DownloadParams, audio_url: &str) -> Result<i64
                     audio_path.display(),
                     dest_path.display(),
                 );
+                if let Err(e) = p.db.update_task_status(&p.task_id, 1, "").await {
+                    crate::logger::report_warning("dash-download", "update_task_status", &e);
+                }
                 mux_succeeded = false;
             }
         }
@@ -2891,5 +2987,97 @@ mod tests {
         let mut other_range = segs.clone();
         other_range[1].range = Some("0-199".to_string());
         assert_ne!(segments_fingerprint(&init, &other_range), base);
+    }
+
+    #[tokio::test]
+    async fn test_ffmpeg_copy_to_mp4_fallback() {
+        let ffmpeg_bin = match std::env::var("FLUXDOWN_TEST_FFMPEG") {
+            Ok(b) => std::path::PathBuf::from(b),
+            Err(_) => {
+                if let Ok(out) = std::process::Command::new("which").arg("ffmpeg").output() {
+                    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if !path.is_empty() {
+                        std::path::PathBuf::from(path)
+                    } else {
+                        return;
+                    }
+                } else {
+                    return;
+                }
+            }
+        };
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("fluxdown_mux_test_{}", std::process::id()));
+        tokio::fs::create_dir_all(&temp_dir)
+            .await
+            .expect("create temp dir");
+        let v_path = temp_dir.join("test_v.mp4");
+        let a_path = temp_dir.join("test_a.opus");
+        let out_path = temp_dir.join("out.mp4");
+
+        // 用 lavfi 生成 0.2 秒的 x264 视频和 opus 音频
+        let mut gen_v = tokio::process::Command::new(&ffmpeg_bin);
+        gen_v
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=32x32:rate=1",
+                "-t",
+                "0.2",
+                "-c:v",
+                "libx264",
+                "-y",
+            ])
+            .arg(&v_path);
+        if gen_v
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            let mut gen_a = tokio::process::Command::new(&ffmpeg_bin);
+            gen_a
+                .args([
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440",
+                    "-t",
+                    "0.2",
+                    "-c:a",
+                    "libopus",
+                    "-y",
+                ])
+                .arg(&a_path);
+            if gen_a
+                .output()
+                .await
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
+                let cancel = tokio_util::sync::CancellationToken::new();
+                let res = super::ffmpeg_copy_to_mp4(
+                    &v_path,
+                    Some(&a_path),
+                    &out_path,
+                    100_000,
+                    &cancel,
+                    &ffmpeg_bin,
+                )
+                .await;
+                assert!(
+                    res.is_ok(),
+                    "ffmpeg_copy_to_mp4 应通过回退成功封装: {res:?}"
+                );
+                assert!(out_path.exists(), "out.mp4 产物应存在");
+            }
+        }
+        if let Err(e) = tokio::fs::remove_dir_all(&temp_dir).await
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("failed to clean up test dir: {e}");
+        }
     }
 }
