@@ -1426,12 +1426,13 @@ pub(crate) fn ensure_forced_auth_token(
     }
 }
 
-/// 对外暴露面必须有 token：局域网监听或 CORS 放开，且接管 / aria2 兼容端点任一开启时，
-/// 空 token 等于向同网段 / 任意网页匿名开放（这两个端点空 token 不鉴权）。缺 token 时生成
+/// 局域网暴露面必须有 token：局域网监听且接管 / aria2 兼容端点任一开启时，空 token 等于向
+/// 同网段匿名开放（这两个端点空 token 不鉴权）。CORS 放开不在此列：等同 aria2 的
+/// `--rpc-allow-origin-all`，用户可显式选择空 token 开启（提交仍弹确认框）。缺 token 时生成
 /// 随机 token，返回是否发生了改动；已有 token 一律保留。server 模式的空密钥表示尚未完成
 /// 首次设置，由兼容 API 自身拒绝，调用方不得对它调用本函数。
 pub(crate) fn ensure_exposed_auth_token(state: &mut crate::state::AgentState) -> bool {
-    let exposed = (state.gateway.lan_enabled || state.gateway.cors_enabled)
+    let exposed = state.gateway.lan_enabled
         && (state.gateway.takeover_enabled || state.gateway.jsonrpc_enabled);
     if exposed && state.gateway_user_token.trim().is_empty() {
         state.gateway_user_token = generate_user_token();
@@ -3290,7 +3291,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exposing_compat_endpoints_to_lan_or_cors_requires_a_token() {
+    async fn exposing_compat_endpoints_to_lan_requires_a_token_but_cors_does_not() {
         let harness = TestGateway::new("gateway_exposed_token").await;
 
         // 只开局域网、兼容端点全关：不必有 token。
@@ -3330,19 +3331,19 @@ mod tests {
         assert_eq!(result["userTokenConfigured"], serde_json::json!(false));
         assert!(harness.user_token().await.is_empty());
 
-        // CORS 放开同理。
+        // CORS 放开不强制 token：允许空 token 开启。
         let result = harness
             .patch_gateway(serde_json::json!({ "corsEnabled": true }))
             .await;
-        assert_eq!(result["userTokenConfigured"], serde_json::json!(true));
-        assert_eq!(harness.user_token().await.len(), 64);
+        assert_eq!(result["userTokenConfigured"], serde_json::json!(false));
+        assert!(harness.user_token().await.is_empty());
         harness.finish().await;
     }
 
     #[test]
     fn exposed_token_is_only_generated_for_exposed_compat_endpoints() {
         let mut state = crate::state::AgentState::default();
-        state.gateway.cors_enabled = true;
+        state.gateway.lan_enabled = true;
         state.gateway.takeover_enabled = false;
         state.gateway.jsonrpc_enabled = false;
         assert!(!ensure_exposed_auth_token(&mut state));
