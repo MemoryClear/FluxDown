@@ -91,11 +91,117 @@ async fn make_sample_webm(bridge: &EngineBridge, jail: &Path, name: &str) {
     assert!(jail.join(name).exists(), "webm 样本应存在");
 }
 
+async fn make_sample(
+    bridge: &EngineBridge,
+    jail: &Path,
+    name: &str,
+    video_codec: Option<&str>,
+    audio_codec: Option<&str>,
+) {
+    let mut args = Vec::new();
+    if video_codec.is_some() {
+        args.extend(["-f", "lavfi", "-i", "testsrc2=size=32x32:rate=5"]);
+    }
+    if audio_codec.is_some() {
+        args.extend(["-f", "lavfi", "-i", "sine=frequency=440"]);
+    }
+    args.extend(["-t", "0.3"]);
+    if let Some(codec) = video_codec {
+        args.extend(["-c:v", codec]);
+    }
+    if let Some(codec) = audio_codec {
+        args.extend(["-c:a", codec]);
+    }
+    args.extend(["-y", name]);
+
+    let out = bridge
+        .run_ffmpeg(
+            "test@ff",
+            jail.to_path_buf(),
+            FfmpegSpec {
+                args: args.into_iter().map(String::from).collect(),
+                subdir: None,
+                timeout_ms: Some(60_000),
+            },
+        )
+        .await
+        .expect("gen media sample");
+    assert_eq!(out.code, 0, "样本生成失败: {}", out.stderr);
+    assert!(jail.join(name).exists(), "样本应存在: {name}");
+}
+
+async fn probe_stream_codecs(
+    bridge: &EngineBridge,
+    jail: &Path,
+    name: &str,
+) -> Vec<(String, String)> {
+    let out = bridge
+        .run_ffprobe(
+            "test@ff",
+            jail.to_path_buf(),
+            FfmpegSpec {
+                args: [
+                    "-v",
+                    "error",
+                    "-print_format",
+                    "json",
+                    "-show_entries",
+                    "stream=codec_type,codec_name",
+                    name,
+                ]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+                subdir: None,
+                timeout_ms: Some(60_000),
+            },
+        )
+        .await
+        .expect("probe media sample");
+    assert_eq!(out.code, 0, "样本探测失败: {}", out.stderr);
+    let probe: serde_json::Value = serde_json::from_str(&out.stdout).expect("parse ffprobe json");
+    probe["streams"]
+        .as_array()
+        .expect("ffprobe streams array")
+        .iter()
+        .map(|stream| {
+            (
+                stream["codec_type"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                stream["codec_name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        })
+        .collect()
+}
+
+async fn assert_stream_codecs(
+    bridge: &EngineBridge,
+    jail: &Path,
+    name: &str,
+    expected: &[(&str, &str)],
+) {
+    let codecs = probe_stream_codecs(bridge, jail, name).await;
+    for &(stream_type, codec_name) in expected {
+        assert!(
+            codecs
+                .iter()
+                .any(|codec| codec == &(stream_type.to_string(), codec_name.to_string())),
+            "{name} 缺少 {stream_type}/{codec_name} 轨，实际: {codecs:?}"
+        );
+    }
+}
+
 async fn run_on_done(
     rt: &QuickJsScriptRuntime,
     bridge: Arc<dyn PluginBridge>,
     jail: &Path,
     file_path: &Path,
+    audio_path: Option<&Path>,
     settings_json: &str,
 ) {
     let script = PluginScript {
@@ -109,8 +215,8 @@ async fn run_on_done(
         task_id: "t1".to_string(),
         url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ".to_string(),
         file_path: file_path.to_string_lossy().into_owned(),
-        audio_path: None,
-        muxed: true,
+        audio_path: audio_path.map(|path| path.to_string_lossy().into_owned()),
+        muxed: audio_path.is_none(),
     };
     let budget = ExecutionBudget {
         timeout: Duration::from_secs(120),
@@ -133,7 +239,7 @@ async fn run_on_done(
     .await;
 }
 
-/// preferMp4=false + 非 mp4 产物 → onDone 应产出同名 .mp4。
+/// preferMp4=true + 非 mp4 产物 → onDone 应产出同名 .mp4。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_done_converts_webm_to_mp4() {
     let Ok(ffmpeg) = std::env::var("FLUXDOWN_TEST_FFMPEG") else {
@@ -152,7 +258,8 @@ async fn on_done_converts_webm_to_mp4() {
         dyn_bridge,
         &jail,
         &jail.join("out.webm"),
-        r#"{"preferMp4":false,"verbose":true,"quality":"best"}"#,
+        None,
+        r#"{"preferMp4":true,"verbose":true,"quality":"best"}"#,
     )
     .await;
 
@@ -161,9 +268,9 @@ async fn on_done_converts_webm_to_mp4() {
     assert!(meta.len() > 0, "产出的 mp4 应非空");
 }
 
-/// preferMp4=true → 门控短路，不产出 mp4（源 webm 原样保留）。
+/// preferMp4=false → 门控短路，不产出 mp4（源 webm 原样保留）。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn on_done_skips_when_prefer_mp4() {
+async fn on_done_skips_when_prefer_mp4_is_false() {
     let Ok(ffmpeg) = std::env::var("FLUXDOWN_TEST_FFMPEG") else {
         eprintln!("[skip] 未设置 FLUXDOWN_TEST_FFMPEG，跳过门控断言");
         return;
@@ -180,12 +287,185 @@ async fn on_done_skips_when_prefer_mp4() {
         dyn_bridge,
         &jail,
         &jail.join("keep.webm"),
-        r#"{"preferMp4":true,"verbose":true,"quality":"best"}"#,
+        None,
+        r#"{"preferMp4":false,"verbose":true,"quality":"best"}"#,
     )
     .await;
 
     assert!(
         !jail.join("keep.mp4").exists(),
-        "preferMp4=true 时不应产出 mp4"
+        "preferMp4=false 时不应产出 mp4"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn on_done_remuxes_h264_container_to_mp4() {
+    let Ok(ffmpeg) = std::env::var("FLUXDOWN_TEST_FFMPEG") else {
+        eprintln!("[skip] 未设置 FLUXDOWN_TEST_FFMPEG，跳过 remux 断言");
+        return;
+    };
+    let data_dir = unique_dir("data_remux");
+    let jail = unique_dir("jail_remux");
+    let bridge = make_bridge(&data_dir, &ffmpeg).await;
+    make_sample(&bridge, &jail, "remux.mkv", Some("libx264"), Some("aac")).await;
+
+    let rt = QuickJsScriptRuntime::new(2).expect("runtime");
+    let dyn_bridge: Arc<dyn PluginBridge> = bridge.clone();
+    run_on_done(
+        &rt,
+        dyn_bridge,
+        &jail,
+        &jail.join("remux.mkv"),
+        None,
+        r#"{"preferMp4":true,"verbose":true}"#,
+    )
+    .await;
+
+    assert!(jail.join("remux.mp4").exists(), "h264 mkv 应 remux 为 mp4");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn on_done_merges_audio_sidecar_for_compatible_video() {
+    let Ok(ffmpeg) = std::env::var("FLUXDOWN_TEST_FFMPEG") else {
+        eprintln!("[skip] 未设置 FLUXDOWN_TEST_FFMPEG，跳过 sidecar 合并断言");
+        return;
+    };
+    let data_dir = unique_dir("data_sidecar");
+    let jail = unique_dir("jail_sidecar");
+    let bridge = make_bridge(&data_dir, &ffmpeg).await;
+    make_sample(&bridge, &jail, "video.mp4", Some("libx264"), None).await;
+    make_sample(&bridge, &jail, "video.audio.m4a", None, Some("aac")).await;
+
+    let rt = QuickJsScriptRuntime::new(2).expect("runtime");
+    let dyn_bridge: Arc<dyn PluginBridge> = bridge.clone();
+    run_on_done(
+        &rt,
+        dyn_bridge,
+        &jail,
+        &jail.join("video.mp4"),
+        Some(&jail.join("video.audio.m4a")),
+        r#"{"preferMp4":true,"verbose":true}"#,
+    )
+    .await;
+
+    assert!(
+        jail.join("video.compatible.mp4").exists(),
+        "已有 h264 mp4 仍须合并独立音频"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn on_done_skips_compatible_output_pure_audio_and_probe_failure() {
+    let Ok(ffmpeg) = std::env::var("FLUXDOWN_TEST_FFMPEG") else {
+        eprintln!("[skip] 未设置 FLUXDOWN_TEST_FFMPEG，跳过短路分支断言");
+        return;
+    };
+    let data_dir = unique_dir("data_skips");
+    let jail = unique_dir("jail_skips");
+    let bridge = make_bridge(&data_dir, &ffmpeg).await;
+    make_sample(
+        &bridge,
+        &jail,
+        "compatible.mp4",
+        Some("libx264"),
+        Some("aac"),
+    )
+    .await;
+    make_sample(&bridge, &jail, "audio.m4a", None, Some("aac")).await;
+
+    let rt = QuickJsScriptRuntime::new(2).expect("runtime");
+    for name in ["compatible.mp4", "audio.m4a", "missing.webm"] {
+        let dyn_bridge: Arc<dyn PluginBridge> = bridge.clone();
+        run_on_done(
+            &rt,
+            dyn_bridge,
+            &jail,
+            &jail.join(name),
+            None,
+            r#"{"preferMp4":true,"verbose":true}"#,
+        )
+        .await;
+    }
+
+    assert!(!jail.join("compatible.compatible.mp4").exists());
+    assert!(!jail.join("audio.mp4").exists());
+    assert!(!jail.join("missing.mp4").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn on_done_transcodes_non_h264_video_inside_mp4() {
+    let Ok(ffmpeg) = std::env::var("FLUXDOWN_TEST_FFMPEG") else {
+        eprintln!("[skip] 未设置 FLUXDOWN_TEST_FFMPEG，跳过 MP4 视频转码断言");
+        return;
+    };
+    let data_dir = unique_dir("data_non_h264_mp4");
+    let jail = unique_dir("jail_non_h264_mp4");
+    let bridge = make_bridge(&data_dir, &ffmpeg).await;
+    make_sample(&bridge, &jail, "mpeg4.mp4", Some("mpeg4"), Some("aac")).await;
+    assert_stream_codecs(
+        &bridge,
+        &jail,
+        "mpeg4.mp4",
+        &[("video", "mpeg4"), ("audio", "aac")],
+    )
+    .await;
+
+    let rt = QuickJsScriptRuntime::new(2).expect("runtime");
+    let dyn_bridge: Arc<dyn PluginBridge> = bridge.clone();
+    run_on_done(
+        &rt,
+        dyn_bridge,
+        &jail,
+        &jail.join("mpeg4.mp4"),
+        None,
+        r#"{"preferMp4":true,"verbose":true}"#,
+    )
+    .await;
+
+    assert_stream_codecs(
+        &bridge,
+        &jail,
+        "mpeg4.compatible.mp4",
+        &[("video", "h264"), ("audio", "aac")],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn on_done_transcodes_non_aac_audio_inside_h264_mp4() {
+    let Ok(ffmpeg) = std::env::var("FLUXDOWN_TEST_FFMPEG") else {
+        eprintln!("[skip] 未设置 FLUXDOWN_TEST_FFMPEG，跳过 MP4 音频转码断言");
+        return;
+    };
+    let data_dir = unique_dir("data_non_aac_mp4");
+    let jail = unique_dir("jail_non_aac_mp4");
+    let bridge = make_bridge(&data_dir, &ffmpeg).await;
+    make_sample(&bridge, &jail, "alac.mp4", Some("libx264"), Some("alac")).await;
+    assert_stream_codecs(
+        &bridge,
+        &jail,
+        "alac.mp4",
+        &[("video", "h264"), ("audio", "alac")],
+    )
+    .await;
+
+    let rt = QuickJsScriptRuntime::new(2).expect("runtime");
+    let dyn_bridge: Arc<dyn PluginBridge> = bridge.clone();
+    run_on_done(
+        &rt,
+        dyn_bridge,
+        &jail,
+        &jail.join("alac.mp4"),
+        None,
+        r#"{"preferMp4":true,"verbose":true}"#,
+    )
+    .await;
+
+    assert_stream_codecs(
+        &bridge,
+        &jail,
+        "alac.compatible.mp4",
+        &[("video", "h264"), ("audio", "aac")],
+    )
+    .await;
 }
