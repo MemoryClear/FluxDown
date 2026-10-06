@@ -1159,14 +1159,15 @@ impl GatewayService {
                 Some(serde_json::json!({ "taskId": task_id })),
             )
             .await?;
-        let result = if reveal {
-            crate::platform::reveal_task(&task)
-        } else {
-            crate::platform::open_task(&task)
-        };
-        result
-            .map(|()| serde_json::json!({ "ok": true }))
-            .map_err(|error| internal_error("open/reveal task", error))
+        platform_blocking(move || {
+            if reveal {
+                crate::platform::reveal_task(&task)
+            } else {
+                crate::platform::open_task(&task)
+            }
+        })
+        .await
+        .map(|()| serde_json::json!({ "ok": true }))
     }
 
     async fn ui_connected(&self) {
@@ -1363,6 +1364,12 @@ fn platform_error_data(error: PlatformError) -> RpcErrorData {
         PlatformError::InvalidScheme(_) => invalid_field("scheme"),
         PlatformError::Unsupported(_) => {
             RpcErrorData::new(ApplicationErrorCode::Unsupported, false)
+        }
+        PlatformError::Io(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            RpcErrorData::new(ApplicationErrorCode::NotFound, false)
+        }
+        PlatformError::Failed(msg) if msg.contains("not found") => {
+            RpcErrorData::new(ApplicationErrorCode::NotFound, false)
         }
         PlatformError::Io(_) | PlatformError::Failed(_) => {
             RpcErrorData::new(ApplicationErrorCode::Internal, false)
@@ -1831,7 +1838,7 @@ fn local_platform_permitted(peer: std::net::IpAddr, headers: &HeaderMap) -> bool
 }
 
 fn direct_local_platform_permitted(peer: std::net::IpAddr, headers: &HeaderMap) -> bool {
-    if !peer.is_loopback() {
+    if !peer.to_canonical().is_loopback() {
         return false;
     }
 
@@ -1843,7 +1850,7 @@ fn direct_local_platform_permitted(peer: std::net::IpAddr, headers: &HeaderMap) 
             if value.split(',').any(|hop| {
                 hop.trim()
                     .parse::<std::net::IpAddr>()
-                    .map_or(true, |ip| !ip.is_loopback())
+                    .map_or(true, |ip| !ip.to_canonical().is_loopback())
             }) {
                 return false;
             }
@@ -1851,6 +1858,40 @@ fn direct_local_platform_permitted(peer: std::net::IpAddr, headers: &HeaderMap) 
     }
 
     let mut saw_authority = false;
+    for value in headers.get_all("forwarded") {
+        let Ok(value) = value.to_str() else {
+            return false;
+        };
+        for elem in value.split(',') {
+            for param in elem.split(';') {
+                let param = param.trim();
+                if let Some((k, v)) = param.split_once('=') {
+                    let v = v.trim().trim_matches('"');
+                    if k.eq_ignore_ascii_case("for") {
+                        let ip_str = if let Some(inside) = v.strip_prefix('[') {
+                            inside.split(']').next().unwrap_or(inside)
+                        } else if let Some((ip, _port)) = v.split_once(':') {
+                            if v.matches(':').count() == 1 { ip } else { v }
+                        } else {
+                            v
+                        };
+                        let Ok(ip) = ip_str.parse::<std::net::IpAddr>() else {
+                            return false;
+                        };
+                        if !ip.to_canonical().is_loopback() {
+                            return false;
+                        }
+                    } else if k.eq_ignore_ascii_case("host") {
+                        saw_authority = true;
+                        if !loopback_authority(v) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     for (name, origin) in [
         (header::HOST.as_str(), false),
         (header::ORIGIN.as_str(), true),
@@ -1884,11 +1925,14 @@ fn loopback_authority(value: &str) -> bool {
         .parse::<axum::http::uri::Authority>()
         .ok()
         .is_some_and(|authority| {
-            let host = authority.host().trim_matches(['[', ']']);
+            let host = authority
+                .host()
+                .trim_matches(['[', ']'])
+                .trim_end_matches('.');
             host.eq_ignore_ascii_case("localhost")
                 || host
                     .parse::<std::net::IpAddr>()
-                    .is_ok_and(|ip| ip.is_loopback())
+                    .is_ok_and(|ip| ip.to_canonical().is_loopback())
         })
 }
 
@@ -3878,7 +3922,43 @@ mod tests {
             "x-forwarded-for",
             "192.0.2.10".parse().expect("remote forwarded hop"),
         );
-        assert!(!direct_local_platform_permitted(loopback, &duplicate));
+        assert!(direct_local_platform_permitted(
+            "::ffff:127.0.0.1".parse().expect("ipv4-mapped loopback"),
+            &headers(&[("host", "[::ffff:127.0.0.1]:17800")])
+        ));
+        assert!(direct_local_platform_permitted(
+            loopback,
+            &headers(&[("host", "localhost.:17800")])
+        ));
+        assert!(direct_local_platform_permitted(
+            loopback,
+            &headers(&[
+                ("host", "localhost:17800"),
+                ("forwarded", "for=127.0.0.1;proto=http;by=127.0.0.1"),
+            ])
+        ));
+        assert!(direct_local_platform_permitted(
+            loopback,
+            &headers(&[
+                ("host", "localhost:17800"),
+                ("forwarded", "for=\"[::1]:1234\", for=127.0.0.1"),
+            ])
+        ));
+        assert!(!direct_local_platform_permitted(
+            loopback,
+            &headers(&[("host", "localhost:17800"), ("forwarded", "for=192.0.2.10"),])
+        ));
+        assert!(!direct_local_platform_permitted(
+            loopback,
+            &headers(&[
+                ("host", "localhost:17800"),
+                ("forwarded", "for=\"[2001:db8::1]\""),
+            ])
+        ));
+        assert!(!direct_local_platform_permitted(
+            loopback,
+            &headers(&[("host", "localhost:17800"), ("forwarded", "for=_gazonk"),])
+        ));
         assert!(!direct_local_platform_permitted(
             loopback,
             &HeaderMap::new()
