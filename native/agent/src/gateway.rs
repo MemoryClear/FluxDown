@@ -155,9 +155,10 @@ impl GatewayService {
         self
     }
 
-    async fn call(&self, request: RpcRequest) -> RpcResponse {
+    /// 构造 RPC 响应，并把「本机来源」判定透传给 [`Self::dispatch_with`]。
+    async fn call_with(&self, allow_local_platform: bool, request: RpcRequest) -> RpcResponse {
         let id = request.id.clone();
-        match self.dispatch(request).await {
+        match self.dispatch_with(request, allow_local_platform).await {
             Ok(value) => RpcResponse::success(id, value),
             Err(data) => {
                 RpcResponse::failure(id, RpcErrorObject::application("agent RPC failed", data))
@@ -180,8 +181,27 @@ impl GatewayService {
     }
 
     async fn dispatch(&self, request: RpcRequest) -> Result<serde_json::Value, RpcErrorData> {
+        self.dispatch_with(request, false).await
+    }
+
+    /// 与 [`Self::dispatch`] 相同，但可放行「仅字面本机」的桌面集成调用。
+    ///
+    /// `allow_local_platform` 只在一个「本机来源」的连接上为 `true`：对端是环回地址
+    /// （127.0.0.1/::1），或显式设置 `FLUXDOWN_ALLOW_LOCAL_PLATFORM=1`。用于让
+    /// **headless server 跑在同一台机器**（如本机 NAS）时，Web UI 也能「定位/打开文件」；
+    /// 不改变真正的远程部署语义——远程来源仍得 `Unsupported`。
+    async fn dispatch_with(
+        &self,
+        request: RpcRequest,
+        allow_local_platform: bool,
+    ) -> Result<serde_json::Value, RpcErrorData> {
         // 桌面专属集成（打开 / 定位文件、开机自启、文件与协议关联）在 headless 宿主不存在。
-        if self.server_mode && request.method.starts_with("agent.platform.") {
+        // 唯二例外：本机来源（环回/env 放行）的「打开任务 / 定位任务」——让同机 server 的
+        // Web UI 也能打开文件；远程来源与其余 platform.* 一律拒绝。
+        if self.server_mode
+            && request.method.starts_with("agent.platform.")
+            && !(allow_local_platform && local_platform_method_allowed(&request.method))
+        {
             return Err(RpcErrorData::new(ApplicationErrorCode::Unsupported, false));
         }
         if self.server_mode && server_mode_denies(&request) {
@@ -1585,6 +1605,10 @@ async fn rpc_upgrade(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
+    // 「本机来源」判定在建连时拍板：对端环回或显式 env 放行。桌面形态（无 server）
+    // 恒为 true——桌面本就在本机。
+    let allow_local_platform =
+        state.server.is_none() || local_platform_permitted(peer.ip(), &headers);
     let upgrade = match state.server.as_deref() {
         Some(server) => {
             if let Err(status) = server.authorize_rpc_from(peer.ip(), &headers, &state.bearer) {
@@ -1601,7 +1625,9 @@ async fn rpc_upgrade(
         }
     };
     upgrade
-        .on_upgrade(move |socket| run_socket(socket, state.service, state.cancel))
+        .on_upgrade(move |socket| {
+            run_socket(socket, state.service, state.cancel, allow_local_platform)
+        })
         .into_response()
 }
 
@@ -1609,6 +1635,7 @@ async fn run_socket(
     mut socket: WebSocket,
     service: Arc<GatewayService>,
     cancel: CancellationToken,
+    allow_local_platform: bool,
 ) {
     let mut ready = false;
     let mut ui_client = false;
@@ -1661,7 +1688,7 @@ async fn run_socket(
                             ready = true;
                             ui_client = declares_selection_ui(&hello);
                             if ui_client { service.ui_connected().await; }
-                            let (receiver, session_lanes, response_rx) = service.open_session();
+                            let (receiver, session_lanes, response_rx) = service.open_session(allow_local_platform);
                             events = Some(receiver);
                             lanes = Some(session_lanes);
                             responses = Some(response_rx);
@@ -1771,6 +1798,7 @@ impl GatewayService {
     /// 握手通过后的连接装配：事件订阅、请求通道与响应队列（WebSocket 与进程内连接共用）。
     fn open_session(
         self: &Arc<Self>,
+        allow_local_platform: bool,
     ) -> (
         tokio::sync::broadcast::Receiver<EventFrame>,
         RequestLanes,
@@ -1778,9 +1806,105 @@ impl GatewayService {
     ) {
         let (events, _) = self.events.subscribe_and_snapshot();
         let (response_tx, response_rx) = tokio::sync::mpsc::channel(RESPONSE_QUEUE);
-        let lanes = RequestLanes::spawn(self, response_tx);
+        let lanes = RequestLanes::spawn(self, response_tx, allow_local_platform);
         (events, lanes, response_rx)
     }
+}
+
+/// 允许「本机来源」在 server 模式下调用的 `agent.platform.*` 子集。
+///
+/// 只放行「与本机文件系统交互、但无系统级副作用」的两个打开动作。**不含**
+/// 自启 / 文件关联 / 协议注册 / `openPath` 之类可写注册表或任意路径的动作——那些仍
+/// 一律拒绝，即使来源是本机。
+fn local_platform_method_allowed(method: &str) -> bool {
+    matches!(
+        method,
+        fluxdown_protocol::method::AGENT_PLATFORM_OPEN_TASK
+            | fluxdown_protocol::method::AGENT_PLATFORM_REVEAL_TASK
+    )
+}
+
+/// 本连接是否可放行「仅字面本机」的桌面集成。环境变量是显式越权开关；自动判定则要求
+/// TCP 对端、转发链与浏览器 authority 都是字面环回，避免同机反代把远程浏览器伪装成本机。
+fn local_platform_permitted(peer: std::net::IpAddr, headers: &HeaderMap) -> bool {
+    env_flag(ENV_ALLOW_LOCAL_PLATFORM) || direct_local_platform_permitted(peer, headers)
+}
+
+fn direct_local_platform_permitted(peer: std::net::IpAddr, headers: &HeaderMap) -> bool {
+    if !peer.is_loopback() {
+        return false;
+    }
+
+    for name in ["x-forwarded-for", "x-real-ip"] {
+        for value in headers.get_all(name) {
+            let Ok(value) = value.to_str() else {
+                return false;
+            };
+            if value.split(',').any(|hop| {
+                hop.trim()
+                    .parse::<std::net::IpAddr>()
+                    .map_or(true, |ip| !ip.is_loopback())
+            }) {
+                return false;
+            }
+        }
+    }
+
+    let mut saw_authority = false;
+    for (name, origin) in [
+        (header::HOST.as_str(), false),
+        (header::ORIGIN.as_str(), true),
+        ("x-forwarded-host", false),
+    ] {
+        for value in headers.get_all(name) {
+            let Ok(value) = value.to_str() else {
+                return false;
+            };
+            for value in value.split(',') {
+                saw_authority = true;
+                let authority = if origin {
+                    let Some((_, authority)) = value.trim().split_once("://") else {
+                        return false;
+                    };
+                    authority.trim_end_matches('/')
+                } else {
+                    value.trim()
+                };
+                if !loopback_authority(authority) {
+                    return false;
+                }
+            }
+        }
+    }
+    saw_authority
+}
+
+fn loopback_authority(value: &str) -> bool {
+    value
+        .parse::<axum::http::uri::Authority>()
+        .ok()
+        .is_some_and(|authority| {
+            let host = authority.host().trim_matches(['[', ']']);
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        })
+}
+
+/// 显式放行「本机来源」桌面集成的环境变量（见 [`local_platform_permitted`]）。
+const ENV_ALLOW_LOCAL_PLATFORM: &str = "FLUXDOWN_ALLOW_LOCAL_PLATFORM";
+
+/// 简单布尔环境变量判定：`1` / `true` / `yes` / `on`（大小写不敏感）为真。
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 /// headless 宿主不提供桌面集成：打开路径、写注册表 / 关联、请求管理员授权、打开系统设置与
@@ -1897,6 +2021,7 @@ impl RequestLanes {
     fn spawn(
         service: &Arc<GatewayService>,
         responses: tokio::sync::mpsc::Sender<RpcResponse>,
+        allow_local_platform: bool,
     ) -> Self {
         let mut tasks = tokio::task::JoinSet::new();
         let mut start = || {
@@ -1905,7 +2030,7 @@ impl RequestLanes {
             let responses = responses.clone();
             tasks.spawn(async move {
                 while let Some(request) = receiver.recv().await {
-                    let response = service.call(request).await;
+                    let response = service.call_with(allow_local_platform, request).await;
                     if responses.send(response).await.is_err() {
                         break;
                     }
@@ -1936,7 +2061,7 @@ impl RequestLanes {
                         let service = Arc::clone(&service);
                         let responses = responses.clone();
                         calls.spawn(async move {
-                            let response = service.call(request).await;
+                            let response = service.call_with(allow_local_platform, request).await;
                             if responses.send(response).await.is_err() {
                                 tracing::trace!("gateway connection closed before concurrent response");
                             }
@@ -2063,8 +2188,8 @@ mod tests {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
     use super::{
-        GatewayService, GatewayShell, Lane, authorized, ensure_exposed_auth_token, lane_for,
-        load_or_create_bearer,
+        GatewayService, GatewayShell, Lane, authorized, direct_local_platform_permitted,
+        ensure_exposed_auth_token, lane_for, load_or_create_bearer,
     };
     #[tokio::test]
     async fn service_bearer_is_exact_stable_and_private() {
@@ -2462,11 +2587,10 @@ mod tests {
 
         async fn call(&self, method_name: &str, params: serde_json::Value) -> RpcResponse {
             self.service
-                .call(RpcRequest::new(
-                    RequestId::Integer(1),
-                    method_name,
-                    Some(params),
-                ))
+                .call_with(
+                    false,
+                    RpcRequest::new(RequestId::Integer(1), method_name, Some(params)),
+                )
                 .await
         }
 
@@ -3338,11 +3462,14 @@ mod tests {
             };
             let response = tokio::time::timeout(
                 Duration::from_secs(2),
-                service.call(RpcRequest::new(
-                    RequestId::Integer(i64::try_from(index).unwrap_or(i64::MAX)),
-                    method_name,
-                    Some(params),
-                )),
+                service.call_with(
+                    false,
+                    RpcRequest::new(
+                        RequestId::Integer(i64::try_from(index).unwrap_or(i64::MAX)),
+                        method_name,
+                        Some(params),
+                    ),
+                ),
             )
             .await
             .unwrap_or_else(|_| panic!("{method_name} dispatch timed out"));
@@ -3534,7 +3661,7 @@ mod tests {
         });
         let service = Arc::new(harness.service);
         let (responses, mut receiver) = tokio::sync::mpsc::channel(4);
-        let lanes = super::RequestLanes::spawn(&service, responses);
+        let lanes = super::RequestLanes::spawn(&service, responses, false);
         assert!(
             lanes
                 .submit(RpcRequest::new(
@@ -3642,5 +3769,119 @@ mod tests {
         assert_eq!(accepted["userTokenConfigured"], true);
         assert_eq!(harness.user_token().await, "flux2026abc");
         harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn server_mode_only_allows_safe_platform_methods_for_local_connections() {
+        let harness = TestGateway::new_mode("server_mode_local_platform", true).await;
+
+        for method_name in [
+            fluxdown_protocol::method::AGENT_PLATFORM_OPEN_TASK,
+            fluxdown_protocol::method::AGENT_PLATFORM_REVEAL_TASK,
+        ] {
+            let response = harness
+                .service
+                .call_with(
+                    true,
+                    RpcRequest::new(RequestId::Integer(1), method_name, None),
+                )
+                .await;
+            let RpcResponse::Failure(failure) = response else {
+                panic!("{method_name} without a task id must fail validation");
+            };
+            assert_eq!(
+                failure.error.data.map(|data| data.code),
+                Some(ApplicationErrorCode::InvalidArgument),
+                "{method_name}"
+            );
+        }
+
+        for method_name in [
+            fluxdown_protocol::method::AGENT_PLATFORM_OPEN_PATH,
+            fluxdown_protocol::method::AGENT_PLATFORM_INTEGRATION_GET,
+            fluxdown_protocol::method::AGENT_PLATFORM_SET_AUTOSTART,
+        ] {
+            let response = harness
+                .service
+                .call_with(
+                    true,
+                    RpcRequest::new(RequestId::Integer(2), method_name, None),
+                )
+                .await;
+            let RpcResponse::Failure(failure) = response else {
+                panic!("{method_name} must stay blocked in server mode");
+            };
+            assert_eq!(
+                failure.error.data.map(|data| data.code),
+                Some(ApplicationErrorCode::Unsupported),
+                "{method_name}"
+            );
+        }
+
+        harness.finish().await;
+    }
+
+    #[test]
+    fn local_platform_source_fails_closed_behind_public_proxies() {
+        let loopback: std::net::IpAddr = "127.0.0.1".parse().expect("loopback");
+        let remote: std::net::IpAddr = "192.0.2.10".parse().expect("remote");
+        let headers = |pairs: &[(&'static str, &'static str)]| {
+            let mut headers = HeaderMap::new();
+            for (name, value) in pairs {
+                headers.insert(*name, value.parse().expect("header value"));
+            }
+            headers
+        };
+
+        assert!(direct_local_platform_permitted(
+            loopback,
+            &headers(&[
+                ("host", "localhost:17800"),
+                ("origin", "http://localhost:17800")
+            ])
+        ));
+        assert!(direct_local_platform_permitted(
+            "::1".parse().expect("ipv6 loopback"),
+            &headers(&[("host", "[::1]:17800")])
+        ));
+        assert!(!direct_local_platform_permitted(
+            remote,
+            &headers(&[("host", "192.0.2.20:17800")])
+        ));
+        assert!(!direct_local_platform_permitted(
+            loopback,
+            &headers(&[
+                ("host", "127.0.0.1:17800"),
+                ("x-forwarded-for", "192.0.2.10"),
+            ])
+        ));
+        assert!(!direct_local_platform_permitted(
+            loopback,
+            &headers(&[
+                ("host", "127.0.0.1:17800"),
+                ("origin", "https://downloads.example.com"),
+                ("x-forwarded-host", "downloads.example.com"),
+            ])
+        ));
+        let mut duplicate = headers(&[("host", "localhost:17800")]);
+        duplicate.append(
+            "host",
+            "downloads.example.com".parse().expect("public host"),
+        );
+        assert!(!direct_local_platform_permitted(loopback, &duplicate));
+        let mut duplicate = headers(&[("host", "localhost:17800")]);
+        duplicate.append(
+            "x-forwarded-for",
+            "127.0.0.1".parse().expect("local forwarded hop"),
+        );
+        duplicate.append(
+            "x-forwarded-for",
+            "192.0.2.10".parse().expect("remote forwarded hop"),
+        );
+        assert!(!direct_local_platform_permitted(loopback, &duplicate));
+        assert!(!direct_local_platform_permitted(
+            loopback,
+            &HeaderMap::new()
+        ));
     }
 }

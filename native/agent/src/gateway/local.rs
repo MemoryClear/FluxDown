@@ -59,7 +59,7 @@ impl GatewayService {
         if ui_client {
             self.ui_connected().await;
         }
-        let (events, lanes, responses) = self.open_session();
+        let (events, lanes, responses) = self.open_session(true);
         let waiters = Arc::new(Waiters::default());
         tokio::spawn(route_responses(responses, Arc::clone(&waiters)));
         Ok(LocalConnection {

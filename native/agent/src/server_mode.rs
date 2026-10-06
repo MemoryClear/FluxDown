@@ -6,7 +6,8 @@
 //! - 浏览器鉴权：`/rpc` 子协议携带密钥、Origin 同源校验、`/api/v1/setup*` 首次初始化；
 //! - 浏览器文件面 `/api/web/*`：把上传 / 下载流式转发到 daemon 的 loopback HTTP；
 //! - SPA 托管（内嵌或 `FLUXDOWN_WEBROOT`）与演示模式 `/demo/file`；
-//! - 桌面专属集成（NMH、开机自启迁移、`agent.platform.*`、托盘 / 剪贴板）全部关闭。
+//! - 桌面专属集成（NMH、开机自启迁移、托盘 / 剪贴板）关闭；`agent.platform.*` 仅对
+//!   本机来源放行打开 / 定位任务产物。
 //!
 //! 环境变量语义见 [`ServerConfig::from_lookup`]；`FLUXDOWN_DATA_DIR` /
 //! `FLUXDOWN_DATABASE_URL` / `FLUXDOWN_SAVE_DIR` 不在这里解析，由 daemon 从继承的环境读取。
