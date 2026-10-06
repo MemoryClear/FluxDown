@@ -1102,17 +1102,23 @@ impl PluginBridge for EngineBridge {
         let (stdout, truncated_stdout) = truncate_utf8(&output.stdout, stdout_cap);
         let (stderr, truncated_stderr) = truncate_utf8(&output.stderr, YTDLP_STDERR_CAP);
         let code = output.status.code().unwrap_or(-1);
+        let trunc_mark = if truncated_stdout { " [TRUNCATED]" } else { "" };
         if code == 0 {
-            log_info!("[ytdlp-exec] 结果: code=0, stdout={} 字节", stdout.len());
+            log_info!(
+                "[ytdlp-exec] 结果: code=0, stdout={} 字节{}",
+                stdout.len(),
+                trunc_mark
+            );
         } else {
             let stderr_tail: String = {
                 let n = stderr.chars().count();
                 stderr.chars().skip(n.saturating_sub(600)).collect()
             };
             log_error!(
-                "[ytdlp-exec] 结果: code={code}, cwd={}, stdout={} 字节, stderr={stderr_tail}",
+                "[ytdlp-exec] 结果: code={code}, cwd={}, stdout={} 字节{}, stderr={stderr_tail}",
                 work.display(),
-                stdout.len()
+                stdout.len(),
+                trunc_mark
             );
         }
         Ok(YtdlpOutcome {
@@ -1401,18 +1407,27 @@ fn env_cap() -> Option<usize> {
         .map(clamp_cap)
 }
 
-/// 解析上限字符串：纯十进制字节，或 `<n>k` / `<n>m`（大小写不敏感，1024 进制）。
+/// 解析上限字符串：纯十进制字节，或 `<n>k`/`<n>kb`/`<n>kib`、`<n>m`/`<n>mb`/`<n>mib`、
+/// `<n>g`/`<n>gb`/`<n>gib`（大小写不敏感，1024 进制）。
 fn parse_cap(v: &str) -> Option<usize> {
-    let t = v.trim().to_ascii_lowercase();
+    let mut t = v.trim().to_ascii_lowercase();
     if t.is_empty() {
         return None;
     }
-    let (num, mult) = match t.strip_suffix('k') {
-        Some(n) => (n, 1024usize),
-        None => match t.strip_suffix('m') {
-            Some(n) => (n, 1024 * 1024),
-            None => (t.as_str(), 1),
-        },
+    if let Some(stripped) = t.strip_suffix('b') {
+        t = stripped.to_string();
+    }
+    if let Some(stripped) = t.strip_suffix('i') {
+        t = stripped.to_string();
+    }
+    let (num, mult) = if let Some(n) = t.strip_suffix('k') {
+        (n, 1024usize)
+    } else if let Some(n) = t.strip_suffix('m') {
+        (n, 1024 * 1024)
+    } else if let Some(n) = t.strip_suffix('g') {
+        (n, 1024 * 1024 * 1024)
+    } else {
+        (t.as_str(), 1)
     };
     num.trim()
         .parse::<usize>()
@@ -2095,7 +2110,14 @@ mod tests {
     fn parse_cap_accepts_bytes_and_suffixes_and_clamps() {
         assert_eq!(parse_cap("4194304"), Some(4 * 1024 * 1024));
         assert_eq!(parse_cap("16m"), Some(16 * 1024 * 1024));
+        assert_eq!(parse_cap("16mb"), Some(16 * 1024 * 1024));
+        assert_eq!(parse_cap("16MiB"), Some(16 * 1024 * 1024));
         assert_eq!(parse_cap("512k"), Some(512 * 1024));
+        assert_eq!(parse_cap("512kb"), Some(512 * 1024));
+        assert_eq!(parse_cap("512kib"), Some(512 * 1024));
+        assert_eq!(parse_cap("1g"), Some(1024 * 1024 * 1024));
+        assert_eq!(parse_cap("1gb"), Some(1024 * 1024 * 1024));
+        assert_eq!(parse_cap("1gib"), Some(1024 * 1024 * 1024));
         assert_eq!(parse_cap("  8M  "), Some(8 * 1024 * 1024));
         assert_eq!(parse_cap("1.5m"), None);
         assert_eq!(parse_cap("-1"), None);
