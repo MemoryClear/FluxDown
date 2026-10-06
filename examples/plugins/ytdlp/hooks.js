@@ -35,7 +35,8 @@ globalThis.onDone = async (ctx) => {
   var verbose = flux.settings.verbose;
 
   // 用户要「最佳质量、任意编码/容器」→ 保留原始编码，不转码。
-  if (flux.settings.preferMp4 === false) {
+  var preferMp4 = flux.settings.preferMp4;
+  if (preferMp4 === false || preferMp4 === 'false') {
     if (verbose) flux.logger.info('[ytdlp] onDone: preferMp4 关，保留原始编码');
     return;
   }
@@ -114,8 +115,12 @@ globalThis.onDone = async (ctx) => {
   args = args.concat(h264
     ? ['-c:v', 'copy']
     : ['-c:v', 'libx264', '-crf', '20', '-preset', 'veryfast']);
-  args = args.concat([
-    '-c:a', 'aac', '-b:a', '192k',
+  var audioArgs = !audio && !audioName
+    ? []
+    : (compatibleAudio && !audioName
+      ? ['-c:a', 'copy']
+      : ['-c:a', 'aac', '-b:a', '192k']);
+  args = args.concat(audioArgs).concat([
     '-movflags', '+faststart',
   ]);
   if (audioName) args.push('-map', '0:v:0', '-map', '1:a:0');
