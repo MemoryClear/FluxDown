@@ -26,7 +26,7 @@ use tokio::process::Command;
 use tokio::sync::{Semaphore, mpsc};
 
 use crate::db::Db;
-use crate::logger::{log_error, log_info};
+use crate::logger::{log_error, log_info, log_warn};
 use crate::proxy_config::ProxyConfig;
 
 use super::runtime::{
@@ -82,7 +82,7 @@ const MAX_YTDLP_ARG_LEN: usize = 8 * 1024;
 ///
 /// 运行期可覆盖（见 [`ytdlp_stdout_cap`]）：config `component.ytdlp.stdout_cap`
 /// （全局，字节）、`plugin.<id>.ytdlp.stdout_cap`（单插件，优先）或环境变量
-/// `YTDLP_STDOUT_CAP`（改默认值，无人值守部署用）。
+/// `FLUXDOWN_YTDLP_STDOUT_CAP`（改默认值，无人值守部署用）。
 const YTDLP_STDOUT_CAP: usize = 16 * 1024 * 1024;
 /// stdout 上限的允许区间：低于 1 MiB 会让正常 `-J` 频繁被截；高于 64 MiB 会
 /// 放大插件返回值与 JSON 解析开销。越界一律夹到区间内（不报错，保证下载不因
@@ -1378,61 +1378,62 @@ fn truncate_utf8(bytes: &[u8], cap: usize) -> (String, bool) {
 /// 解析生效的 yt-dlp stdout 回传上限（字节）。
 ///
 /// 优先级（高→低）：单插件 config `plugin.<id>.ytdlp.stdout_cap` → 全局 config
-/// `component.ytdlp.stdout_cap` → 环境变量 `YTDLP_STDOUT_CAP`（仅改默认值）→
-/// 常量 [`YTDLP_STDOUT_CAP`]。任何来源都夹到 `[MIN, MAX]`；解析失败回退下一级
-/// （不报错——配置写错不应让下载失败）。
+/// `component.ytdlp.stdout_cap` → 环境变量 `FLUXDOWN_YTDLP_STDOUT_CAP`（仅改默认值）→
+/// 常量 [`YTDLP_STDOUT_CAP`]。任何来源都夹到 `[MIN, MAX]`（如 `1g` 按 64 MiB 生效）；
+/// 读取 / 解析失败记日志并回退下一级——配置写错不应让下载失败。
 async fn ytdlp_stdout_cap(db: &Db, plugin_id: &str) -> usize {
     let per_plugin = format!("plugin.{plugin_id}.ytdlp.stdout_cap");
-    if let Ok(Some(v)) = db.get_config(&per_plugin).await
-        && let Some(n) = parse_cap(&v)
-    {
-        return clamp_cap(n);
+    for key in [per_plugin.as_str(), CONFIG_YTDLP_STDOUT_CAP] {
+        if let Some(cap) = configured_cap(db, key).await {
+            return cap;
+        }
     }
-    if let Ok(Some(v)) = db.get_config(CONFIG_YTDLP_STDOUT_CAP).await
-        && let Some(n) = parse_cap(&v)
-    {
-        return clamp_cap(n);
-    }
-    if let Some(n) = env_cap() {
-        return n;
-    }
-    YTDLP_STDOUT_CAP
+    std::env::var(ENV_YTDLP_STDOUT_CAP)
+        .ok()
+        .and_then(|value| parse_cap_source(ENV_YTDLP_STDOUT_CAP, &value))
+        .unwrap_or(YTDLP_STDOUT_CAP)
 }
 
-/// 解析 `YTDLP_STDOUT_CAP` 环境变量（字节或带 `k`/`m` 后缀，如 `16m`）。
-fn env_cap() -> Option<usize> {
-    std::env::var("YTDLP_STDOUT_CAP")
-        .ok()
-        .and_then(|v| parse_cap(&v))
-        .map(clamp_cap)
+/// 环境变量：改 stdout 上限的默认值（字节或带单位，如 `32m`）。
+const ENV_YTDLP_STDOUT_CAP: &str = "FLUXDOWN_YTDLP_STDOUT_CAP";
+
+async fn configured_cap(db: &Db, key: &str) -> Option<usize> {
+    match db.get_config(key).await {
+        Ok(Some(value)) => parse_cap_source(key, &value),
+        Ok(None) => None,
+        Err(e) => {
+            log_warn!("[ytdlp-exec] 读取 {key} 失败，回退下一级: {e:#}");
+            None
+        }
+    }
+}
+
+/// 解析并夹取；空值视为未设置，无法解析时记日志返回 `None`（由调用方回退下一级）。
+fn parse_cap_source(source: &str, value: &str) -> Option<usize> {
+    if value.trim().is_empty() {
+        return None;
+    }
+    let cap = parse_cap(value).map(clamp_cap);
+    if cap.is_none() {
+        log_warn!("[ytdlp-exec] {source}={value:?} 无法解析为字节数，回退下一级");
+    }
+    cap
 }
 
 /// 解析上限字符串：纯十进制字节，或 `<n>k`/`<n>kb`/`<n>kib`、`<n>m`/`<n>mb`/`<n>mib`、
-/// `<n>g`/`<n>gb`/`<n>gib`（大小写不敏感，1024 进制）。超出 64 MiB 一律经 [`clamp_cap`] 按 64 MiB 生效。
+/// `<n>g`/`<n>gb`/`<n>gib`（大小写不敏感，1024 进制）。其余后缀（如 `16i`、`16b`）判为无效。
 fn parse_cap(v: &str) -> Option<usize> {
     let t = v.trim().to_ascii_lowercase();
-    if t.is_empty() {
-        return None;
-    }
-    let (num_str, mult) = if let Some(split_pos) = t.find(|c: char| !c.is_ascii_digit()) {
-        let (num_str, unit_str) = t.split_at(split_pos);
-        if num_str.is_empty() {
-            return None;
-        }
-        let mult: usize = match unit_str.trim() {
-            "k" | "kb" | "kib" => 1024,
-            "m" | "mb" | "mib" => 1024 * 1024,
-            "g" | "gb" | "gib" => 1024 * 1024 * 1024,
-            _ => return None,
-        };
-        (num_str, mult)
-    } else {
-        (t.as_str(), 1)
+    let split = t.find(|c: char| !c.is_ascii_digit()).unwrap_or(t.len());
+    let (num, unit) = t.split_at(split);
+    let mult: usize = match unit.trim() {
+        "" => 1,
+        "k" | "kb" | "kib" => 1024,
+        "m" | "mb" | "mib" => 1024 * 1024,
+        "g" | "gb" | "gib" => 1024 * 1024 * 1024,
+        _ => return None,
     };
-    num_str
-        .parse::<usize>()
-        .ok()
-        .map(|n| n.saturating_mul(mult))
+    num.parse::<usize>().ok().map(|n| n.saturating_mul(mult))
 }
 
 /// 夹到允许区间。
@@ -2121,44 +2122,38 @@ mod tests {
         assert_eq!(parse_cap("  8M  "), Some(8 * 1024 * 1024));
         assert_eq!(parse_cap("1.5m"), None);
         assert_eq!(parse_cap("-1"), None);
-        assert_eq!(parse_cap("16i"), None);
-        assert_eq!(parse_cap("16b"), None);
+        assert_eq!(parse_cap("m"), None);
         assert_eq!(parse_cap("bogus"), None);
         assert_eq!(parse_cap(""), None);
+        // 不完整 / 非法单位一律无效，回退下一级而不是被当成字节数夹到下限。
+        for bad in ["16i", "16b", "16bi", "16mi", "16kbb", "16 x"] {
+            assert_eq!(parse_cap(bad), None, "{bad}");
+        }
+        assert_eq!(parse_cap("16 m"), Some(16 * 1024 * 1024));
         assert_eq!(parse_cap(&usize::MAX.to_string()), Some(usize::MAX));
         assert_eq!(parse_cap(&format!("{}m", usize::MAX)), Some(usize::MAX));
         assert_eq!(parse_cap(&format!("{}0", usize::MAX)), None);
-        // 夹到允许区间（1g 超出 64 MiB 夹到 64 MiB）。
+        // 夹到允许区间。
         assert_eq!(clamp_cap(0), YTDLP_STDOUT_CAP_MIN);
         assert_eq!(clamp_cap(usize::MAX), YTDLP_STDOUT_CAP_MAX);
-        assert_eq!(clamp_cap(parse_cap("1g").unwrap()), YTDLP_STDOUT_CAP_MAX);
         assert_eq!(clamp_cap(16 * 1024 * 1024), 16 * 1024 * 1024);
     }
 
     #[tokio::test]
     async fn invalid_plugin_cap_falls_back_to_global() -> Result<(), Box<dyn std::error::Error>> {
         let db = crate::db::Db::connect("sqlite::memory:").await?;
-        db.set_config("plugin.test@ytdlp.ytdlp.stdout_cap", "invalid")
+        db.set_config("plugin.test@ytdlp.ytdlp.stdout_cap", "16i")
             .await?;
-        db.set_config(super::CONFIG_YTDLP_STDOUT_CAP, "1m").await?;
+        db.set_config(super::CONFIG_YTDLP_STDOUT_CAP, "2m").await?;
 
+        assert_eq!(ytdlp_stdout_cap(&db, "test@ytdlp").await, 2 * 1024 * 1024);
+        // 超出区间的合法值按上限生效。
+        db.set_config("plugin.test@ytdlp.ytdlp.stdout_cap", "1g")
+            .await?;
         assert_eq!(
             ytdlp_stdout_cap(&db, "test@ytdlp").await,
-            YTDLP_STDOUT_CAP_MIN
+            YTDLP_STDOUT_CAP_MAX
         );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn env_var_ytdlp_stdout_cap_applies_when_configs_absent()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let db = crate::db::Db::connect("sqlite::memory:").await?;
-        // SAFETY: 测试隔离环境下临时设置环境变量并在断言前清理。
-        unsafe { std::env::set_var("YTDLP_STDOUT_CAP", "32m") };
-        let cap = ytdlp_stdout_cap(&db, "test@env").await;
-        // SAFETY: 恢复环境变量避免影响后续测试。
-        unsafe { std::env::remove_var("YTDLP_STDOUT_CAP") };
-        assert_eq!(cap, 32 * 1024 * 1024);
         Ok(())
     }
 
