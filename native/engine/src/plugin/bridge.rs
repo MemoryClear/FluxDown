@@ -73,6 +73,8 @@ const MAX_YTDLP_ARGS: usize = 512;
 /// yt-dlp 单参数字节上限。
 const MAX_YTDLP_ARG_LEN: usize = 8 * 1024;
 /// yt-dlp stdout 回传默认上限（`-J` 播放列表 JSON 可较大；超限截断）。
+/// 截断发生在 `wait_with_output` 完成后，只限制插件返回/JSON 解析大小，不限制
+/// 子进程输出采集期间的内存占用。
 /// 4 MiB 对 YouTube 单视频不够：其 `-J` 常超 4 MiB（`automatic_captions` 单字段
 /// 即可 ~4 MiB），截断导致插件 JSON 解析失败（"Unexpected end of JSON input"）。
 /// 本上限本身即可解除已发布插件的该故障；插件另用 `--parse-metadata` 剔除重字段
@@ -82,8 +84,9 @@ const MAX_YTDLP_ARG_LEN: usize = 8 * 1024;
 /// （全局，字节）、`plugin.<id>.ytdlp.stdout_cap`（单插件，优先）或环境变量
 /// `YTDLP_STDOUT_CAP`（改默认值，无人值守部署用）。
 const YTDLP_STDOUT_CAP: usize = 16 * 1024 * 1024;
-/// stdout 上限的允许区间：低于 1 MiB 会让正常 `-J` 频繁被截；高于 64 MiB 有
-/// 内存/明文占用风险。越界一律夹到区间内（不报错，保证下载不因配置写错而失败）。
+/// stdout 上限的允许区间：低于 1 MiB 会让正常 `-J` 频繁被截；高于 64 MiB 会
+/// 放大插件返回值与 JSON 解析开销。越界一律夹到区间内（不报错，保证下载不因
+/// 配置写错而失败）。
 const YTDLP_STDOUT_CAP_MIN: usize = 1024 * 1024;
 const YTDLP_STDOUT_CAP_MAX: usize = 64 * 1024 * 1024;
 /// 全局 stdout 上限的 config 键；单插件键为 `plugin.<id>.ytdlp.stdout_cap`。
@@ -1040,6 +1043,9 @@ impl PluginBridge for EngineBridge {
                 .map_err(|_| PluginError::Runtime("yt-dlp semaphore closed".to_string()))?
         };
 
+        // 每次调用在启动子进程前快照配置，避免执行期间的配置变更改变返回语义。
+        let stdout_cap = ytdlp_stdout_cap(&self.db, plugin_id).await;
+
         // 6) 启动。`--ignore-config` 前置注入（挡 ambient 配置里的 --exec 等）；
         //    stdin=null；kill_on_drop 保超时/取消时清进程。
         let mut cmd = Command::new(&bin);
@@ -1093,7 +1099,6 @@ impl PluginBridge for EngineBridge {
                 });
             }
         };
-        let stdout_cap = ytdlp_stdout_cap(&self.db, plugin_id).await;
         let (stdout, truncated_stdout) = truncate_utf8(&output.stdout, stdout_cap);
         let (stderr, truncated_stderr) = truncate_utf8(&output.stderr, YTDLP_STDERR_CAP);
         let code = output.status.code().unwrap_or(-1);
@@ -1759,7 +1764,7 @@ mod tests {
         YTDLP_STDOUT_CAP_MAX, YTDLP_STDOUT_CAP_MIN, arg_reject_reason, clamp_cap,
         collect_response_headers, is_globally_routable_unicast, normalize_explicit_auth_ref,
         parse_cap, plugin_workspace, truncate_utf8, validate_ffmpeg_args, validate_ytdlp_args,
-        ytdlp_args_reject_reason,
+        ytdlp_args_reject_reason, ytdlp_stdout_cap,
     };
     use std::net::IpAddr;
     #[cfg(unix)]
@@ -2092,12 +2097,32 @@ mod tests {
         assert_eq!(parse_cap("16m"), Some(16 * 1024 * 1024));
         assert_eq!(parse_cap("512k"), Some(512 * 1024));
         assert_eq!(parse_cap("  8M  "), Some(8 * 1024 * 1024));
+        assert_eq!(parse_cap("1.5m"), None);
+        assert_eq!(parse_cap("-1"), None);
+        assert_eq!(parse_cap("m"), None);
         assert_eq!(parse_cap("bogus"), None);
         assert_eq!(parse_cap(""), None);
+        assert_eq!(parse_cap(&usize::MAX.to_string()), Some(usize::MAX));
+        assert_eq!(parse_cap(&format!("{}m", usize::MAX)), Some(usize::MAX));
+        assert_eq!(parse_cap(&format!("{}0", usize::MAX)), None);
         // 夹到允许区间。
         assert_eq!(clamp_cap(0), YTDLP_STDOUT_CAP_MIN);
         assert_eq!(clamp_cap(usize::MAX), YTDLP_STDOUT_CAP_MAX);
         assert_eq!(clamp_cap(16 * 1024 * 1024), 16 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn invalid_plugin_cap_falls_back_to_global() -> Result<(), Box<dyn std::error::Error>> {
+        let db = crate::db::Db::connect("sqlite::memory:").await?;
+        db.set_config("plugin.test@ytdlp.ytdlp.stdout_cap", "invalid")
+            .await?;
+        db.set_config(super::CONFIG_YTDLP_STDOUT_CAP, "1m").await?;
+
+        assert_eq!(
+            ytdlp_stdout_cap(&db, "test@ytdlp").await,
+            YTDLP_STDOUT_CAP_MIN
+        );
+        Ok(())
     }
 
     #[test]
