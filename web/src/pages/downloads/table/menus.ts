@@ -1,5 +1,5 @@
 // 任务行 / 分组头右键菜单（移植 task_table.rs 的 `context_menu_items` 与 `group_context_menu`）。
-// Web 里「打开文件 / 在文件夹中显示」换成浏览器下载已完成文件。
+// 「打开文件 / 在文件夹中显示」仅在 agent 下发 `agent.openTaskFiles`（同机）时出现，其余情况用浏览器下载已完成文件。
 
 import {
   AppWindow,
@@ -19,9 +19,9 @@ import {
 import type { QueueDto } from '../../../lib/rpc'
 import type { MenuEntry } from '../../../ui'
 import {
+  canOpenTaskFile,
   canRedownload,
-  canOpenLocally,
-  canRevealLocally,
+  canRevealTaskFile,
   confirmDeleteGroupWithFiles,
   confirmDeleteWithFiles,
   confirmIgnorePluginRetry,
@@ -100,8 +100,7 @@ export function buildTaskMenu({ t, views, queues, queueName, showDetail }: TaskM
       onSelect: () => downloadViewsFiles(views),
     })
   }
-  // 同机 agent 才能打开 / 定位产物；远程部署（Unsupported）由 action 静默回退。
-  if (only && canOpenLocally(only)) {
+  if (only && canOpenTaskFile(only)) {
     entries.push({
       type: 'item',
       key: 'open-file',
@@ -110,7 +109,7 @@ export function buildTaskMenu({ t, views, queues, queueName, showDetail }: TaskM
       onSelect: () => void openTaskFile(only.taskId),
     })
   }
-  if (only && canRevealLocally(only)) {
+  if (only && canRevealTaskFile(only)) {
     entries.push({
       type: 'item',
       key: 'reveal-file',

@@ -261,9 +261,8 @@ const power = {
   disarm: () => call<OkResult>(METHOD.AGENT_POWER_DISARM),
 };
 
-// 桌面集成：打开 / 定位任务产物。**仅当 agent 与浏览器同机时可用**——headless server
-// 自动放行字面 localhost / 环回来源；反代与远程来源会收到 Unsupported，除非服务端显式
-// 设置 `FLUXDOWN_ALLOW_LOCAL_PLATFORM=1`（调用方应静默回退，见 menus.ts）。
+// 桌面集成：在 agent 所在主机上打开 / 定位任务产物。仅当本连接的 hello 带
+// `agent.openTaskFiles` 能力时可用（见 downloads/model/actions.ts）；否则 agent 返回 Unsupported。
 const platform = {
   openTask: (params: { taskId: string }) => call<OkResult>(METHOD.AGENT_PLATFORM_OPEN_TASK, params),
   revealTask: (params: { taskId: string }) =>

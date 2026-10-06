@@ -2138,7 +2138,6 @@
   "webPluginInstallDirHint": "FluxDown 所在主机上的插件目录绝对路径。",
   "webPluginUploading": "上传中… {percent}%",
   "webDownloadFile": "下载文件",
-  "openLocalOnlyHint": "仅当服务运行在本机时可用。",
   "webOpenSidebar": "打开侧栏",
   "webSearchClear": "清空搜索",
   "fileExistsSkip": "跳过下载",

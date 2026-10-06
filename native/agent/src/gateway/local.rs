@@ -63,7 +63,7 @@ impl GatewayService {
         let waiters = Arc::new(Waiters::default());
         tokio::spawn(route_responses(responses, Arc::clone(&waiters)));
         Ok(LocalConnection {
-            hello: self.hello.clone(),
+            hello: self.session_hello(true),
             service: Arc::clone(self),
             lanes: Some(lanes),
             waiters,

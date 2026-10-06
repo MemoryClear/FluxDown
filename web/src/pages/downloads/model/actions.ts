@@ -1,10 +1,11 @@
 // 下载页命令：对应 GPUI 的 DownloadsCommand（downloads_port.rs），全部走 agent /rpc。
 // 本地任务 → `daemon.*`；远程任务 → `agent.remote.command`。失败统一 toast。
-// 桌面专属的「打开文件 / 在文件夹中显示」在 Web 里替换为浏览器下载已完成文件。
+// 「打开文件 / 在文件夹中显示」只在连接带 `agent.openTaskFiles` 能力（agent 与浏览器同机）时提供，
+// 其余情况由浏览器下载已完成文件替代。
 
 import { copyText } from '../../../lib/copy'
 import { t } from '../../../i18n'
-import { downloadTaskFile, rpc, RpcError } from '../../../lib/rpc'
+import { CAPABILITY_AGENT_OPEN_TASK_FILES, RpcError, downloadTaskFile, rpc, rpcStore } from '../../../lib/rpc'
 import type { CreateTaskRequest, RemoteCommandParams } from '../../../lib/rpc'
 import { confirmDialog, toast } from '../../../ui'
 import { toastRpcError } from '../../../lib/rpcToast'
@@ -171,42 +172,31 @@ export function downloadViewsFiles(views: readonly DownloadTaskView[]): void {
   })
 }
 
-/** 只有本地已完成且文件仍在磁盘上的任务可「打开」。 */
-export const canOpenLocally = (view: DownloadTaskView): boolean =>
-  view.source === 'local' && view.state === 'completed' && !view.fileMissing
-
-/** 只要是本地任务即可定位所在目录（对齐 GPUI：未完成或文件缺失亦可定位目录）。 */
-export const canRevealLocally = (view: DownloadTaskView): boolean =>
-  view.source === 'local'
-
 /**
- * 在宿主机打开 / 定位任务产物。
- *
- * 仅当 agent 与浏览器同机时可用：headless server 只放行环回来源的 `agent.platform.*`
- * （见 native/agent gateway）。远程 source 会得到 `Unsupported` —— 此时给一条说明性
- * toast，而不是报错（按钮对远程任务本就不展示，这里是兜底）。
+ * 本连接能否在 agent 所在主机上打开 / 定位任务产物：agent 按连接在 `system.hello` 下发
+ * `agent.openTaskFiles`（桌面宿主、headless server 的字面本机来源或运维显式放行）。
+ * 菜单在打开时构建，读最新握手结果即可，重连后自动跟随新连接。
  */
-async function openLocalTask(taskId: string, reveal: boolean): Promise<void> {
+const hostOpensTaskFiles = (): boolean =>
+  rpcStore.peek().hello?.capabilities.includes(CAPABILITY_AGENT_OPEN_TASK_FILES) ?? false
+
+/** 「打开文件」：本地已完成且文件仍在磁盘上。 */
+export const canOpenTaskFile = (view: DownloadTaskView): boolean => hostOpensTaskFiles() && isDownloadable(view)
+
+/** 「在文件夹中显示」：任意本地任务（对齐 GPUI：未完成或文件缺失时定位临时文件 / 保存目录）。 */
+export const canRevealTaskFile = (view: DownloadTaskView): boolean => hostOpensTaskFiles() && view.source === 'local'
+
+/** 打开失败且文件已不在：立即重扫，让行上的丢失标记跟上磁盘现状（对齐 GPUI `rescan_files_now`）。 */
+export async function openTaskFile(taskId: string): Promise<void> {
   try {
-    if (reveal) await rpc.agent.platform.revealTask({ taskId })
-    else await rpc.agent.platform.openTask({ taskId })
+    await rpc.agent.platform.openTask({ taskId })
   } catch (error) {
-    if (isUnsupported(error)) {
-      toast.key('openLocalOnlyHint', 'info')
-      return
-    }
-    void rpc.daemon.task.rescan()
+    if (error instanceof RpcError && error.is('notFound')) rpc.daemon.task.rescan().catch(() => {})
     toastRpcError(error)
   }
 }
 
-/** agent 是否拒绝了该 RPC（远程 / 非本机来源）。 */
-function isUnsupported(error: unknown): boolean {
-  return error instanceof RpcError && error.is('unsupported')
-}
-
-export const openTaskFile = (taskId: string) => openLocalTask(taskId, false)
-export const revealTaskFile = (taskId: string) => openLocalTask(taskId, true)
+export const revealTaskFile = (taskId: string) => guarded(() => rpc.agent.platform.revealTask({ taskId }))
 
 // ── 任务组 ──
 

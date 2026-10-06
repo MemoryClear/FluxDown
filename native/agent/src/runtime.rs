@@ -415,6 +415,7 @@ pub(crate) async fn run_with(
                 daemon: daemon_config.clone(),
                 webroot: config.webroot.clone(),
                 demo: config.effective_demo_url(bound).is_some(),
+                allow_local_platform: config.allow_local_platform,
             })?))
         }
         None => None,
