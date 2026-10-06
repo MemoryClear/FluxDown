@@ -171,9 +171,13 @@ export function downloadViewsFiles(views: readonly DownloadTaskView[]): void {
   })
 }
 
-/** 只有本地已完成且文件仍在磁盘上的任务可「打开 / 定位」。 */
+/** 只有本地已完成且文件仍在磁盘上的任务可「打开」。 */
 export const canOpenLocally = (view: DownloadTaskView): boolean =>
   view.source === 'local' && view.state === 'completed' && !view.fileMissing
+
+/** 只要是本地任务即可定位所在目录（对齐 GPUI：未完成或文件缺失亦可定位目录）。 */
+export const canRevealLocally = (view: DownloadTaskView): boolean =>
+  view.source === 'local'
 
 /**
  * 在宿主机打开 / 定位任务产物。
@@ -191,6 +195,7 @@ async function openLocalTask(taskId: string, reveal: boolean): Promise<void> {
       toast.key('openLocalOnlyHint', 'info')
       return
     }
+    void rpc.daemon.task.rescan()
     toastRpcError(error)
   }
 }

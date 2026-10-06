@@ -21,6 +21,7 @@ import type { MenuEntry } from '../../../ui'
 import {
   canRedownload,
   canOpenLocally,
+  canRevealLocally,
   confirmDeleteGroupWithFiles,
   confirmDeleteWithFiles,
   confirmIgnorePluginRetry,
@@ -108,6 +109,8 @@ export function buildTaskMenu({ t, views, queues, queueName, showDetail }: TaskM
       icon: AppWindow,
       onSelect: () => void openTaskFile(only.taskId),
     })
+  }
+  if (only && canRevealLocally(only)) {
     entries.push({
       type: 'item',
       key: 'reveal-file',
