@@ -103,11 +103,17 @@ function cookieDomainFromUrl(url) {
 }
 
 // yt-dlp 格式选择器：始终取「最佳画质」作为顶层默认档（画质由用户在下载时经
-// variants 弹框选择，不在设置里固定）。preferMp4 仅影响容器偏好（H.264/AAC mp4
-// 优先 vs 允许 VP9 WebM），不限制画质。免打扰/headless 无弹框时即用此最佳档。
+// variants 弹框选择，不在设置里固定）。preferMp4 仅影响容器/编码偏好——**优先
+// H.264（avc1）+ AAC（m4a）+ MP4 容器**，因为 QuickTime 等系统播放器解不了
+// AV1/VP9/HEVC 与 mkv/webm 容器。`-f` 过滤器链比 `-S` 排序更精确：它同时对
+// 视频编码 / 音频编码 / 容器三维约束，由 yt-dlp 按上报的格式动态解析。
 function buildFormat(preferMp4) {
   if (preferMp4) {
     return (
+      'bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/' +
+      'bestvideo[vcodec^=avc1]+bestaudio/' +
+      'best[vcodec^=avc1][ext=mp4]/' +
+      'best[vcodec^=avc1]/' +
       'bestvideo[ext=mp4]+bestaudio[ext=m4a]/' +
       'bestvideo+bestaudio/' +
       'best'
@@ -211,7 +217,10 @@ function pickVideoAtOrBelow(formats, targetHeight, preferMp4) {
     var h = Number(f.height) || 0;
     if (h <= 0 || h > targetHeight) continue;
     var score = h * 1e6 + (Number(f.tbr) || 0);
+    // preferMp4：优先 H.264（avc1）+ mp4 容器——QuickTime 等系统播放器不解 AV1/VP9。
+    // avc1 权重高于单纯 mp4 容器（YouTube 会把 AV1 装进 mp4，仅看 ext 会选中它）。
     if (preferMp4 && f.ext === 'mp4') score += 1e12;
+    if (preferMp4 && /^avc1/i.test(f.vcodec || '')) score += 1e13;
     if (score > bestScore) {
       bestScore = score;
       best = f;
