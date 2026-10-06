@@ -1408,28 +1408,28 @@ fn env_cap() -> Option<usize> {
 }
 
 /// 解析上限字符串：纯十进制字节，或 `<n>k`/`<n>kb`/`<n>kib`、`<n>m`/`<n>mb`/`<n>mib`、
-/// `<n>g`/`<n>gb`/`<n>gib`（大小写不敏感，1024 进制）。
+/// `<n>g`/`<n>gb`/`<n>gib`（大小写不敏感，1024 进制）。超出 64 MiB 一律经 [`clamp_cap`] 按 64 MiB 生效。
 fn parse_cap(v: &str) -> Option<usize> {
-    let mut t = v.trim().to_ascii_lowercase();
+    let t = v.trim().to_ascii_lowercase();
     if t.is_empty() {
         return None;
     }
-    if let Some(stripped) = t.strip_suffix('b') {
-        t = stripped.to_string();
-    }
-    if let Some(stripped) = t.strip_suffix('i') {
-        t = stripped.to_string();
-    }
-    let (num, mult) = if let Some(n) = t.strip_suffix('k') {
-        (n, 1024usize)
-    } else if let Some(n) = t.strip_suffix('m') {
-        (n, 1024 * 1024)
-    } else if let Some(n) = t.strip_suffix('g') {
-        (n, 1024 * 1024 * 1024)
+    let (num_str, mult) = if let Some(split_pos) = t.find(|c: char| !c.is_ascii_digit()) {
+        let (num_str, unit_str) = t.split_at(split_pos);
+        if num_str.is_empty() {
+            return None;
+        }
+        let mult: usize = match unit_str.trim() {
+            "k" | "kb" | "kib" => 1024,
+            "m" | "mb" | "mib" => 1024 * 1024,
+            "g" | "gb" | "gib" => 1024 * 1024 * 1024,
+            _ => return None,
+        };
+        (num_str, mult)
     } else {
         (t.as_str(), 1)
     };
-    num.trim()
+    num_str
         .parse::<usize>()
         .ok()
         .map(|n| n.saturating_mul(mult))
@@ -2121,15 +2121,17 @@ mod tests {
         assert_eq!(parse_cap("  8M  "), Some(8 * 1024 * 1024));
         assert_eq!(parse_cap("1.5m"), None);
         assert_eq!(parse_cap("-1"), None);
-        assert_eq!(parse_cap("m"), None);
+        assert_eq!(parse_cap("16i"), None);
+        assert_eq!(parse_cap("16b"), None);
         assert_eq!(parse_cap("bogus"), None);
         assert_eq!(parse_cap(""), None);
         assert_eq!(parse_cap(&usize::MAX.to_string()), Some(usize::MAX));
         assert_eq!(parse_cap(&format!("{}m", usize::MAX)), Some(usize::MAX));
         assert_eq!(parse_cap(&format!("{}0", usize::MAX)), None);
-        // 夹到允许区间。
+        // 夹到允许区间（1g 超出 64 MiB 夹到 64 MiB）。
         assert_eq!(clamp_cap(0), YTDLP_STDOUT_CAP_MIN);
         assert_eq!(clamp_cap(usize::MAX), YTDLP_STDOUT_CAP_MAX);
+        assert_eq!(clamp_cap(parse_cap("1g").unwrap()), YTDLP_STDOUT_CAP_MAX);
         assert_eq!(clamp_cap(16 * 1024 * 1024), 16 * 1024 * 1024);
     }
 
@@ -2144,6 +2146,19 @@ mod tests {
             ytdlp_stdout_cap(&db, "test@ytdlp").await,
             YTDLP_STDOUT_CAP_MIN
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn env_var_ytdlp_stdout_cap_applies_when_configs_absent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let db = crate::db::Db::connect("sqlite::memory:").await?;
+        // SAFETY: 测试隔离环境下临时设置环境变量并在断言前清理。
+        unsafe { std::env::set_var("YTDLP_STDOUT_CAP", "32m") };
+        let cap = ytdlp_stdout_cap(&db, "test@env").await;
+        // SAFETY: 恢复环境变量避免影响后续测试。
+        unsafe { std::env::remove_var("YTDLP_STDOUT_CAP") };
+        assert_eq!(cap, 32 * 1024 * 1024);
         Ok(())
     }
 
