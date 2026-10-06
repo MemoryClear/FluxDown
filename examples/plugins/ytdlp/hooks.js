@@ -5,7 +5,7 @@
 // 站点无关——对任意来源、任意视频编码（AV1/VP9/HEVC）与容器（webm/mkv）一律生效。
 //
 // 触发条件（缺一不可）：
-//   1. 设置「优先 MP4 容器」= 开（preferMp4 !== 'false'，默认开）；关 = 用户要
+//   1. 设置「优先 MP4 容器」= 开（preferMp4 !== false，默认开）；关 = 用户要
 //      「最佳质量、任意编码/容器」，不转码；
 //   2. flux.ffprobe + flux.ffmpeg 门面存在（manifest permissions:["ffmpeg"] 授权，
 //      ffprobe 与 ffmpeg 同权限门/同牢笼），且 FluxDown 装有 ffmpeg；
@@ -35,7 +35,7 @@ globalThis.onDone = async (ctx) => {
   var verbose = flux.settings.verbose;
 
   // 用户要「最佳质量、任意编码/容器」→ 保留原始编码，不转码。
-  if (flux.settings.preferMp4 === 'false') {
+  if (flux.settings.preferMp4 === false) {
     if (verbose) flux.logger.info('[ytdlp] onDone: preferMp4 关，保留原始编码');
     return;
   }
@@ -63,7 +63,11 @@ globalThis.onDone = async (ctx) => {
       ],
       timeoutMs: 30 * 1000,
     });
-    if (pr.code === 0 && pr.stdout) probe = JSON.parse(pr.stdout);
+    if (pr.code !== 0 || !pr.stdout) {
+      if (verbose) flux.logger.warn('[ytdlp] onDone: ffprobe 探测失败，跳过转码');
+      return;
+    }
+    probe = JSON.parse(pr.stdout);
   } catch (e) {
     if (verbose) flux.logger.warn('[ytdlp] onDone: ffprobe 探测失败，跳过转码:', String(e));
     return;
@@ -71,11 +75,11 @@ globalThis.onDone = async (ctx) => {
 
   var streams = (probe && probe.streams) || [];
   var video = null;
+  var audio = null;
   for (var i = 0; i < streams.length; i++) {
-    if (streams[i] && streams[i].codec_type === 'video') {
-      video = streams[i];
-      break;
-    }
+    if (!streams[i]) continue;
+    if (!video && streams[i].codec_type === 'video') video = streams[i];
+    if (!audio && streams[i].codec_type === 'audio') audio = streams[i];
   }
   // 无视频轨：纯音频产物，本就是兼容的 m4a/mp3，无需处理。
   if (!video) {
@@ -86,8 +90,11 @@ globalThis.onDone = async (ctx) => {
   var fmtName = ((probe && probe.format && probe.format.format_name) || '').toLowerCase();
   var mp4Container = /(^|,)(mp4|mov)(,|$)/.test(fmtName) || /\.(mp4|mov)$/i.test(inName);
   var h264 = /^h264$/.test(video.codec_name || '');
+  var compatibleAudio = !audio || /^aac$/.test(audio.codec_name || '');
+  // 引擎 mux 失败（如 AAC 无法封入 webm）时会留独立音频 sidecar，一并合并。
+  var audioName = ctx.audioPath ? baseName(ctx.audioPath) : null;
 
-  if (h264 && mp4Container) {
+  if (h264 && compatibleAudio && mp4Container && !audioName) {
     if (verbose) flux.logger.info('[ytdlp] onDone: 已是 h264+mp4，无需转码:', inName);
     return;
   }
@@ -98,15 +105,16 @@ globalThis.onDone = async (ctx) => {
     return;
   }
 
-  var outName = stripExt(inName) + '.mp4';
+  // mp4 输入不能原地覆盖；使用独立产物名，同时保留原文件。
+  var outName = stripExt(inName) + (/\.mp4$/i.test(inName) ? '.compatible.mp4' : '.mp4');
   var args = ['-i', rel(inName)];
 
-  // 引擎 mux 失败（如 AAC 无法封入 webm）时会留独立音频 sidecar，一并合并。
-  var audioName = ctx.audioPath ? baseName(ctx.audioPath) : null;
   if (audioName) args.push('-i', rel(audioName));
 
+  args = args.concat(h264
+    ? ['-c:v', 'copy']
+    : ['-c:v', 'libx264', '-crf', '20', '-preset', 'veryfast']);
   args = args.concat([
-    '-c:v', 'libx264', '-crf', '20', '-preset', 'veryfast',
     '-c:a', 'aac', '-b:a', '192k',
     '-movflags', '+faststart',
   ]);
@@ -146,6 +154,7 @@ globalThis.onDone = async (ctx) => {
   var secs = ((Date.now() - started) / 1000).toFixed(1);
   flux.logger.info('[ytdlp] onDone: 已转为 mp4:', outName, '(' + secs + 's，源文件保留)');
 
+  // 登记衍生产物：删除任务文件时一并清理，旧版无此 API 时静默跳过。
   if (flux.task && flux.task.recordArtifact) {
     try {
       await flux.task.recordArtifact(outName);
