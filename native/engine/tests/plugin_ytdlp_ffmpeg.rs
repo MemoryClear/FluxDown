@@ -398,7 +398,7 @@ async fn resolve_selectors_prioritize_resolution_and_prefer_avc1() {
             if (!pick1080 || pick1080.format_id !== "1080_avc") {{
                 throw new Error("pickVideoAtOrBelow(1080) 未优先选择 avc1: " + JSON.stringify(pick1080));
             }}
-            // 3. 平台白名单判定：主流支持平台必须命中
+            // 3. 平台白名单判定：主流支持平台与扩容的社交平台都必须命中
             for (var u of [
                 "https://www.youtube.com/watch?v=1",
                 "https://www.bilibili.com/video/BV1",
@@ -407,7 +407,15 @@ async fn resolve_selectors_prioritize_resolution_and_prefer_avc1() {
                 "https://vimeo.com/1",
                 "https://www.dailymotion.com/video/x1",
                 "https://soundcloud.com/artist/track",
-                "https://www.acfun.cn/v/ac1"
+                "https://www.acfun.cn/v/ac1",
+                "https://www.instagram.com/p/1",
+                "https://x.com/user/status/1",
+                "https://twitter.com/user/status/1",
+                "https://www.tiktok.com/@u/video/1",
+                "https://www.reddit.com/r/v/comments/1",
+                "https://v.redd.it/abc",
+                "https://www.facebook.com/watch?v=1",
+                "https://fb.watch/abc"
             ]) {{
                 if (!detectPlatform(u)) throw new Error("detectPlatform 未能识别: " + u);
             }}
