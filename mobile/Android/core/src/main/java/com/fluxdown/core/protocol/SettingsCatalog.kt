@@ -96,6 +96,7 @@ object SettingsCatalog {
         daemon("default_queue_id", text, ""),
         daemon("domain_conn_caps", readOnly, ""),
         // BT
+        daemon("bt_enabled", bool, "true"),
         daemon("bt_enable_dht", bool, "true"),
         daemon("bt_enable_upnp", bool, "true"),
         daemon("bt_port_start", int(1, 65_535), "6881"),
@@ -197,7 +198,7 @@ object SettingsCatalog {
     /** 自定义主题集合的范围键：只承载分组 / 本机专属开关，从不承载值（逐主题键 `appearance.custom_themes.<id>`）。 */
     const val customThemesScopeKey = "appearance.custom_themes"
 
-    /** daemon 存储键 → 云同步键（`SYNC_SETTING_SPECS` 中 owner = Daemon，28 项）。 */
+    /** daemon 存储键 → 云同步键（`SYNC_SETTING_SPECS` 中 owner = Daemon，29 项）。 */
     val daemonSyncNames: Map<String, String> = mapOf(
         "max_concurrent_tasks" to "download.max_concurrent_tasks",
         "default_segments" to "download.default_segments",
@@ -210,6 +211,7 @@ object SettingsCatalog {
         "auto_resume_on_start" to "download.auto_resume_on_start",
         "use_server_time" to "download.use_server_time",
         "global_user_agent" to "download.global_user_agent",
+        "bt_enabled" to "bt.enabled",
         "bt_enable_dht" to "bt.enable_dht",
         "bt_enable_upnp" to "bt.enable_upnp",
         "bt_custom_trackers" to "bt.custom_trackers",

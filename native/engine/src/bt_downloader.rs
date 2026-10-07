@@ -404,6 +404,7 @@ fn probe_listener_port(port: u16) -> std::io::Result<()> {
 /// User-configurable BT session settings, loaded from the DB config table.
 #[derive(Debug, Clone)]
 pub struct BtConfig {
+    pub enabled: bool,
     pub enable_dht: bool,
     pub enable_upnp: bool,
     pub port_start: u16,
@@ -439,6 +440,7 @@ pub struct BtConfig {
 impl Default for BtConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             enable_dht: true,
             enable_upnp: true,
             port_start: 6881,

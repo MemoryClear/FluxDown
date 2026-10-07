@@ -1154,6 +1154,8 @@
   "searchKeywordsApiService": "api,service,rpc,userscript,tampermonkey,capture,browser,aria2,ariang,token,port,mcp,automation,management",
   "btSettings": "BitTorrent Settings",
   "btSettingsDesc": "BitTorrent protocol settings",
+  "btEnabled": "Enable BitTorrent",
+  "btEnabledDesc": "Enable BitTorrent downloads, peer discovery, and listening",
   "btEnableDht": "Enable DHT",
   "btEnableDhtDesc": "Distributed Hash Table for trackerless peer discovery",
   "btEnableUpnp": "Enable UPnP Port Mapping",

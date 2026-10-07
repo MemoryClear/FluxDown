@@ -3733,6 +3733,11 @@ impl DownloadManager {
     /// because `SharedBtSession::new` internally calls `Runtime::block_on`,
     /// which cannot be invoked from within an existing tokio runtime.
     async fn ensure_bt_session(&mut self) -> Result<(), downloader::DownloadError> {
+        if !self.bt_config.enabled {
+            return Err(downloader::DownloadError::Other(
+                "BitTorrent is disabled in settings".to_string(),
+            ));
+        }
         // 任何经此入口的 BT 活动（新下载 / 恢复 / 重新挂载做种）都结束「仅暂停
         // 任务保活」的空闲期，下一次空闲重新起算完整宽限。
         self.bt_paused_idle_since = None;
@@ -5562,9 +5567,16 @@ impl DownloadManager {
             .iter()
             .map(|t| (t.task_id.as_str(), t.queue_id.as_str()))
             .collect();
+        let is_bt_of: HashMap<&str, bool> = rows
+            .iter()
+            .map(|t| (t.task_id.as_str(), is_bt_url(&t.url)))
+            .collect();
         let ids: Vec<String> = reset_ids
             .iter()
             .filter(|id| {
+                if !self.bt_config.enabled && is_bt_of.get(id.as_str()).copied().unwrap_or(false) {
+                    return false;
+                }
                 let q = queue_of.get(id.as_str()).copied().unwrap_or("");
                 // 孤儿/空 queue_id 视作运行中（与 eligible_resume_task_ids 一致）。
                 self.queues.get(q).map(|q| q.is_running).unwrap_or(true)
@@ -5793,6 +5805,11 @@ impl DownloadManager {
         } else {
             None
         };
+        // BT 禁用门禁：BT 被用户显式禁用时，拒绝创建 magnet 链接或种子文件任务。
+        if (is_bt_url(&url) || !torrent_file_bytes.is_empty()) && !self.bt_config.enabled {
+            log_info!("[manager] BitTorrent download rejected: BitTorrent is disabled in settings");
+            return None;
+        }
         // URL 去重（config `dedup_same_url`，默认关闭）：种子上传没有真实 URL 可比较。
         if torrent_file_bytes.is_empty() && !url.is_empty() {
             let dedup_enabled = match self.db.get_config("dedup_same_url").await {
@@ -8034,6 +8051,13 @@ impl DownloadManager {
         };
         let use_dash = dash_downloader::is_dash_url(&task.url) || audio_url.is_some();
         let use_bt = is_bt_url(&task.url);
+        if use_bt && !self.bt_config.enabled {
+            crate::log_warn!(
+                "[manager] cannot resume BT task {}: BitTorrent is disabled in settings",
+                task_id
+            );
+            return;
+        }
         let use_ed2k = crate::ed2k::link::is_ed2k_url(&task.url);
 
         // Insert placeholder entry (handle filled in after tokio::spawn).
@@ -12868,6 +12892,210 @@ mod tests {
                 .expect("advance task status");
         }
     }
+    #[tokio::test]
+    async fn bt_disabled_setting_rejects_task_creation_and_session() {
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let temp_dir = std::env::temp_dir();
+        let mut mgr = DownloadManager::new(
+            db,
+            DownloadManagerConfig {
+                max_concurrent: 1,
+                speed_limit_bps: 0,
+                upload_limit_bps: 0,
+                default_save_dir: temp_dir.to_string_lossy().into_owned(),
+                app_data_dir: temp_dir.to_string_lossy().into_owned(),
+                data_dir: temp_dir.clone(),
+                bt_config: BtConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+                proxy_config: ProxyConfig::default(),
+                user_agent: String::new(),
+            },
+            Arc::new(RecordingSink::new()),
+            Arc::new(crate::NoopSelection),
+        )
+        .expect("construct manager");
+
+        // 1. ensure_bt_session must fail with clear message
+        let err = mgr.ensure_bt_session().await.expect_err("must fail");
+        assert!(
+            err.to_string()
+                .contains("BitTorrent is disabled in settings"),
+            "expected disabled message, got {err:?}"
+        );
+
+        // 2. create_task for magnet URL must be rejected
+        let magnet_spec = NewTaskSpec {
+            url: "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=test".to_string(),
+            save_dir: temp_dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        assert!(
+            mgr.create_task(magnet_spec).await.is_none(),
+            "magnet task creation must be rejected when BT is disabled"
+        );
+
+        // 3. create_task with raw torrent bytes must also be rejected
+        let torrent_bytes_spec = NewTaskSpec {
+            url: String::new(),
+            save_dir: temp_dir.to_string_lossy().into_owned(),
+            torrent_file_bytes: vec![1, 2, 3],
+            ..Default::default()
+        };
+        assert!(
+            mgr.create_task(torrent_bytes_spec).await.is_none(),
+            "torrent file task creation must be rejected when BT is disabled"
+        );
+
+        // 4. HTTP task must still be accepted even when BT is disabled
+        let http_spec = NewTaskSpec {
+            url: "https://example.com/file.zip".to_string(),
+            save_dir: temp_dir.to_string_lossy().into_owned(),
+            start_paused: true,
+            ..Default::default()
+        };
+        assert!(
+            mgr.create_task(http_spec).await.is_some(),
+            "HTTP task creation must proceed normally when BT is disabled"
+        );
+
+        // 5. Enabling BT allows session creation and task creation
+        mgr.set_bt_config(BtConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        let magnet_spec_enabled = NewTaskSpec {
+            url: "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=test".to_string(),
+            save_dir: temp_dir.to_string_lossy().into_owned(),
+            start_paused: true,
+            ..Default::default()
+        };
+        let bt_task_id = mgr
+            .create_task(magnet_spec_enabled)
+            .await
+            .expect("magnet task creation must be accepted when BT is enabled");
+        let initial_task = mgr
+            .db
+            .load_task_by_id(&bt_task_id)
+            .await
+            .expect("load task")
+            .expect("task exists");
+        assert_eq!(initial_task.status, 2, "task is created paused");
+
+        // 6. When BT is disabled again, resume_task must leave the task paused rather than failing it
+        mgr.set_bt_config(BtConfig {
+            enabled: false,
+            ..Default::default()
+        });
+
+        mgr.resume_task(&bt_task_id).await;
+        assert!(
+            !mgr.active_tasks.contains_key(&bt_task_id),
+            "BT task must not be spawned in active_tasks when BT is disabled"
+        );
+        let loaded = mgr
+            .db
+            .load_task_by_id(&bt_task_id)
+            .await
+            .expect("load task")
+            .expect("task exists");
+        assert_eq!(
+            loaded.status, 2,
+            "BT task must remain paused (status 2) instead of mutating to failed (status 4)"
+        );
+
+        // 7. auto_resume_on_start must skip BT tasks when BT is disabled
+        mgr.db
+            .set_config("auto_resume_on_start", "true")
+            .await
+            .expect("set config");
+        mgr.auto_resume_on_start(vec![bt_task_id.clone()]).await;
+        assert!(
+            !mgr.active_tasks.contains_key(&bt_task_id),
+            "auto_resume_on_start must skip BT task when BT is disabled"
+        );
+    }
+
+    /// 禁用 BT 必须释放已建立的真实会话（关闭监听、停止做种），而不只是拒绝新任务；
+    /// 重新创建需等再次启用。
+    #[tokio::test]
+    async fn disabling_bt_releases_live_session_and_blocks_recreation() {
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let work = std::env::temp_dir().join(format!(
+            "fluxdown_bt_disable_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&work).expect("create work dir");
+        let port = std::net::TcpListener::bind(("0.0.0.0", 0))
+            .expect("bind ephemeral port")
+            .local_addr()
+            .expect("local addr")
+            .port();
+        let enabled_config = BtConfig {
+            enabled: true,
+            enable_dht: false,
+            enable_upnp: false,
+            port_start: port,
+            port_end: port,
+            ..Default::default()
+        };
+        let mut mgr = DownloadManager::new(
+            db,
+            DownloadManagerConfig {
+                max_concurrent: 1,
+                speed_limit_bps: 0,
+                upload_limit_bps: 0,
+                default_save_dir: work.to_string_lossy().into_owned(),
+                app_data_dir: work.to_string_lossy().into_owned(),
+                data_dir: work.clone(),
+                bt_config: enabled_config.clone(),
+                proxy_config: ProxyConfig::default(),
+                user_agent: String::new(),
+            },
+            Arc::new(RecordingSink::new()),
+            Arc::new(crate::NoopSelection),
+        )
+        .expect("construct manager");
+
+        mgr.ensure_bt_session()
+            .await
+            .expect("enabled BT must create a session");
+        assert!(mgr.bt_session.is_some(), "live session must exist");
+
+        mgr.set_bt_config(BtConfig {
+            enabled: false,
+            ..enabled_config
+        });
+        mgr.invalidate_bt_session().await;
+        assert!(
+            mgr.bt_session.is_none(),
+            "disabling BT must release the live session"
+        );
+        let err = mgr
+            .ensure_bt_session()
+            .await
+            .expect_err("disabled BT must not recreate the session");
+        assert!(
+            err.to_string()
+                .contains("BitTorrent is disabled in settings"),
+            "expected disabled message, got {err:?}"
+        );
+        assert!(mgr.bt_session.is_none(), "no session after refused ensure");
+
+        if let Err(error) = std::fs::remove_dir_all(&work) {
+            tracing::debug!(%error, "BT disable test directory cleanup skipped");
+        }
+    }
+
     /// 暂停终态必须等下载器 flush + 最终进度落库后再进入 progress_reporter。
     /// 否则暂停帧会携带 3 秒周期内的旧 DB 快照，恢复时表现为百分比前跳。
     #[tokio::test]

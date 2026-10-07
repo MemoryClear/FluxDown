@@ -1704,7 +1704,8 @@ async fn apply_live_config<'a>(
         if keys.iter().any(|key| {
             matches!(
                 *key,
-                "bt_enable_dht"
+                "bt_enabled"
+                    | "bt_enable_dht"
                     | "bt_enable_upnp"
                     | "bt_port_start"
                     | "bt_port_end"
