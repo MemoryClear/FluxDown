@@ -2,7 +2,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet, VecDeque},
     rc::Rc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use fluxdown_protocol::{RemoteCommandAction, RemoteCommandParams, RemoteTaskStatus};
@@ -38,7 +38,7 @@ use crate::{
         counts::SidebarCounts,
         dispatch::DispatchSummary,
         format_bytes,
-        row_order::RowOrder,
+        row_order::{InteractionHold, RowOrder},
         view_prefs::{
             DateBucket, SortDir, ViewDensity, ViewGroupBy, ViewPrefs, ViewSortKey, state_group_key,
         },
@@ -879,9 +879,20 @@ impl DownloadTableDelegate {
         true
     }
 
-    /// 表格内指针活动（移动 / 滚动 / 按下）：推迟由行内容变化引起的重排，避免行在光标下跳走。
-    pub(crate) fn note_pointer_activity(&mut self) {
-        self.row_order.note_interaction(Instant::now());
+    /// 本地日期跨过零点：按日期分组时「今天 / 昨天」等分桶随之改变，强制重算可见行。
+    /// 返回是否需要重绘；不按日期分组时不做任何事。
+    pub(crate) fn refresh_for_new_day(&mut self) -> bool {
+        if self.prefs.group_by != ViewGroupBy::Date {
+            return false;
+        }
+        self.view_dirty = true;
+        self.refresh_view()
+    }
+
+    /// 表格内指针活动（移动 / 滚动 / 按下）的记录句柄：推迟由行内容变化引起的重排，
+    /// 避免行在光标下跳走。
+    pub(crate) fn interaction_hold(&self) -> InteractionHold {
+        self.row_order.interaction_hold()
     }
 
     fn reorder_deadline(&self) -> Option<Instant> {
@@ -2851,9 +2862,9 @@ pub(crate) fn render_download_table(
         .min_h_0()
         .overflow_hidden()
         .bg(active_theme(cx).tokens().colors.surface)
-        .on_mouse_move(note_pointer::<MouseMoveEvent>(table_state))
-        .on_scroll_wheel(note_pointer::<ScrollWheelEvent>(table_state))
-        .capture_any_mouse_down(note_pointer::<MouseDownEvent>(table_state))
+        .on_mouse_move(note_pointer::<MouseMoveEvent>(table_state, cx))
+        .on_scroll_wheel(note_pointer::<ScrollWheelEvent>(table_state, cx))
+        .capture_any_mouse_down(note_pointer::<MouseDownEvent>(table_state, cx))
         .capture_any_mouse_down(clear_context_row_on_left_press(table_state))
         .child(
             div().absolute().inset_0().child(
@@ -2889,14 +2900,13 @@ pub(crate) fn render_download_table(
         })
 }
 
-/// 表格指针事件监听：只记录活动时刻，不触发重绘。
+/// 表格指针事件监听：只记录活动时刻，不写表格 entity、不触发重绘。
 fn note_pointer<E: 'static>(
     table_state: &Entity<TableState<DownloadTableDelegate>>,
+    cx: &App,
 ) -> impl Fn(&E, &mut Window, &mut App) + 'static {
-    let table_state = table_state.clone();
-    move |_, _, cx| {
-        table_state.update(cx, |table, _| table.delegate_mut().note_pointer_activity());
-    }
+    let hold = table_state.read(cx).delegate().interaction_hold();
+    move |_, _, _| hold.note(Instant::now())
 }
 
 /// 表格内左键按下即清除右键高亮行。
@@ -2917,12 +2927,50 @@ fn clear_context_row_on_left_press(
         if event.button != MouseButton::Left {
             return;
         }
-        table_state.update(cx, |table, cx| {
-            if table.right_clicked_row().is_some() {
-                table.set_right_clicked_row(None, cx);
-            }
-        });
+        // 先读后写：没有高亮行时不写表格，免得每次左键都让 gpui-fast 把表格记为已变化。
+        if table_state.read(cx).right_clicked_row().is_none() {
+            return;
+        }
+        table_state.update(cx, |table, cx| table.set_right_clicked_row(None, cx));
     }
+}
+
+/// 跨过本地零点时刷新按日期分组的表格；表格释放后循环随 `update` 失败结束。
+///
+/// 日期分桶只在重算可见行时读取时钟，没有任务事件的夜里不会自己换天。
+pub(crate) fn spawn_midnight_refresh(
+    table_state: &Entity<TableState<DownloadTableDelegate>>,
+    cx: &mut App,
+) {
+    let table = table_state.downgrade();
+    cx.spawn(async move |cx| {
+        loop {
+            let delay = until_next_local_day(chrono::Local::now());
+            cx.background_executor().timer(delay).await;
+            let Ok(()) = table.update(cx, |table, cx| {
+                if table.delegate_mut().refresh_for_new_day() {
+                    cx.notify();
+                }
+            }) else {
+                // 表格已释放，结束跨天刷新。
+                return;
+            };
+        }
+    })
+    .detach();
+}
+
+/// 距下一个本地日期开始的时长（多留 1 秒确保已换天）；时区换算失败时 1 分钟后复查。
+fn until_next_local_day(now: chrono::DateTime<chrono::Local>) -> Duration {
+    const RECHECK: Duration = Duration::from_secs(60);
+    let Some(next_day) = now.date_naive().succ_opt() else {
+        return RECHECK;
+    };
+    next_day
+        .and_hms_opt(0, 0, 1)
+        .and_then(|at| at.and_local_timezone(chrono::Local).earliest())
+        .and_then(|at| (at - now).to_std().ok())
+        .unwrap_or(RECHECK)
 }
 
 /// 为被推迟的重排安排定时器。到期时右键菜单仍开着（高亮行按下标定位，重排会让高亮
@@ -4245,5 +4293,31 @@ mod context_menu_tests {
 
         let remote = task(false, TaskState::Completed);
         assert!(!context_menu_items(&[remote]).contains(&MenuEntry::Redownload));
+    }
+}
+
+#[cfg(test)]
+mod midnight_tests {
+    use super::until_next_local_day;
+    use chrono::{Local, TimeZone};
+
+    /// 跨天定时器必须恰好落在下一个本地日期，不提前（同一天重算无效）也不晚一整天。
+    #[test]
+    fn next_day_timer_lands_just_after_local_midnight() {
+        for (h, m, s) in [(0, 0, 0), (12, 30, 0), (23, 59, 59)] {
+            let Some(now) = Local.with_ymd_and_hms(2026, 3, 14, h, m, s).earliest() else {
+                continue;
+            };
+            let delay = until_next_local_day(now);
+            let Ok(delay) = chrono::Duration::from_std(delay) else {
+                panic!("delay out of range");
+            };
+            let fired = now + delay;
+            assert_eq!(
+                fired.date_naive(),
+                now.date_naive().succ_opt().unwrap_or_default()
+            );
+            assert!(delay <= chrono::Duration::hours(25), "{h}:{m}:{s}");
+        }
     }
 }
