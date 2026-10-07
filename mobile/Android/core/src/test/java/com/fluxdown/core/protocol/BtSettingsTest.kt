@@ -69,12 +69,21 @@ class BtSettingsTest {
         assertEquals(9, BtSettingsRow.visible(BtSettingsTab.Seeding, on).size)
     }
 
+    @Test fun disablingBtHidesEverythingButTheMasterSwitch() {
+        val off = form(mapOf("bt_enabled" to "false", "bt_seed_enabled" to "true"))
+        assertEquals(listOf(BtSettingsRow.Enabled), BtSettingsRow.entries.filter { it.isVisible(off) })
+        assertEquals(listOf(BtSettingsTab.General), BtSettingsRow.visibleTabs(off))
+        val on = form(mapOf("bt_enabled" to "true"))
+        assertEquals(BtSettingsTab.entries, BtSettingsRow.visibleTabs(on))
+        assertEquals(BtSettingsRow.Enabled, BtSettingsRow.visible(BtSettingsTab.General, on).first())
+    }
+
     @Test fun daemonRowsNeedALoadedConfig() {
         val unloaded = form(emptyMap())
         assertTrue(BtSettingsRow.entries.none { it.isVisible(unloaded) })
         assertTrue(Ed2kSettingsRow.entries.none { it.isVisible(unloaded) })
         val loaded = form(mapOf("bt_enable_dht" to "true"))
-        assertEquals(5, BtSettingsRow.visible(BtSettingsTab.General, loaded).size)
+        assertEquals(6, BtSettingsRow.visible(BtSettingsTab.General, loaded).size)
         assertEquals(5, Ed2kSettingsRow.visible(Ed2kSettingsTab.Servers, loaded).size)
     }
 

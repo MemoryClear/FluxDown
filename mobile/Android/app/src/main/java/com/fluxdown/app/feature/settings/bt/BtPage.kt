@@ -66,7 +66,7 @@ private const val K_SEED_MAIN = "seed-main"
 private const val K_SEED_LIMITS = "seed-limits"
 
 private fun itemKeyOf(row: BtSettingsRow): String = when (row) {
-    BtSettingsRow.Dht, BtSettingsRow.Upnp, BtSettingsRow.PortStart, BtSettingsRow.PortEnd, BtSettingsRow.MseMode -> K_GENERAL
+    BtSettingsRow.Enabled, BtSettingsRow.Dht, BtSettingsRow.Upnp, BtSettingsRow.PortStart, BtSettingsRow.PortEnd, BtSettingsRow.MseMode -> K_GENERAL
     BtSettingsRow.CustomTrackers -> K_TRACKER_LIST
     BtSettingsRow.TrackerSub, BtSettingsRow.TrackerSubUrls, BtSettingsRow.TrackerSubStatus -> K_TRACKER_SUB
     BtSettingsRow.SeedEnabled, BtSettingsRow.SeedMaxActive, BtSettingsRow.AutoReseed -> K_SEED_MAIN
@@ -82,6 +82,7 @@ private fun tabTitle(tab: BtSettingsTab): Int = when (tab) {
 
 @StringRes
 private fun titleOf(row: BtSettingsRow): Int = when (row) {
+    BtSettingsRow.Enabled -> R.string.btEnabled
     BtSettingsRow.Dht -> R.string.btEnableDht
     BtSettingsRow.Upnp -> R.string.btEnableUpnp
     BtSettingsRow.PortStart -> R.string.btListenPortStart
@@ -105,6 +106,7 @@ private fun titleOf(row: BtSettingsRow): Int = when (row) {
 /** 说明文案；时长行的「说明」只用于搜索（命中单位标题），页面不渲染。 */
 @StringRes
 private fun detailOf(row: BtSettingsRow): Int? = when (row) {
+    BtSettingsRow.Enabled -> R.string.btEnabledDesc
     BtSettingsRow.Dht -> R.string.btEnableDhtDesc
     BtSettingsRow.Upnp -> R.string.btEnableUpnpDesc
     BtSettingsRow.PortStart -> R.string.btListenPortDesc
@@ -133,7 +135,8 @@ internal fun BtPage() {
     val form = ctx.form
     val gate = rememberFlowInGate()
     var tabIndex by rememberSaveable { mutableIntStateOf(0) }
-    val tab = BtSettingsTab.entries[tabIndex]
+    val visibleTabs = BtSettingsRow.visibleTabs(form)
+    val tab = BtSettingsTab.entries[tabIndex].takeIf { it in visibleTabs } ?: BtSettingsTab.General
 
     // 搜索命中：先切到目标行所在页签
     LaunchedEffect(focus.highlight) {
@@ -151,7 +154,7 @@ internal fun BtPage() {
         }
     }
 
-    val tabOptions = BtSettingsTab.entries.map { SegOption(it, str(tabTitle(it))) }
+    val tabOptions = visibleTabs.map { SegOption(it, str(tabTitle(it))) }
     val legend = str(R.string.settingsSyncLegend)
 
     Box(Modifier.fillMaxSize()) {
@@ -162,8 +165,10 @@ internal fun BtPage() {
                     FluxBanner(str(R.string.localServiceDisconnected), kind = FluxBannerKind.Warn, slim = true)
                 }
             }
-            flowItem(index++, gate, "tabs") {
-                FluxSegmented(options = tabOptions, selected = tab, onSelect = { tabIndex = it.ordinal })
+            if (visibleTabs.size > 1) {
+                flowItem(index++, gate, "tabs") {
+                    FluxSegmented(options = tabOptions, selected = tab, onSelect = { tabIndex = it.ordinal })
+                }
             }
             if (!form.isLoaded) {
                 flowItem(index++, gate, "loading") {
@@ -226,6 +231,9 @@ private fun GeneralSection(ctx: SettingsCtx) {
         if (ctx.isLocalHost) append("\n\n").append(str(R.string.mobileBtAndroidFootnote))
     }
     GlassSection(footer = footer) {
+        if (BtSettingsRow.Enabled.isVisible(form)) {
+            settingSwitch(ctx, BtSettingsRow.Enabled.configKey, R.string.btEnabled, R.string.btEnabledDesc, id = BtSettingsRow.Enabled.id)
+        }
         if (BtSettingsRow.Dht.isVisible(form)) {
             settingSwitch(ctx, BtSettingsRow.Dht.configKey, R.string.btEnableDht, R.string.btEnableDhtDesc, id = BtSettingsRow.Dht.id)
         }

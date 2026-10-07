@@ -17,6 +17,7 @@ enum class BtSettingsTab { General, Tracker, Seeding }
  * 做种「时长 + 单位」两个 PC 行在移动端合成一行（各自仍写回两个键）。
  */
 enum class BtSettingsRow(val slug: String, val tab: BtSettingsTab, val configKey: String, val unitKey: String? = null) {
+    Enabled("enabled", BtSettingsTab.General, "bt_enabled"),
     Dht("dht", BtSettingsTab.General, "bt_enable_dht"),
     Upnp("upnp", BtSettingsTab.General, "bt_enable_upnp"),
     PortStart("portStart", BtSettingsTab.General, "bt_port_start"),
@@ -44,10 +45,15 @@ enum class BtSettingsRow(val slug: String, val tab: BtSettingsTab, val configKey
 
     fun isVisible(form: SettingsForm): Boolean {
         if (!form.has(configKey)) return false
+        if (this != Enabled && !form.bool(Enabled.configKey)) return false
         return if (tab == BtSettingsTab.Seeding && this != SeedEnabled) form.bool(SeedEnabled.configKey) else true
     }
 
     companion object {
+        /** 总开关关闭时仅常规页签（且仅总开关一行）可用。 */
+        fun visibleTabs(form: SettingsForm): List<BtSettingsTab> =
+            if (form.bool(Enabled.configKey)) BtSettingsTab.entries else listOf(BtSettingsTab.General)
+
         fun visible(tab: BtSettingsTab, form: SettingsForm): List<BtSettingsRow> =
             entries.filter { it.tab == tab && it.isVisible(form) }
 
