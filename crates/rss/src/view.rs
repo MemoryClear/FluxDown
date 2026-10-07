@@ -231,14 +231,18 @@ impl RssView {
             }
             _ => None,
         };
-        self.controller.apply_event(event);
-        if before != self.controller.selected_source || changed {
+        let state_changed = self.controller.apply_event(event);
+        let refetch = before != self.controller.selected_source || changed;
+        if refetch {
             self.fetch_items(cx);
         }
         if let Some(count) = item_event.filter(|n| *n > 0) {
             self.feedback = Some(self.with("rssItemsUpdated", &[("n", &count.to_string())], cx));
         }
-        cx.notify();
+        // 无关事件（如其它任务的下载进度帧）不重绘，保住 retained 渲染的复用。
+        if state_changed || refetch || item_event.is_some() {
+            cx.notify();
+        }
     }
 
     pub fn mark_stale(&mut self, cx: &mut Context<Self>) {
