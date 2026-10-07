@@ -76,6 +76,7 @@ pub const SYNC_SETTING_SPECS: &[SettingSpec] = &[
     spec!("ui.show_activity_rss", Preferences),
     spec!("ui.show_activity_webhooks", Preferences),
     spec!("ui.show_activity_theme", Preferences),
+    spec!("ui.show_activity_account", Preferences),
     spec!("ui.show_titlebar_pause_all", Preferences),
     spec!("ui.show_titlebar_resume_all", Preferences),
     spec!("ui.show_titlebar_settings", Preferences),
@@ -350,6 +351,7 @@ fn boolean_key(key: &str) -> bool {
             | "ui.show_activity_rss"
             | "ui.show_activity_webhooks"
             | "ui.show_activity_theme"
+            | "ui.show_activity_account"
             | "ui.show_titlebar_pause_all"
             | "ui.show_titlebar_resume_all"
             | "ui.show_titlebar_settings"
