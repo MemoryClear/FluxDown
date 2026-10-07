@@ -1202,6 +1202,33 @@ fn check(
     }
 }
 
+/// 清单检查要求存在的浏览器家族（Chromium 系、Firefox 系）。
+///
+/// 仅 Unix 按安装状态过滤（#713）：Windows 的两份清单由注册无条件写入，而安装探测只覆盖默认
+/// 目录，自定义 `--user-data-dir` 或经 Chrome 注册表键工作的 Brave / Vivaldi 会被漏判，
+/// 因此 Windows 保持「缺失即错误」。
+fn manifest_families_installed(diagnosis: &crate::nmh::registry::NmhDiagnosis) -> (bool, bool) {
+    if cfg!(windows) {
+        return (true, true);
+    }
+    if diagnosis.targets.is_empty() {
+        return (
+            !diagnosis.chromium_manifest.is_empty(),
+            !diagnosis.firefox_manifest.is_empty(),
+        );
+    }
+    (
+        diagnosis
+            .targets
+            .iter()
+            .any(|t| !is_firefox_target(&t.label) && t.installed),
+        diagnosis
+            .targets
+            .iter()
+            .any(|t| is_firefox_target(&t.label) && t.installed),
+    )
+}
+
 /// `nmh_binary`、`nmh_manifest`、`nmh_relay`、每个浏览器一条 `nmh_browser`。
 fn nmh_checks(diagnosis: &crate::nmh::registry::NmhDiagnosis) -> Vec<DiagnosticCheckDto> {
     let mut checks = Vec::with_capacity(3 + diagnosis.targets.len());
@@ -1224,23 +1251,7 @@ fn nmh_checks(diagnosis: &crate::nmh::registry::NmhDiagnosis) -> Vec<DiagnosticC
             None,
         ));
     }
-    let (chromium_installed, firefox_installed) = if diagnosis.targets.is_empty() {
-        (
-            !diagnosis.chromium_manifest.is_empty(),
-            !diagnosis.firefox_manifest.is_empty(),
-        )
-    } else {
-        (
-            diagnosis
-                .targets
-                .iter()
-                .any(|t| !is_firefox_target(&t.label) && t.installed),
-            diagnosis
-                .targets
-                .iter()
-                .any(|t| is_firefox_target(&t.label) && t.installed),
-        )
-    };
+    let (chromium_installed, firefox_installed) = manifest_families_installed(diagnosis);
     checks.push(manifest_check(
         &diagnosis.chromium_manifest,
         chromium_installed,
@@ -2090,9 +2101,14 @@ mod tests {
         assert_eq!(checks[1].id, "nmh_manifest");
         assert_eq!(checks[1].level, DiagnosticLevel::Error);
         assert_eq!(checks[1].hint, HINT_REREGISTER_NMH);
-        assert!(checks[1].detail.contains("missing: chromium"));
-        assert!(!checks[1].detail.contains("missing: chromium, firefox"));
-        assert!(checks[1].detail.contains("firefox: (not installed)"));
+        #[cfg(unix)]
+        {
+            assert!(checks[1].detail.contains("missing: chromium"));
+            assert!(!checks[1].detail.contains("missing: chromium, firefox"));
+            assert!(checks[1].detail.contains("firefox: (not installed)"));
+        }
+        #[cfg(windows)]
+        assert!(checks[1].detail.contains("missing: chromium, firefox"));
         assert_eq!(checks[2].id, "nmh_relay");
         assert_eq!(checks[2].level, DiagnosticLevel::Ok);
         assert_eq!(checks[3].target, "Chrome");
@@ -2111,6 +2127,7 @@ mod tests {
         assert!(checks[5].hint.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn uninstalled_browser_nmh_manifest_is_not_treated_as_error() {
         // macOS / Linux 上未安装 Firefox 时，只要已安装的 Chromium 清单存在，清单检查即为 Ok (#713)
@@ -2144,6 +2161,7 @@ mod tests {
         drop(std::fs::remove_dir_all(&temp_dir));
     }
 
+    #[cfg(unix)]
     #[test]
     fn uninstalled_chromium_with_missing_firefox_manifest_reports_firefox_error() {
         let diagnosis = NmhDiagnosis {
@@ -2166,6 +2184,7 @@ mod tests {
         assert!(manifest.detail.contains("chromium: (not installed)"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn neither_browser_installed_manifest_check_reports_info() {
         let diagnosis = NmhDiagnosis {
