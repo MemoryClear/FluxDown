@@ -1934,8 +1934,18 @@ pub mod registry {
                     );
                     assert!(
                         dirs.iter()
+                            .any(|d| d.to_string_lossy().contains("google-chrome-beta")),
+                        "missing google-chrome-beta in chromium_nmh_dirs: {dirs:?}"
+                    );
+                    assert!(
+                        dirs.iter()
                             .any(|d| d.to_string_lossy().contains("microsoft-edge-dev")),
                         "missing microsoft-edge-dev in chromium_nmh_dirs: {dirs:?}"
+                    );
+                    assert!(
+                        dirs.iter()
+                            .any(|d| d.to_string_lossy().contains("microsoft-edge-beta")),
+                        "missing microsoft-edge-beta in chromium_nmh_dirs: {dirs:?}"
                     );
                     assert_eq!(
                         label_for_dir(Path::new(
@@ -1945,9 +1955,21 @@ pub mod registry {
                     );
                     assert_eq!(
                         label_for_dir(Path::new(
+                            "/home/u/.config/google-chrome-beta/NativeMessagingHosts"
+                        )),
+                        "Chrome Beta"
+                    );
+                    assert_eq!(
+                        label_for_dir(Path::new(
                             "/home/u/.config/microsoft-edge-dev/NativeMessagingHosts"
                         )),
                         "Edge Dev"
+                    );
+                    assert_eq!(
+                        label_for_dir(Path::new(
+                            "/home/u/.config/microsoft-edge-beta/NativeMessagingHosts"
+                        )),
+                        "Edge Beta"
                     );
                 }
             }

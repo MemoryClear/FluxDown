@@ -1373,6 +1373,8 @@ fn relay_check(diagnosis: &crate::nmh::registry::NmhDiagnosis) -> DiagnosticChec
     )
 }
 
+/// 判断 NMH 目标是否属于 Firefox 家族。
+/// 注意：前缀匹配必须与 `nmh.rs` 中的 `label_for_dir` / `FIREFOX_NAMES` 保持同步。
 fn is_firefox_target(label: &str) -> bool {
     label.starts_with("Firefox")
         || label.starts_with("LibreWolf")
@@ -2140,6 +2142,51 @@ mod tests {
         assert_eq!(manifest.repair, None);
 
         drop(std::fs::remove_dir_all(&temp_dir));
+    }
+
+    #[test]
+    fn uninstalled_chromium_with_missing_firefox_manifest_reports_firefox_error() {
+        let diagnosis = NmhDiagnosis {
+            exe_path: "/app/fluxdown_nmh".to_owned(),
+            chromium_manifest: "/uninstalled/chromium/manifest.json".to_owned(),
+            firefox_manifest: "/missing/firefox/manifest.json".to_owned(),
+            relay_location: "/data/fluxdown_nmh.sh".to_owned(),
+            registered_relay: "/app/fluxdown_nmh".to_owned(),
+            relay_owner: RelayOwner::Current,
+            targets: vec![
+                target("Chrome", false, false),
+                target("Firefox", true, false),
+            ],
+            ..NmhDiagnosis::default()
+        };
+        let checks = nmh_checks(&diagnosis);
+        let manifest = checks.iter().find(|c| c.id == "nmh_manifest").unwrap();
+        assert_eq!(manifest.level, DiagnosticLevel::Error);
+        assert!(manifest.detail.contains("missing: firefox"));
+        assert!(manifest.detail.contains("chromium: (not installed)"));
+    }
+
+    #[test]
+    fn neither_browser_installed_manifest_check_reports_info() {
+        let diagnosis = NmhDiagnosis {
+            exe_path: "/app/fluxdown_nmh".to_owned(),
+            chromium_manifest: "/uninstalled/chromium/manifest.json".to_owned(),
+            firefox_manifest: "/uninstalled/firefox/manifest.json".to_owned(),
+            relay_location: "/data/fluxdown_nmh.sh".to_owned(),
+            registered_relay: "/app/fluxdown_nmh".to_owned(),
+            relay_owner: RelayOwner::Current,
+            targets: vec![
+                target("Chrome", false, false),
+                target("Firefox", false, false),
+            ],
+            ..NmhDiagnosis::default()
+        };
+        let checks = nmh_checks(&diagnosis);
+        let manifest = checks.iter().find(|c| c.id == "nmh_manifest").unwrap();
+        assert_eq!(manifest.level, DiagnosticLevel::Info);
+        assert!(manifest.detail.contains("chromium: (not installed)"));
+        assert!(manifest.detail.contains("firefox: (not installed)"));
+        assert_eq!(manifest.repair, None);
     }
 
     #[test]
