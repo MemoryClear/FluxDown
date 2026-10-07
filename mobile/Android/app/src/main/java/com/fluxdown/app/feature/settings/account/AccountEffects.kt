@@ -4,7 +4,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalResources
 import com.fluxdown.app.R
 import com.fluxdown.app.nav.AppTab
 import com.fluxdown.app.nav.LocalNavigator
@@ -32,10 +32,11 @@ internal fun AccountEffects() {
     val container = LocalAppContainer.current
     val overlays = LocalFluxOverlays.current
     val nav = LocalNavigator.current
-    val context = LocalContext.current
+    val resources = LocalResources.current
     val haptics = FluxTheme.haptics
     val latestNav by rememberUpdatedState(nav)
     val latestOverlays by rememberUpdatedState(overlays)
+    val latestResources by rememberUpdatedState(resources)
 
     LaunchedEffect(container) {
         container.store.notices.collect { notice ->
@@ -44,12 +45,12 @@ internal fun AccountEffects() {
             haptics.reject()
             latestOverlays.showDialog(
                 FluxDialogSpec(
-                    title = context.getString(R.string.mobileSessionRevokedTitle),
-                    message = context.getString(AccountText.res(AccountRules.sessionRevokedKey(reason))),
+                    title = latestResources.getString(R.string.mobileSessionRevokedTitle),
+                    message = latestResources.getString(AccountText.res(AccountRules.sessionRevokedKey(reason))),
                     icon = FluxIcons.ShieldAlert,
                     buttons = listOf(
-                        FluxDialogButton(context.getString(R.string.confirm), FluxDialogButtonStyle.Secondary),
-                        FluxDialogButton(context.getString(R.string.accountLogin), FluxDialogButtonStyle.Primary) {
+                        FluxDialogButton(latestResources.getString(R.string.confirm), FluxDialogButtonStyle.Secondary),
+                        FluxDialogButton(latestResources.getString(R.string.accountLogin), FluxDialogButtonStyle.Primary) {
                             latestNav.selectTab(AppTab.Settings)
                             latestNav.push(Route.Settings(SettingsPage.Account))
                         },

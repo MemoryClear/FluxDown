@@ -20,6 +20,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalLocale
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -62,7 +63,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import java.text.DateFormat
 import java.util.Date
-import java.util.Locale
 
 /**
  * 多行列表行（Tracker / 订阅地址 / 服务器）：编辑区每行一个条目，失焦 / 离开页面时按 [format] 规整后写回。
@@ -310,13 +310,14 @@ private sealed interface RefreshPhase {
 @Composable
 private fun relativeTimeText(unix: Long): String {
     val now = System.currentTimeMillis() / 1000
+    val locale = LocalLocale.current.platformLocale
     return when (val b = SubscriptionTime.bucket(unix, now)) {
         SubscriptionTime.JustNow -> str(R.string.mobileTimeJustNow)
         is SubscriptionTime.MinutesAgo -> str(R.string.mobileTimeMinutesAgo, "n" to b.n)
         is SubscriptionTime.HoursAgo -> str(R.string.mobileTimeHoursAgo, "n" to b.n)
         is SubscriptionTime.DaysAgo -> str(R.string.mobileTimeDaysAgo, "n" to b.n)
         SubscriptionTime.Absolute ->
-            DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT, Locale.getDefault()).format(Date(unix * 1000))
+            DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT, locale).format(Date(unix * 1000))
     }
 }
 

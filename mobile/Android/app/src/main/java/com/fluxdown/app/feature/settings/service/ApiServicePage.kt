@@ -489,6 +489,7 @@ private fun AddressSection(controller: ApiServiceController, status: GatewayStat
     val copied = str(R.string.apiServiceCopied)
     val copyLabel = str(R.string.apiServiceCopy)
     val shareLabel = str(R.string.mobileShareLink)
+    val noBrowser = str(R.string.mobileNoBrowser)
 
     @Composable
     fun addressRow(title: String, url: String) {
@@ -506,7 +507,7 @@ private fun AddressSection(controller: ApiServiceController, status: GatewayStat
                         try {
                             context.startActivity(Intent.createChooser(send, null).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                         } catch (e: ActivityNotFoundException) {
-                            overlays.toast(context.getString(R.string.mobileNoBrowser), FluxToastKind.Error)
+                            overlays.toast(noBrowser, FluxToastKind.Error)
                         }
                     }, size = IconButtonSize.Sm, glass = false)
                 }
