@@ -1374,7 +1374,7 @@ fn relay_check(diagnosis: &crate::nmh::registry::NmhDiagnosis) -> DiagnosticChec
 }
 
 /// 判断 NMH 目标是否属于 Firefox 家族。
-/// 注意：前缀匹配必须与 `nmh.rs` 中的 `label_for_dir` / `FIREFOX_NAMES` 保持同步。
+/// 注意：前缀匹配必须与 `nmh.rs` 中的 `label_for_dir` 保持同步。
 fn is_firefox_target(label: &str) -> bool {
     label.starts_with("Firefox")
         || label.starts_with("LibreWolf")
