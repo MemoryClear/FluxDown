@@ -1208,8 +1208,10 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 ///        and inferred origin Referer (handles NVIDIA / Akamai / CDNs that block non-browser UAs
 ///        or enforce same-origin anti-hotlinking).
 ///   3. Second adaptive retry:
-///      - Stripped UA with inferred origin Referer (for Cloudflare with hotlink check)
-///      - Browser UA without inferred Referer (for CDNs rejecting synthetic referrers)
+///      - Browser UA was rejected → stripped UA with inferred origin Referer
+///        (Cloudflare with hotlink check; only when the request had no Referer)
+///      - Default UA was rejected → default UA with inferred origin Referer
+///        (rustls fingerprint vs Chrome UA conflict, but Referer is required)
 const PROBE_MAX_RETRIES: u32 = 3;
 
 /// Base delay for probe retries (used with exponential backoff on network errors).
@@ -1342,15 +1344,27 @@ async fn persist_adapted_spec(db: &Db, task_id: &str, adapted: &RequestSpec) {
     let mut headers = if headers_json.is_empty() {
         std::collections::HashMap::new()
     } else {
-        serde_json::from_str::<std::collections::HashMap<String, String>>(&headers_json)
-            .unwrap_or_default()
+        match serde_json::from_str::<std::collections::HashMap<String, String>>(&headers_json) {
+            Ok(h) => h,
+            Err(e) => {
+                // 已落库的请求头损坏：放弃自适应落库，绝不以残缺 map 覆写原值。
+                log_warn!(
+                    "[resolve] task {} persisted request headers are corrupt, skip persisting adapted context: {e:#}",
+                    task_id
+                );
+                return;
+            }
+        }
     };
 
     let before_headers = headers.clone();
     let before_referrer = current_referrer.clone();
 
-    // 同步 extra_headers（如去掉了浏览器 UA，或补充了默认浏览器 UA）
+    // 同步 extra_headers（如去掉了浏览器 UA，或补充了默认浏览器 UA）。
+    // 插入前按大小写不敏感移除同名键，避免库里的 `user-agent` 与新写入的
+    // `User-Agent` 并存成两个 UA 键。
     for (k, v) in &adapted.extra_headers {
+        headers.retain(|existing, _| !existing.eq_ignore_ascii_case(k));
         headers.insert(k.clone(), v.clone());
     }
     // 如果 adapted 中显式移除了 user-agent，也从持久化 headers 中移除
@@ -1372,8 +1386,15 @@ async fn persist_adapted_spec(db: &Db, task_id: &str, adapted: &RequestSpec) {
         return;
     }
 
-    let Ok(json) = serde_json::to_string(&headers) else {
-        return;
+    let json = match serde_json::to_string(&headers) {
+        Ok(j) => j,
+        Err(e) => {
+            log_warn!(
+                "[resolve] task {} failed to serialize adapted request headers: {e:#}",
+                task_id
+            );
+            return;
+        }
     };
 
     if let Err(e) = db
@@ -5960,6 +5981,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persist_adapted_spec_writes_browser_ua_without_duplicate_keys() {
+        let db = crate::db::Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let task_id = "test-adapt-persist-ua";
+        db.insert_task(
+            task_id,
+            "https://example.com/file.bin",
+            "test.bin",
+            "/tmp",
+            1,
+            0,
+            "",
+            "",
+            "",
+            1,
+        )
+        .await
+        .expect("insert task");
+        // 库里已有小写 user-agent；adapted 带 `User-Agent`，写回后只能剩一个 UA 键。
+        db.set_task_request_context(
+            task_id,
+            "",
+            "",
+            r#"{"user-agent":"old/1.0","X-Custom":"1"}"#,
+        )
+        .await
+        .expect("seed context");
+
+        let mut adapted = super::RequestSpec::empty_get();
+        adapted.extra_headers.insert(
+            "User-Agent".to_string(),
+            super::DEFAULT_BROWSER_UA.to_string(),
+        );
+        adapted
+            .extra_headers
+            .insert("X-Custom".to_string(), "1".to_string());
+        adapted.referrer = "https://example.com/".to_string();
+        super::persist_adapted_spec(&db, task_id, &adapted).await;
+
+        let (_, loaded_ref, json) = db
+            .load_task_request_context(task_id)
+            .await
+            .expect("load")
+            .expect("exists");
+        assert_eq!(loaded_ref, "https://example.com/");
+        let headers: std::collections::HashMap<String, String> =
+            serde_json::from_str(&json).expect("parse json");
+        let ua_keys: Vec<_> = headers
+            .keys()
+            .filter(|k| k.eq_ignore_ascii_case("user-agent"))
+            .collect();
+        assert_eq!(ua_keys.len(), 1, "exactly one UA key expected: {headers:?}");
+        assert_eq!(
+            headers.get("User-Agent").map(|s| s.as_str()),
+            Some(super::DEFAULT_BROWSER_UA)
+        );
+        assert_eq!(headers.get("X-Custom").map(|s| s.as_str()), Some("1"));
+    }
+
+    #[tokio::test]
+    async fn persist_adapted_spec_keeps_corrupt_persisted_headers_untouched() {
+        let db = crate::db::Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let task_id = "test-adapt-persist-corrupt";
+        db.insert_task(
+            task_id,
+            "https://example.com/file.bin",
+            "test.bin",
+            "/tmp",
+            1,
+            0,
+            "",
+            "",
+            "",
+            1,
+        )
+        .await
+        .expect("insert task");
+        let corrupt = r#"{"X-Custom":"1""#; // 截断的 JSON
+        db.set_task_request_context(task_id, "", "", corrupt)
+            .await
+            .expect("seed context");
+
+        let mut adapted = super::RequestSpec::empty_get();
+        adapted.extra_headers.insert(
+            "User-Agent".to_string(),
+            super::DEFAULT_BROWSER_UA.to_string(),
+        );
+        adapted.referrer = "https://example.com/".to_string();
+        super::persist_adapted_spec(&db, task_id, &adapted).await;
+
+        let (_, loaded_ref, json) = db
+            .load_task_request_context(task_id)
+            .await
+            .expect("load")
+            .expect("exists");
+        assert_eq!(json, corrupt, "corrupt headers must not be overwritten");
+        assert_eq!(loaded_ref, "", "referrer must not be written either");
+    }
+
+    #[tokio::test]
     async fn resolve_file_info_adapts_to_403_rejection_with_browser_ua_and_referrer() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -6014,6 +6138,67 @@ mod tests {
         let adapted = adapted.expect("should have adapted headers");
         assert!(adapted.extra_headers.contains_key("User-Agent"));
         assert_eq!(adapted.referrer, format!("http://127.0.0.1:{}/", port));
+    }
+
+    #[tokio::test]
+    async fn resolve_file_info_strips_rejected_browser_ua_on_403() {
+        // 场景 A：扩展传入的浏览器 UA 被拒（Cloudflare 式 TLS 指纹 vs UA 冲突），
+        // 剥离 UA 后回落到 DEFAULT_UA 才被放行。
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 1024];
+                    while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        let n = stream.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                    }
+                    let text = String::from_utf8_lossy(&buf);
+                    let has_browser_ua = text.lines().any(|l| {
+                        let l = l.to_lowercase();
+                        l.starts_with("user-agent:") && l.contains("mozilla")
+                    });
+                    let resp = if has_browser_ua {
+                        "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    } else if text.starts_with("HEAD") {
+                        "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n"
+                    } else {
+                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-0/1000\r\nContent-Length: 1\r\nConnection: close\r\n\r\nX"
+                    };
+                    let _ = stream.write_all(resp.as_bytes()).await.ok();
+                    let _ = stream.shutdown().await.ok();
+                });
+            }
+        });
+
+        let client = super::build_client(&crate::proxy_config::ProxyConfig::default(), "").unwrap();
+        let url = format!("http://127.0.0.1:{}/file.bin", port);
+        let mut spec = super::RequestSpec::empty_get();
+        spec.extra_headers.insert(
+            "User-Agent".to_string(),
+            "Mozilla/5.0 Chrome/120".to_string(),
+        );
+
+        let (info, adapted) = super::resolve_file_info_with_ua_fallback(&client, &url, &spec)
+            .await
+            .expect("probe should succeed after stripping the rejected browser UA");
+
+        assert_eq!(info.total_bytes, 1000);
+        let adapted = adapted.expect("should report adapted spec");
+        assert!(
+            !adapted
+                .extra_headers
+                .keys()
+                .any(|k| k.eq_ignore_ascii_case("user-agent")),
+            "browser UA must be stripped"
+        );
     }
 
     // -----------------------------------------------------------------------
