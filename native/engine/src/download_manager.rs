@@ -531,6 +531,9 @@ fn is_bt_url(url: &str) -> bool {
     is_magnet(url) || is_torrent_file_url(url)
 }
 
+/// BT 被用户在设置中禁用时，所有拒绝路径（建任务 / 恢复 / 会话初始化）共用的原因文案。
+pub const BT_DISABLED_MESSAGE: &str = "BitTorrent is disabled in settings";
+
 /// URL 去重比较前的归一化：只剥离 fragment（`#` 之后的部分）与首尾空白。
 /// 下载链接的 fragment 极少携带语义（网页锚点惯例），刻意不处理 query——
 /// 部分 CDN 签名 URL 用不同 query token 分发同一份内容，一并折叠会把两个
@@ -3735,7 +3738,7 @@ impl DownloadManager {
     async fn ensure_bt_session(&mut self) -> Result<(), downloader::DownloadError> {
         if !self.bt_config.enabled {
             return Err(downloader::DownloadError::Other(
-                "BitTorrent is disabled in settings".to_string(),
+                BT_DISABLED_MESSAGE.to_string(),
             ));
         }
         // 任何经此入口的 BT 活动（新下载 / 恢复 / 重新挂载做种）都结束「仅暂停
@@ -4235,6 +4238,8 @@ impl DownloadManager {
     /// downloads are gracefully paused first so their progress is preserved
     /// and they appear as "paused" (status 2) in the UI.
     pub async fn invalidate_bt_session(&mut self) {
+        // BT 刚被禁用时，排队中的 BT 项立即落回暂停（不必等下一次 drain）。
+        self.park_pending_bt_tasks().await;
         if self.bt_session.is_none() {
             return;
         }
@@ -4513,12 +4518,64 @@ impl DownloadManager {
         )
     }
 
+    /// BT 被禁用时把仍停在「排队/下载中/准备中」的任务落回暂停(2)并广播，
+    /// 避免 UI 留下永远等不到的假象；已暂停、失败、完成的任务保持原状。
+    async fn park_bt_disabled_task(&mut self, task_id: &str) {
+        let task = match self.db.load_task_by_id(task_id).await {
+            Ok(Some(task)) => task,
+            Ok(None) => return,
+            Err(error) => {
+                crate::logger::report_error(
+                    "download-manager",
+                    "load task before parking BT-disabled task",
+                    &error,
+                );
+                return;
+            }
+        };
+        if !matches!(task.status, 0 | 1 | 5) {
+            return;
+        }
+        if let Err(error) = self.db.update_task_status(task_id, 2, "").await {
+            crate::logger::report_error("download-manager", "persist task state", &error);
+            return;
+        }
+        self.emit_progress_from_db(task_id, 2, 0, "", 0).await;
+    }
+
+    /// BT 被禁用时，把 `pending_queue` 里的 BT 项整体摘出并落回暂停。
+    /// BT 启用或队列无 BT 项时为空操作；返回被摘出的任务数。
+    async fn park_pending_bt_tasks(&mut self) -> usize {
+        if self.bt_config.enabled || self.pending_queue.is_empty() {
+            return 0;
+        }
+        let (bt_items, rest): (VecDeque<_>, VecDeque<_>) = std::mem::take(&mut self.pending_queue)
+            .into_iter()
+            .partition(|queued| is_bt_url(&queued.url) || !queued.torrent_file_bytes.is_empty());
+        self.pending_queue = rest;
+        for queued in &bt_items {
+            log_info!(
+                "[manager] queued BT task {} parked as paused: {}",
+                queued.task_id,
+                BT_DISABLED_MESSAGE
+            );
+            self.park_bt_disabled_task(&queued.task_id).await;
+        }
+        if !bt_items.is_empty() {
+            self.broadcast_queue_positions();
+        }
+        bt_items.len()
+    }
+
     /// Try to start tasks from the pending queue until we run out of capacity.
     ///
     /// Queue-aware: tasks blocked only by their queue's concurrent limit are
     /// skipped so that tasks from other queues (or the default queue) can
     /// proceed, rather than blocking the entire pending queue.
     async fn drain_queue(&mut self) {
+        // BT 被禁用：排队中的 BT 项不得启动（启动即会因会话拒绝而落成失败），
+        // 先整体摘出并落回暂停，与 auto_resume_on_start 的「跳过」语义一致。
+        self.park_pending_bt_tasks().await;
         // Drain into a Vec up-front so every removal is O(1) via iteration
         // instead of O(n) per `VecDeque::remove(i)`.  Total cost: O(n).
         let pending: Vec<_> = self.pending_queue.drain(..).collect();
@@ -5757,6 +5814,44 @@ impl DownloadManager {
         }
     }
 
+    /// BT 被禁用时，新建任务（magnet / 种子字节 / 解出真实地址为 BT 的 thunder 链接）
+    /// 是否会被 [`Self::create_task`] 拒绝。BT 启用时恒为 `false`。
+    ///
+    /// 供 daemon 在建任务前预检，以便把 [`BT_DISABLED_MESSAGE`] 回报给客户端，
+    /// 而不是等 `create_task` 返回无原因的 `None`。
+    pub fn rejects_new_bt_task(&self, url: &str, torrent_file_bytes: &[u8]) -> bool {
+        if self.bt_config.enabled {
+            return false;
+        }
+        if !torrent_file_bytes.is_empty() || is_bt_url(url) {
+            return true;
+        }
+        crate::thunder::is_thunder_url(url)
+            && crate::thunder::decode_thunder_url(url).is_ok_and(|real| is_bt_url(&real))
+    }
+
+    /// BT 被禁用时，`task_ids` 中会被恢复流程拒绝的 BT 任务 ID 子集（含已完成
+    /// 待重新做种的任务）；BT 启用时恒为空。
+    ///
+    /// 供 daemon 在 resume 前预检：被拒的单任务恢复须向客户端回报
+    /// [`BT_DISABLED_MESSAGE`]，而不是返回无信息的成功。
+    pub async fn bt_disabled_resume_rejections(
+        &self,
+        task_ids: &[String],
+    ) -> Result<Vec<String>, crate::db::DbError> {
+        if self.bt_config.enabled {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .db
+            .load_tasks_by_ids(task_ids)
+            .await?
+            .into_iter()
+            .filter(|task| is_bt_url(&task.url))
+            .map(|task| task.task_id)
+            .collect())
+    }
+
     /// 创建下载任务，返回新任务 ID（插入失败时 `None`）。
     ///
     /// `spec.start_paused` = 稍后下载：任务以 paused(2) 落库，不占并发、
@@ -5806,8 +5901,13 @@ impl DownloadManager {
             None
         };
         // BT 禁用门禁：BT 被用户显式禁用时，拒绝创建 magnet 链接或种子文件任务。
-        if (is_bt_url(&url) || !torrent_file_bytes.is_empty()) && !self.bt_config.enabled {
-            log_info!("[manager] BitTorrent download rejected: BitTorrent is disabled in settings");
+        // 调用方（daemon）在进入前用 `rejects_new_bt_task` 预检以回报明确原因；
+        // 这里是兜底，保证其它调用方绕过预检也不会落库。
+        if self.rejects_new_bt_task(&url, &torrent_file_bytes) {
+            log_info!(
+                "[manager] BitTorrent download rejected: {}",
+                BT_DISABLED_MESSAGE
+            );
             return None;
         }
         // URL 去重（config `dedup_same_url`，默认关闭）：种子上传没有真实 URL 可比较。
@@ -8053,9 +8153,13 @@ impl DownloadManager {
         let use_bt = is_bt_url(&task.url);
         if use_bt && !self.bt_config.enabled {
             crate::log_warn!(
-                "[manager] cannot resume BT task {}: BitTorrent is disabled in settings",
-                task_id
+                "[manager] cannot resume BT task {}: {}",
+                task_id,
+                BT_DISABLED_MESSAGE
             );
+            // 任务若仍停在「排队/下载中/准备中」假象上，落回暂停；已暂停/失败/
+            // 完成的任务保持原状。
+            self.park_bt_disabled_task(task_id).await;
             return;
         }
         let use_ed2k = crate::ed2k::link::is_ed2k_url(&task.url);
@@ -13016,6 +13120,160 @@ mod tests {
         assert!(
             !mgr.active_tasks.contains_key(&bt_task_id),
             "auto_resume_on_start must skip BT task when BT is disabled"
+        );
+    }
+
+    /// BT 禁用后排队 / 恢复路径：BT 任务不得停在「等待/下载中」假象，也不得被置失败；
+    /// 预检接口须能识别被拒的 BT 任务，供 daemon 向客户端回报原因。
+    #[tokio::test]
+    async fn bt_disabled_parks_queued_and_resumed_bt_tasks_and_reports_rejections() {
+        const MAGNET: &str = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=t";
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let temp_dir = std::env::temp_dir();
+        let save_dir = temp_dir.to_string_lossy().into_owned();
+        let sink = Arc::new(RecordingSink::new());
+        let mut mgr = DownloadManager::new(
+            db,
+            DownloadManagerConfig {
+                max_concurrent: 1,
+                speed_limit_bps: 0,
+                upload_limit_bps: 0,
+                default_save_dir: save_dir.clone(),
+                app_data_dir: save_dir.clone(),
+                data_dir: temp_dir.clone(),
+                bt_config: BtConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+                proxy_config: ProxyConfig::default(),
+                user_agent: String::new(),
+            },
+            sink.clone(),
+            Arc::new(crate::NoopSelection),
+        )
+        .expect("construct manager");
+
+        for id in [
+            "bt-queued",
+            "bt-swept",
+            "bt-stuck",
+            "bt-paused",
+            "bt-failed",
+        ] {
+            mgr.db
+                .insert_task(id, MAGNET, "t", &save_dir, 1, 0, "", "", "", 0)
+                .await
+                .expect("insert BT task");
+        }
+        insert_task_at_status(&mgr.db, "http-paused", &save_dir, "f.bin", 2).await;
+        mgr.db
+            .update_task_status("bt-stuck", 1, "")
+            .await
+            .expect("mark stuck");
+        mgr.db
+            .update_task_status("bt-paused", 2, "")
+            .await
+            .expect("mark paused");
+        mgr.db
+            .update_task_status("bt-failed", 4, "boom")
+            .await
+            .expect("mark failed");
+
+        let queued_bt = |task_id: &str| QueuedTask {
+            task_id: task_id.to_string(),
+            url: MAGNET.to_string(),
+            save_dir: save_dir.clone(),
+            file_name: String::new(),
+            segments: 0,
+            is_resume: false,
+            cookies: String::new(),
+            referrer: String::new(),
+            hint_file_size: 0,
+            torrent_file_bytes: Vec::new(),
+            proxy_url: String::new(),
+            user_agent: String::new(),
+            queue_id: String::new(),
+            checksum: String::new(),
+            ignore_tls_errors: false,
+            extra_headers: std::collections::HashMap::new(),
+            selected_file_indices: Vec::new(),
+            method: None,
+            body: None,
+            audio_url: None,
+            resolver_plugin_id: String::new(),
+            resolved: false,
+            range_supported: false,
+            resolver_item: String::new(),
+        };
+        let status_of = |db: &Db, id: &str| {
+            let db = db.clone();
+            let id = id.to_string();
+            async move {
+                db.load_task_by_id(&id)
+                    .await
+                    .expect("load task")
+                    .expect("task exists")
+                    .status
+            }
+        };
+
+        // 预检：新建 BT 任务与恢复 BT 任务的拒绝判定。
+        assert!(mgr.rejects_new_bt_task(MAGNET, &[]));
+        assert!(mgr.rejects_new_bt_task("", &[1, 2, 3]));
+        assert!(!mgr.rejects_new_bt_task("https://example.com/f.zip", &[]));
+        let ids: Vec<String> = ["bt-stuck", "http-paused", "bt-paused"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let mut rejected = mgr
+            .bt_disabled_resume_rejections(&ids)
+            .await
+            .expect("load rejections");
+        rejected.sort();
+        assert_eq!(rejected, ["bt-paused", "bt-stuck"]);
+
+        // 排队中的 BT 项：drain 时落回暂停，而不是启动后被置失败(4)。
+        mgr.pending_queue.push_back(queued_bt("bt-queued"));
+        mgr.drain_queue().await;
+        assert!(mgr.pending_queue.is_empty(), "BT item must leave the queue");
+        assert!(!mgr.active_tasks.contains_key("bt-queued"));
+        assert_eq!(status_of(&mgr.db, "bt-queued").await, 2);
+        assert!(
+            sink.events().iter().any(|event| matches!(
+                event,
+                EngineEvent::TaskProgress { task_id, status: 2, .. } if task_id == "bt-queued"
+            )),
+            "parking must broadcast the paused state"
+        );
+
+        // 禁用生效时的即时清扫（无 BT 会话也要执行）。
+        mgr.pending_queue.push_back(queued_bt("bt-swept"));
+        mgr.invalidate_bt_session().await;
+        assert!(mgr.pending_queue.is_empty());
+        assert_eq!(status_of(&mgr.db, "bt-swept").await, 2);
+
+        // 恢复：停在「下载中」假象的任务落回暂停；暂停 / 失败任务保持原状。
+        for id in ["bt-stuck", "bt-paused", "bt-failed"] {
+            mgr.resume_task(id).await;
+            assert!(!mgr.active_tasks.contains_key(id), "{id} must not spawn");
+        }
+        assert_eq!(status_of(&mgr.db, "bt-stuck").await, 2);
+        assert_eq!(status_of(&mgr.db, "bt-paused").await, 2);
+        assert_eq!(status_of(&mgr.db, "bt-failed").await, 4);
+
+        // 重新启用后预检不再拒绝。
+        mgr.set_bt_config(BtConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        assert!(!mgr.rejects_new_bt_task(MAGNET, &[]));
+        assert!(
+            mgr.bt_disabled_resume_rejections(&ids)
+                .await
+                .expect("load rejections")
+                .is_empty()
         );
     }
 
