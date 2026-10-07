@@ -407,6 +407,18 @@ mod tests {
         assert!(!public.contains_key("daemon_config_revision"));
         assert!(!public.contains_key("daemon_migration_link_acked"));
     }
+
+    #[test]
+    fn bt_config_from_map_parses_bt_enabled() {
+        let mut map = std::collections::HashMap::new();
+        assert!(super::bt_config_from_map(&map).enabled, "defaults to true");
+
+        map.insert("bt_enabled".to_string(), "false".to_string());
+        assert!(!super::bt_config_from_map(&map).enabled, "explicit false");
+
+        map.insert("bt_enabled".to_string(), "true".to_string());
+        assert!(super::bt_config_from_map(&map).enabled, "explicit true");
+    }
 }
 
 #[cfg(test)]

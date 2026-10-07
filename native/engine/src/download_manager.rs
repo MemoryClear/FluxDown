@@ -5567,9 +5567,16 @@ impl DownloadManager {
             .iter()
             .map(|t| (t.task_id.as_str(), t.queue_id.as_str()))
             .collect();
+        let is_bt_of: HashMap<&str, bool> = rows
+            .iter()
+            .map(|t| (t.task_id.as_str(), is_bt_url(&t.url)))
+            .collect();
         let ids: Vec<String> = reset_ids
             .iter()
             .filter(|id| {
+                if !self.bt_config.enabled && is_bt_of.get(id.as_str()).copied().unwrap_or(false) {
+                    return false;
+                }
                 let q = queue_of.get(id.as_str()).copied().unwrap_or("");
                 // 孤儿/空 queue_id 视作运行中（与 eligible_resume_task_ids 一致）。
                 self.queues.get(q).map(|q| q.is_running).unwrap_or(true)
@@ -8044,6 +8051,13 @@ impl DownloadManager {
         };
         let use_dash = dash_downloader::is_dash_url(&task.url) || audio_url.is_some();
         let use_bt = is_bt_url(&task.url);
+        if use_bt && !self.bt_config.enabled {
+            crate::log_warn!(
+                "[manager] cannot resume BT task {}: BitTorrent is disabled in settings",
+                task_id
+            );
+            return;
+        }
         let use_ed2k = crate::ed2k::link::is_ed2k_url(&task.url);
 
         // Insert placeholder entry (handle filled in after tokio::spawn).
@@ -12959,9 +12973,51 @@ mod tests {
             start_paused: true,
             ..Default::default()
         };
+        let bt_task_id = mgr
+            .create_task(magnet_spec_enabled)
+            .await
+            .expect("magnet task creation must be accepted when BT is enabled");
+        let initial_task = mgr
+            .db
+            .load_task_by_id(&bt_task_id)
+            .await
+            .expect("load task")
+            .expect("task exists");
+        assert_eq!(initial_task.status, 2, "task is created paused");
+
+        // 6. When BT is disabled again, resume_task must leave the task paused rather than failing it
+        mgr.set_bt_config(BtConfig {
+            enabled: false,
+            ..Default::default()
+        });
+        mgr.invalidate_bt_session().await;
+        assert!(mgr.bt_session.is_none(), "BT session invalidated");
+
+        mgr.resume_task(&bt_task_id).await;
         assert!(
-            mgr.create_task(magnet_spec_enabled).await.is_some(),
-            "magnet task creation must be accepted when BT is enabled"
+            !mgr.active_tasks.contains_key(&bt_task_id),
+            "BT task must not be spawned in active_tasks when BT is disabled"
+        );
+        let loaded = mgr
+            .db
+            .load_task_by_id(&bt_task_id)
+            .await
+            .expect("load task")
+            .expect("task exists");
+        assert_eq!(
+            loaded.status, 2,
+            "BT task must remain paused (status 2) instead of mutating to failed (status 4)"
+        );
+
+        // 7. auto_resume_on_start must skip BT tasks when BT is disabled
+        mgr.db
+            .set_config("auto_resume_on_start", "true")
+            .await
+            .expect("set config");
+        mgr.auto_resume_on_start(vec![bt_task_id.clone()]).await;
+        assert!(
+            !mgr.active_tasks.contains_key(&bt_task_id),
+            "auto_resume_on_start must skip BT task when BT is disabled"
         );
     }
 
