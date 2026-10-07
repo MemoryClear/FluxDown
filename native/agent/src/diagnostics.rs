@@ -1224,9 +1224,28 @@ fn nmh_checks(diagnosis: &crate::nmh::registry::NmhDiagnosis) -> Vec<DiagnosticC
             None,
         ));
     }
+    let (chromium_installed, firefox_installed) = if diagnosis.targets.is_empty() {
+        (
+            !diagnosis.chromium_manifest.is_empty(),
+            !diagnosis.firefox_manifest.is_empty(),
+        )
+    } else {
+        (
+            diagnosis
+                .targets
+                .iter()
+                .any(|t| !is_firefox_target(&t.label) && t.installed),
+            diagnosis
+                .targets
+                .iter()
+                .any(|t| is_firefox_target(&t.label) && t.installed),
+        )
+    };
     checks.push(manifest_check(
         &diagnosis.chromium_manifest,
+        chromium_installed,
         &diagnosis.firefox_manifest,
+        firefox_installed,
     ));
     if !diagnosis.exe_path.is_empty() {
         checks.push(relay_check(diagnosis));
@@ -1354,15 +1373,52 @@ fn relay_check(diagnosis: &crate::nmh::registry::NmhDiagnosis) -> DiagnosticChec
     )
 }
 
-/// Chromium 与 Firefox 两份清单都要存在；缺一份是安装未完成或清理工具误删的典型症状。
-fn manifest_check(chromium: &str, firefox: &str) -> DiagnosticCheckDto {
-    let missing: Vec<&str> = [("chromium", chromium), ("firefox", firefox)]
-        .into_iter()
-        .filter(|(_, path)| path.is_empty() || !Path::new(path).exists())
-        .map(|(label, _)| label)
-        .collect();
-    let detail = format!("chromium: {chromium}\nfirefox: {firefox}");
-    if missing.is_empty() {
+fn is_firefox_target(label: &str) -> bool {
+    label.starts_with("Firefox")
+        || label.starts_with("LibreWolf")
+        || label.starts_with("Zen")
+        || label.starts_with("Mozilla")
+}
+
+/// 已安装浏览器家族的清单都应存在；未安装的浏览器家族清单不作为缺失处理（#713）。
+fn manifest_check(
+    chromium: &str,
+    chromium_installed: bool,
+    firefox: &str,
+    firefox_installed: bool,
+) -> DiagnosticCheckDto {
+    let mut missing = Vec::new();
+    if chromium_installed && (chromium.is_empty() || !Path::new(chromium).exists()) {
+        missing.push("chromium");
+    }
+    if firefox_installed && (firefox.is_empty() || !Path::new(firefox).exists()) {
+        missing.push("firefox");
+    }
+
+    let detail = format!(
+        "chromium: {}\nfirefox: {}",
+        if chromium_installed {
+            chromium
+        } else {
+            "(not installed)"
+        },
+        if firefox_installed {
+            firefox
+        } else {
+            "(not installed)"
+        },
+    );
+
+    if !chromium_installed && !firefox_installed {
+        check(
+            CHECK_NMH_MANIFEST,
+            "",
+            DiagnosticLevel::Info,
+            detail,
+            "",
+            None,
+        )
+    } else if missing.is_empty() {
         check(
             CHECK_NMH_MANIFEST,
             "",
@@ -2032,7 +2088,9 @@ mod tests {
         assert_eq!(checks[1].id, "nmh_manifest");
         assert_eq!(checks[1].level, DiagnosticLevel::Error);
         assert_eq!(checks[1].hint, HINT_REREGISTER_NMH);
-        assert!(checks[1].detail.contains("missing: chromium, firefox"));
+        assert!(checks[1].detail.contains("missing: chromium"));
+        assert!(!checks[1].detail.contains("missing: chromium, firefox"));
+        assert!(checks[1].detail.contains("firefox: (not installed)"));
         assert_eq!(checks[2].id, "nmh_relay");
         assert_eq!(checks[2].level, DiagnosticLevel::Ok);
         assert_eq!(checks[3].target, "Chrome");
@@ -2049,6 +2107,39 @@ mod tests {
         assert_eq!(checks[5].level, DiagnosticLevel::Info);
         assert!(checks[5].detail.contains("browser not installed"));
         assert!(checks[5].hint.is_empty());
+    }
+
+    #[test]
+    fn uninstalled_browser_nmh_manifest_is_not_treated_as_error() {
+        // macOS / Linux 上未安装 Firefox 时，只要已安装的 Chromium 清单存在，清单检查即为 Ok (#713)
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fluxdown_diag_nmh_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("create test dir");
+        let valid_manifest = temp_dir.join("com.fluxdown.nmh.json");
+        std::fs::write(&valid_manifest, "{}").expect("write manifest");
+
+        let diagnosis = NmhDiagnosis {
+            exe_path: "/app/fluxdown_nmh".to_owned(),
+            chromium_manifest: valid_manifest.display().to_string(),
+            firefox_manifest: "/uninstalled/firefox/com.fluxdown.nmh.json".to_owned(),
+            relay_location: "/data/fluxdown_nmh.sh".to_owned(),
+            registered_relay: "/app/fluxdown_nmh".to_owned(),
+            relay_owner: RelayOwner::Current,
+            targets: vec![
+                target("Chrome", true, true),
+                target("Firefox", false, false),
+            ],
+            ..NmhDiagnosis::default()
+        };
+        let checks = nmh_checks(&diagnosis);
+        let manifest = checks.iter().find(|c| c.id == "nmh_manifest").unwrap();
+        assert_eq!(manifest.level, DiagnosticLevel::Ok);
+        assert!(manifest.detail.contains("firefox: (not installed)"));
+        assert_eq!(manifest.repair, None);
+
+        drop(std::fs::remove_dir_all(&temp_dir));
     }
 
     #[test]
@@ -2091,7 +2182,7 @@ mod tests {
         assert_eq!(checks[0].level, DiagnosticLevel::Error);
         assert_eq!(checks[0].hint, HINT_REINSTALL_APP);
         assert_eq!(checks[0].detail, "fluxdown_nmh not found");
-        let ok = manifest_check("", "");
+        let ok = manifest_check("", true, "", true);
         assert_eq!(ok.level, DiagnosticLevel::Error);
     }
 

@@ -1335,11 +1335,17 @@ pub mod registry {
                     .join("Chrome Beta")
                     .join("NativeMessagingHosts"),
                 lib.join("Google")
+                    .join("Chrome Dev")
+                    .join("NativeMessagingHosts"),
+                lib.join("Google")
                     .join("Chrome Canary")
                     .join("NativeMessagingHosts"),
                 lib.join("Chromium").join("NativeMessagingHosts"),
                 lib.join("Microsoft Edge").join("NativeMessagingHosts"),
                 lib.join("Microsoft Edge Beta").join("NativeMessagingHosts"),
+                lib.join("Microsoft Edge Dev").join("NativeMessagingHosts"),
+                lib.join("Microsoft Edge Canary")
+                    .join("NativeMessagingHosts"),
                 lib.join("Arc")
                     .join("User Data")
                     .join("NativeMessagingHosts"),
@@ -1379,8 +1385,14 @@ pub mod registry {
                 root = dir_name(parent.and_then(Path::parent));
             }
             match root {
+                "Chrome" => "Chrome",
+                "Chrome Beta" => "Chrome Beta",
+                "Chrome Dev" => "Chrome Dev",
+                "Chrome Canary" => "Chrome Canary",
                 "Microsoft Edge" => "Edge",
                 "Microsoft Edge Beta" => "Edge Beta",
+                "Microsoft Edge Dev" => "Edge Dev",
+                "Microsoft Edge Canary" => "Edge Canary",
                 "Brave-Browser" => "Brave",
                 "Mozilla" => "Firefox",
                 "Thorium" => "Thorium",
@@ -1401,8 +1413,20 @@ pub mod registry {
             let snap = home.join("snap");
             vec![
                 config.join("google-chrome").join("NativeMessagingHosts"),
+                config
+                    .join("google-chrome-beta")
+                    .join("NativeMessagingHosts"),
+                config
+                    .join("google-chrome-unstable")
+                    .join("NativeMessagingHosts"),
                 config.join("chromium").join("NativeMessagingHosts"),
                 config.join("microsoft-edge").join("NativeMessagingHosts"),
+                config
+                    .join("microsoft-edge-beta")
+                    .join("NativeMessagingHosts"),
+                config
+                    .join("microsoft-edge-dev")
+                    .join("NativeMessagingHosts"),
                 config
                     .join("BraveSoftware")
                     .join("Brave-Browser")
@@ -1513,8 +1537,12 @@ pub mod registry {
                 .unwrap_or_default();
             let base = match root {
                 "google-chrome" => "Chrome",
+                "google-chrome-beta" => "Chrome Beta",
+                "google-chrome-unstable" => "Chrome Dev",
                 "chromium" => "Chromium",
                 "microsoft-edge" => "Edge",
+                "microsoft-edge-beta" => "Edge Beta",
+                "microsoft-edge-dev" => "Edge Dev",
                 "Brave-Browser" => "Brave",
                 "vivaldi" => "Vivaldi",
                 "thorium" => "Thorium",
@@ -1684,11 +1712,23 @@ pub mod registry {
             let mut diagnosis = NmhDiagnosis::default();
             let chromium_dirs = chromium_nmh_dirs();
             let firefox_dirs = firefox_targets();
-            if let Some(first) = chromium_dirs.first() {
-                diagnosis.chromium_manifest = first.join(MANIFEST_FILENAME).display().to_string();
+            if let Some(preferred) = chromium_dirs
+                .iter()
+                .find(|dir| dir.join(MANIFEST_FILENAME).is_file())
+                .or_else(|| chromium_dirs.iter().find(|dir| browser_installed(dir)))
+                .or_else(|| chromium_dirs.first())
+            {
+                diagnosis.chromium_manifest =
+                    preferred.join(MANIFEST_FILENAME).display().to_string();
             }
-            if let Some((first, _)) = firefox_dirs.first() {
-                diagnosis.firefox_manifest = first.join(MANIFEST_FILENAME).display().to_string();
+            if let Some((preferred, _)) = firefox_dirs
+                .iter()
+                .find(|(dir, _)| dir.join(MANIFEST_FILENAME).is_file())
+                .or_else(|| firefox_dirs.iter().find(|(_, installed)| *installed))
+                .or_else(|| firefox_dirs.first())
+            {
+                diagnosis.firefox_manifest =
+                    preferred.join(MANIFEST_FILENAME).display().to_string();
             }
             let nmh_exe = match super::find_nmh_exe() {
                 Ok(path) => path,
@@ -1839,6 +1879,77 @@ pub mod registry {
                 }
                 assert_eq!(std::fs::read_dir(&dir)?.count(), 1);
                 std::fs::remove_dir_all(&dir)
+            }
+
+            #[test]
+            fn chromium_nmh_dirs_and_labels_cover_dev_channels() {
+                #[cfg(target_os = "macos")]
+                {
+                    use super::{chromium_nmh_dirs, label_for_dir};
+                    let dirs = chromium_nmh_dirs();
+                    assert!(
+                        dirs.iter()
+                            .any(|d| d.to_string_lossy().contains("Chrome Dev")),
+                        "missing Chrome Dev in chromium_nmh_dirs: {dirs:?}"
+                    );
+                    assert!(
+                        dirs.iter()
+                            .any(|d| d.to_string_lossy().contains("Microsoft Edge Dev")),
+                        "missing Microsoft Edge Dev in chromium_nmh_dirs: {dirs:?}"
+                    );
+                    assert!(
+                        dirs.iter()
+                            .any(|d| d.to_string_lossy().contains("Microsoft Edge Canary")),
+                        "missing Microsoft Edge Canary in chromium_nmh_dirs: {dirs:?}"
+                    );
+
+                    assert_eq!(
+                        label_for_dir(Path::new(
+                            "/Users/u/Library/Application Support/Google/Chrome Dev/NativeMessagingHosts"
+                        )),
+                        "Chrome Dev"
+                    );
+                    assert_eq!(
+                        label_for_dir(Path::new(
+                            "/Users/u/Library/Application Support/Microsoft Edge Dev/NativeMessagingHosts"
+                        )),
+                        "Edge Dev"
+                    );
+                    assert_eq!(
+                        label_for_dir(Path::new(
+                            "/Users/u/Library/Application Support/Microsoft Edge Canary/NativeMessagingHosts"
+                        )),
+                        "Edge Canary"
+                    );
+                }
+
+                #[cfg(not(target_os = "macos"))]
+                {
+                    use super::{chromium_nmh_dirs, label_for_dir};
+                    let dirs = chromium_nmh_dirs();
+                    assert!(
+                        dirs.iter()
+                            .any(|d| d.to_string_lossy().contains("google-chrome-unstable")),
+                        "missing google-chrome-unstable in chromium_nmh_dirs: {dirs:?}"
+                    );
+                    assert!(
+                        dirs.iter()
+                            .any(|d| d.to_string_lossy().contains("microsoft-edge-dev")),
+                        "missing microsoft-edge-dev in chromium_nmh_dirs: {dirs:?}"
+                    );
+                    assert_eq!(
+                        label_for_dir(Path::new(
+                            "/home/u/.config/google-chrome-unstable/NativeMessagingHosts"
+                        )),
+                        "Chrome Dev"
+                    );
+                    assert_eq!(
+                        label_for_dir(Path::new(
+                            "/home/u/.config/microsoft-edge-dev/NativeMessagingHosts"
+                        )),
+                        "Edge Dev"
+                    );
+                }
             }
         }
     }
