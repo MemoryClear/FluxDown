@@ -1221,6 +1221,10 @@ pub const DEFAULT_BROWSER_UA: &str = if cfg!(target_os = "macos") {
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
 } else if cfg!(target_os = "windows") {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+} else if cfg!(target_os = "android") {
+    "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Mobile Safari/537.36"
+} else if cfg!(target_os = "ios") {
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
 } else {
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
 };
@@ -1242,14 +1246,25 @@ pub fn infer_origin_referrer(url: &str) -> Option<String> {
     None
 }
 
-/// 判断探测失败是否为服务端明确拒绝（403 Forbidden / 429 Too Many Requests / 401 Unauthorized）。
+/// 判断探测失败是否为服务端明确拒绝（403 Forbidden / 429 Too Many Requests）。
+/// 严格解析 probe failure 状态位或 HTTP 状态码，避免误判带 403/429 端口或 URL 的网络错误。
 pub(crate) fn is_probe_server_rejection(e: &DownloadError) -> bool {
     if is_server_rejection(e) {
         return true;
     }
     match e {
         DownloadError::Other(msg) => {
-            msg.contains("403") || msg.contains("429") || msg.contains("401")
+            if let Some(rest) = msg.strip_prefix("probes failed: ") {
+                for part in rest.split(", ") {
+                    if let Some((_probe_type, status_desc)) = part.split_once('=') {
+                        let trimmed = status_desc.trim();
+                        if matches!(trimmed, "403" | "429") {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
         }
         _ => false,
     }
@@ -1438,16 +1453,17 @@ pub(crate) async fn resolve_file_info_with_ua_fallback(
                                 current_adapted =
                                     Some(spec_with_browser_ua_and_referrer(spec, url));
                             } else if attempt == 1 {
-                                // 尝试仅补充浏览器 UA（不带推导 Referer，防某些站点对非官方页面 Referer 反向校验）
+                                // 若组合仍被拒绝，回退为默认 UA + 推导 Referer（针对需要 Referer 但拦截 Chrome+rustls 指纹的 Cloudflare 等站点）
                                 log_info!(
-                                    "[resolve] server rejection persists: trying browser UA without inferred Referer"
+                                    "[resolve] server rejection persists: trying default UA with inferred origin Referer"
                                 );
-                                current_adapted = Some(spec_with_browser_ua(spec));
+                                current_adapted = Some(spec_with_inferred_referrer(spec, url));
                             }
                         }
                     } else if has_browser_ua && attempt + 2 == PROBE_MAX_RETRIES {
-                        // 最后一轮重试前的兜底降级（即便不是明确 403）：尝试剥离浏览器 UA
-                        current_adapted = Some(spec_without_browser_ua(spec));
+                        // 最后一轮重试前的兜底降级（即便不是明确 403）：尝试剥离浏览器 UA（保留可能已设置的 Referer）
+                        let base = current_adapted.as_ref().unwrap_or(spec);
+                        current_adapted = Some(spec_without_browser_ua(base));
                     }
 
                     // 服务端拒绝无需长时退避，短等待 200ms 即可切换新请求头重试；
@@ -5829,19 +5845,21 @@ mod tests {
         assert!(super::is_probe_server_rejection(&err403));
 
         let err429 = super::DownloadError::Other(
-            "probes failed: HEAD=429, ranged GET=429, plain GET=429".to_string(),
+            "probes failed: HEAD=405, ranged GET=429, plain GET=429".to_string(),
         );
         assert!(super::is_probe_server_rejection(&err429));
 
+        // 401 Unauthorized is credentials failure, not hotlink/anti-scraping bot rejection
         let err401 = super::DownloadError::Other(
             "probes failed: HEAD=401, ranged GET=401, plain GET=401".to_string(),
         );
-        assert!(super::is_probe_server_rejection(&err401));
+        assert!(!super::is_probe_server_rejection(&err401));
 
-        let err_net = super::DownloadError::Other(
-            "probes failed: HEAD=network-error: connection refused, ranged GET=network-error: connection refused, plain GET=network-error: connection refused".to_string(),
+        // Network error containing numbers like 4010 or 4030 in URL/port must NOT trigger false positive
+        let err_net_port = super::DownloadError::Other(
+            "probes failed: HEAD=network-error: failed to connect to 127.0.0.1:4010, ranged GET=network-error: port 4030 unreachable, plain GET=network-error".to_string(),
         );
-        assert!(!super::is_probe_server_rejection(&err_net));
+        assert!(!super::is_probe_server_rejection(&err_net_port));
     }
 
     #[test]
@@ -5866,10 +5884,79 @@ mod tests {
         );
         assert_eq!(adapted2.referrer, "https://www.nvidia.com/drivers");
 
-        // Stripping browser UA
-        let stripped = super::spec_without_browser_ua(&adapted);
-        assert!(!stripped.extra_headers.contains_key("User-Agent"));
-        assert_eq!(stripped.referrer, "https://cn.download.nvidia.com/");
+        // Stripping browser UA handles mixed-case keys (user-agent, User-Agent, USER-AGENT)
+        let mut mixed_case_spec = super::RequestSpec::empty_get();
+        mixed_case_spec
+            .extra_headers
+            .insert("uSeR-aGeNt".to_string(), "CustomBot/1.0".to_string());
+        mixed_case_spec.referrer = "https://example.com/".to_string();
+        let stripped = super::spec_without_browser_ua(&mixed_case_spec);
+        assert!(
+            !stripped
+                .extra_headers
+                .keys()
+                .any(|k| k.eq_ignore_ascii_case("user-agent")),
+            "all user-agent keys must be stripped regardless of case"
+        );
+        assert_eq!(stripped.referrer, "https://example.com/");
+    }
+
+    #[tokio::test]
+    async fn persist_adapted_spec_updates_headers_and_referrer_in_db() {
+        let db = crate::db::Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let task_id = "test-adapt-persist";
+        db.insert_task(
+            task_id,
+            "https://example.com/file.bin",
+            "test.bin",
+            "/tmp",
+            1,
+            0,
+            "",
+            "",
+            "",
+            1,
+        )
+        .await
+        .expect("insert task");
+
+        // Seed initial context with custom User-Agent and empty referrer
+        db.set_task_request_context(
+            task_id,
+            "session=abc",
+            "",
+            r#"{"user-agent":"Mozilla/5.0 Chrome/120","X-Custom":"1"}"#,
+        )
+        .await
+        .expect("seed context");
+
+        // 1. Adapted spec strips UA and adds inferred Referer
+        let mut adapted = super::RequestSpec::empty_get();
+        adapted.referrer = "https://example.com/".to_string();
+        adapted
+            .extra_headers
+            .insert("X-Custom".to_string(), "1".to_string());
+
+        super::persist_adapted_spec(&db, task_id, &adapted).await;
+
+        let (_, loaded_ref, loaded_headers_json) = db
+            .load_task_request_context(task_id)
+            .await
+            .expect("load")
+            .expect("exists");
+        assert_eq!(loaded_ref, "https://example.com/", "referrer persisted");
+        let loaded_headers: std::collections::HashMap<String, String> =
+            serde_json::from_str(&loaded_headers_json).expect("parse json");
+        assert!(
+            !loaded_headers.contains_key("user-agent"),
+            "stripped user-agent must be removed from db"
+        );
+        assert_eq!(
+            loaded_headers.get("X-Custom").map(|s| s.as_str()),
+            Some("1")
+        );
     }
 
     #[tokio::test]
