@@ -75,6 +75,8 @@ const PAUSED_BAR_ALPHA: f32 = 0.4;
 const ROW_ACTION_SIZE: f32 = 24.;
 /// 舒适密度下系统文件图标相对 `icon.lg`（16）的倍数：24px，与双行文字块（约 34px）协调。
 const FILE_ICON_COMFORTABLE_SCALE: f32 = 1.5;
+/// 宽松密度下系统文件图标相对 `icon.lg` 的倍数：32px，与三行主列（名称 / 进度条 / 元信息）协调。
+const FILE_ICON_RELAXED_SCALE: f32 = 2.;
 /// 选中底色左右内缩（inset 样式）。
 const SELECTED_INSET_X: f32 = 4.;
 /// 任务行 group 名：选择列复选框与行操作按钮随行悬停显隐。
@@ -140,6 +142,21 @@ impl DownloadColumnKind {
             self,
             Self::FileName | Self::Size | Self::Progress | Self::Status | Self::Created
         )
+    }
+
+    /// 宽松密度把大小 / 进度 / 速度 / 剩余时间并入文件名主列（Web `RELAXED_MERGED_COLUMNS` 镜像）。
+    fn merged_in_relaxed(self) -> bool {
+        matches!(self, Self::Size | Self::Progress | Self::Speed | Self::Eta)
+    }
+
+    /// 列在当前密度下是否实际渲染：宽松密度主列恒显示、被并入的列不单独显示；
+    /// 列偏好（`visible`）本身不改，切回其他密度原样恢复。
+    fn shown(self, visible: bool, density: ViewDensity) -> bool {
+        match density {
+            ViewDensity::Relaxed if self == Self::FileName => true,
+            ViewDensity::Relaxed => visible && !self.merged_in_relaxed(),
+            ViewDensity::Comfortable | ViewDensity::Compact => visible,
+        }
     }
 
     /// 文件名列的值只在容器宽度未知时使用；已知后由 [`DownloadTableDelegate`]
@@ -691,7 +708,11 @@ impl DownloadTableDelegate {
         let text_scale = self.text_scale.get();
         let mut file_name_width = None;
         let mut changed = false;
-        let shown = self.columns.iter_mut().filter(|column| column.visible);
+        let density = self.prefs.density;
+        let shown = self
+            .columns
+            .iter_mut()
+            .filter(|column| column.kind.shown(column.visible, density));
         for (column, width) in shown.zip(widths.iter().skip(1)) {
             let width = f32::from(*width);
             if column.kind == DownloadColumnKind::FileName {
@@ -743,7 +764,10 @@ impl DownloadTableDelegate {
         let others: f32 = self
             .columns
             .iter()
-            .filter(|column| column.visible && column.kind != DownloadColumnKind::FileName)
+            .filter(|column| {
+                column.kind != DownloadColumnKind::FileName
+                    && column.kind.shown(column.visible, self.prefs.density)
+            })
             .map(|column| column.kind.display_width(column.width, text_scale))
             .sum();
         let reserved =
@@ -752,9 +776,10 @@ impl DownloadTableDelegate {
     }
 
     fn file_name_visible(&self) -> bool {
-        self.columns
-            .iter()
-            .any(|column| column.visible && column.kind == DownloadColumnKind::FileName)
+        self.columns.iter().any(|column| {
+            column.kind == DownloadColumnKind::FileName
+                && column.kind.shown(column.visible, self.prefs.density)
+        })
     }
 
     /// 文字缩放（主题的界面缩放 × 字号缩放）与上次交给表格的列不一致，需重建列。
@@ -1159,7 +1184,10 @@ impl DownloadTableDelegate {
     }
 
     fn shown_columns_count(&self) -> usize {
-        self.columns.iter().filter(|column| column.visible).count()
+        self.columns
+            .iter()
+            .filter(|column| column.kind.shown(column.visible, self.prefs.density))
+            .count()
     }
 
     fn shown_column(&self, col_ix: usize) -> Option<&DownloadColumn> {
@@ -1168,7 +1196,7 @@ impl DownloadTableDelegate {
         }
         self.columns
             .iter()
-            .filter(|column| column.visible)
+            .filter(|column| column.kind.shown(column.visible, self.prefs.density))
             .nth(col_ix - 1)
     }
 
@@ -1180,7 +1208,12 @@ impl DownloadTableDelegate {
             .columns
             .iter()
             .enumerate()
-            .filter_map(|(ix, column)| column.visible.then_some(ix))
+            .filter_map(|(ix, column)| {
+                column
+                    .kind
+                    .shown(column.visible, self.prefs.density)
+                    .then_some(ix)
+            })
             .collect();
         let Some(&from_position) = positions.get(from_ix - 1) else {
             return;
@@ -1411,6 +1444,10 @@ impl DownloadTableDelegate {
         if task.state != TaskState::Downloading {
             return self.strings.task_state_label(task);
         }
+        // 宽松密度的速度 / 剩余时间已在主列元信息行，状态列只给状态名。
+        if self.prefs.density == ViewDensity::Relaxed {
+            return self.strings.status_downloading.clone();
+        }
         let speed = task
             .speed_bytes_per_second
             .filter(|speed| *speed > 0)
@@ -1449,6 +1486,43 @@ impl DownloadTableDelegate {
             TaskState::Pending => self.strings.queued_label(task),
             TaskState::Completed => None,
         }
+    }
+
+    /// 宽松密度状态列第二行：只给主列没有的信息（并发连接 / 排队位置 / 失败原因）。
+    fn relaxed_status_detail(&self, task: &DownloadTaskView) -> Option<String> {
+        match task.state {
+            TaskState::Downloading => self.transfer_detail(task),
+            TaskState::Failed | TaskState::Pending => self.status_detail(task),
+            TaskState::Paused | TaskState::Completed => None,
+        }
+    }
+
+    /// 宽松密度主列元信息行：未完成为「已下 / 总量 · 百分比 [· 速度 · 剩余]」，完成为
+    /// 「大小 · 类别」，末尾接来源域名；未知字段直接省略（Web `relaxedMeta` 镜像）。
+    fn relaxed_meta(&self, task: &DownloadTaskView) -> String {
+        let mut parts: Vec<String> = Vec::with_capacity(6);
+        if task.state == TaskState::Completed {
+            if task.size_bytes > 0 {
+                parts.push(task.size.clone());
+            }
+            parts.push(self.kind_visual(task.kind).1.to_string());
+        } else {
+            parts.push(bytes_progress(task));
+            parts.push(percent_label(task.progress).to_string());
+            if task.state == TaskState::Downloading {
+                if let Some(speed) = task.speed_bytes_per_second.filter(|speed| *speed > 0) {
+                    parts.push(format!("{}/s", format_bytes(speed)));
+                }
+                if let Some(seconds) = task.eta_seconds.filter(|seconds| *seconds <= MAX_ETA_SECS) {
+                    parts.push(self.strings.format_eta(seconds).to_string());
+                }
+            }
+        }
+        let site = task.source_site();
+        if !site.is_empty() {
+            parts.push(site.to_owned());
+        }
+        parts.join(" · ")
     }
 
     /// 实时并发：本地分段连接数与 BT 已连节点数。
@@ -1495,17 +1569,21 @@ impl DownloadTableDelegate {
                     .color(muted)
                     .into_any_element();
             }
-            // 双行密度给系统图标更大的尺寸（与两行文字等高感），紧凑单行与文字同高。
-            let size = if self.prefs.density.two_line() {
-                icon_sizes.lg * FILE_ICON_COMFORTABLE_SCALE
-            } else {
-                icon_sizes.lg
+            // 双行 / 三行密度给系统图标更大的尺寸（与文字块等高感），紧凑单行与文字同高。
+            let size = match self.prefs.density {
+                ViewDensity::Relaxed => icon_sizes.lg * FILE_ICON_RELAXED_SCALE,
+                ViewDensity::Comfortable => icon_sizes.lg * FILE_ICON_COMFORTABLE_SCALE,
+                ViewDensity::Compact => icon_sizes.lg,
             };
             match system_file_icon(task, size, window, cx) {
                 SystemFileIcon::Ready(icon) => icon,
                 SystemFileIcon::Loading => div().size(size).into_any_element(),
                 SystemFileIcon::Unavailable => Icon::new(self.kind_visual(task.kind).0)
-                    .size(icon_sizes.lg)
+                    .size(if self.prefs.density == ViewDensity::Relaxed {
+                        icon_sizes.lg * FILE_ICON_COMFORTABLE_SCALE
+                    } else {
+                        icon_sizes.lg
+                    })
                     .text_color(muted)
                     .into_any_element(),
             }
@@ -1557,6 +1635,9 @@ impl DownloadTableDelegate {
     }
 
     fn render_file_cell(&self, task: &DownloadTaskView, cx: &App) -> AnyElement {
+        if self.prefs.density == ViewDensity::Relaxed {
+            return self.render_relaxed_file_cell(task, cx);
+        }
         let theme = active_theme(cx);
         let tokens = theme.tokens();
         let (name, name_color) = if task.metadata_pending {
@@ -1588,9 +1669,6 @@ impl DownloadTableDelegate {
             .size_full()
             .min_w_0()
             .justify_center()
-            .when(self.prefs.density == ViewDensity::Relaxed, |this| {
-                this.gap(tokens.spacing.xs)
-            })
             .child(
                 div()
                     .min_w_0()
@@ -1615,19 +1693,95 @@ impl DownloadTableDelegate {
             .into_any_element()
     }
 
+    /// 宽松密度主列：文件名（中粗）/ 通栏分段进度条（完成态省略）/ 元信息三行。
+    /// 大小、进度、速度、剩余时间列在此密度下并入本列（见 [`DownloadColumnKind::shown`]）。
+    fn render_relaxed_file_cell(&self, task: &DownloadTaskView, cx: &App) -> AnyElement {
+        let theme = active_theme(cx);
+        let tokens = theme.tokens();
+        let (name, name_color) = if task.metadata_pending {
+            (
+                self.strings.metadata_loading.clone(),
+                tokens.colors.muted_foreground,
+            )
+        } else if task.is_file_missing() {
+            (
+                SharedString::from(task.name.clone()),
+                tokens.colors.muted_foreground,
+            )
+        } else {
+            (
+                SharedString::from(task.name.clone()),
+                tokens.colors.foreground,
+            )
+        };
+        let show_bar = task.state != TaskState::Completed && !task.metadata_pending;
+        let bar_width = (self.applied_file_width.get() - 2. * CELL_PADDING_X).max(0.);
+        v_flex()
+            .size_full()
+            .min_w_0()
+            .justify_center()
+            .gap(tokens.spacing.xs)
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(tokens.typography.sm.size)
+                    .line_height(tokens.typography.sm.line_height)
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(name_color)
+                    .child(name),
+            )
+            .when(show_bar, |this| {
+                this.child(
+                    crate::components::segment_progress::render_segment_progress(
+                        task.runtime.as_deref(),
+                        task.progress,
+                        bar_width,
+                        theme.components().progress_height,
+                        theme.components().progress_radius,
+                        progress_bar_color(task.state, cx),
+                        progress_track_color(cx),
+                    ),
+                )
+            })
+            .when(!task.metadata_pending, |this| {
+                this.child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(tokens.typography.xs.size)
+                        .line_height(tokens.typography.xs.line_height)
+                        .font_features(tabular_numbers())
+                        .text_color(theme.extended().colors.text_tertiary)
+                        .child(self.relaxed_meta(task)),
+                )
+            })
+            .into_any_element()
+    }
+
     /// 活动列：主文案按状态着色（仅下载中 primary、失败 destructive），双行密度
     /// 第二行给详情；紧凑密度把详情放进悬停提示，失败总是提示完整原因。
     fn render_status_cell(&self, task: &DownloadTaskView, cx: &App) -> AnyElement {
         let theme = active_theme(cx);
         let typography = &theme.tokens().typography;
+        let relaxed = self.prefs.density == ViewDensity::Relaxed;
         let two_line = self.prefs.density.two_line();
-        let detail = self.status_detail(task);
+        let detail = if relaxed {
+            self.relaxed_status_detail(task)
+        } else {
+            self.status_detail(task)
+        };
         let tooltip = if task.state == TaskState::Failed && !task.error_message.trim().is_empty() {
             Some(SharedString::from(task.error_message.clone()))
         } else if two_line {
             None
         } else {
             detail.clone().map(SharedString::from)
+        };
+        let label_style = if relaxed {
+            &typography.sm
+        } else {
+            &typography.xs
         };
         v_flex()
             .id(SharedString::from(format!(
@@ -1637,16 +1791,14 @@ impl DownloadTableDelegate {
             .size_full()
             .min_w_0()
             .justify_center()
-            .when(self.prefs.density == ViewDensity::Relaxed, |this| {
-                this.gap(theme.tokens().spacing.xs)
-            })
-            .text_size(typography.xs.size)
-            .line_height(typography.xs.line_height)
+            .when(relaxed, |this| this.gap(theme.tokens().spacing.xs))
             .font_features(tabular_numbers())
             .child(
                 div()
                     .min_w_0()
                     .truncate()
+                    .text_size(label_style.size)
+                    .line_height(label_style.line_height)
                     .text_color(task_status_color(task, cx))
                     .child(self.status_label(task)),
             )
@@ -1655,6 +1807,8 @@ impl DownloadTableDelegate {
                     div()
                         .min_w_0()
                         .truncate()
+                        .text_size(typography.xs.size)
+                        .line_height(typography.xs.line_height)
                         .text_color(theme.extended().colors.text_tertiary)
                         .child(detail),
                 )
@@ -3502,6 +3656,36 @@ mod tests {
             .iter()
             .find(|column| column.kind == kind)
             .map(|column| column.width)
+    }
+
+    #[test]
+    fn relaxed_density_folds_metric_columns_into_file_name() -> Result<(), I18nError> {
+        let mut delegate = delegate(&[1])?;
+        assert!(delegate.set_column_visible(DownloadColumnKind::Speed, true));
+        assert!(delegate.set_column_visible(DownloadColumnKind::FileName, false));
+        let shown = |delegate: &DownloadTableDelegate| -> Vec<DownloadColumnKind> {
+            (1..=delegate.shown_columns_count())
+                .filter_map(|ix| delegate.shown_column(ix).map(|column| column.kind))
+                .collect()
+        };
+        let comfortable = shown(&delegate);
+        assert!(comfortable.contains(&DownloadColumnKind::Speed));
+        assert!(!comfortable.contains(&DownloadColumnKind::FileName));
+
+        // 宽松：主列恒显示，大小 / 进度 / 速度 / 剩余时间不单独成列，其余列照偏好。
+        delegate.prefs_mut().density = crate::model::view_prefs::ViewDensity::Relaxed;
+        assert_eq!(
+            shown(&delegate),
+            vec![
+                DownloadColumnKind::FileName,
+                DownloadColumnKind::Status,
+                DownloadColumnKind::Created
+            ]
+        );
+        // 列偏好不变：切回舒适密度原样恢复。
+        delegate.prefs_mut().density = crate::model::view_prefs::ViewDensity::Comfortable;
+        assert_eq!(shown(&delegate), comfortable);
+        Ok(())
     }
 
     #[test]

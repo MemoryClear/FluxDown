@@ -2,7 +2,7 @@
 
 import { AppWindow, Disc3, File, FileArchive, FileImage, FileMusic, FilePlay, FileText, Smartphone } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
-import { activeTransfers, formatBytes, MAX_ETA_SECS } from '../model/task'
+import { activeTransfers, formatBytes, MAX_ETA_SECS, percentLabel, sourceSite } from '../model/task'
 import type { DownloadTaskView, TaskKind, TaskState } from '../model/task'
 import { stateLabel } from '../state'
 
@@ -89,6 +89,40 @@ export function statusDetail(t: Translate, view: DownloadTaskView): string | nul
       const line = view.errorMessage.split('\n', 1)[0]?.trim() ?? ''
       return line === '' ? null : line
     }
+    default:
+      return null
+  }
+}
+
+/**
+ * 宽松密度主列元信息行（移植 task_table.rs 的 `relaxed_meta`）：未完成为「已下 / 总量 · 百分比
+ * [· 速度 · 剩余]」，完成为「大小 · 类别」，末尾接来源域名；未知字段直接省略。
+ */
+export function relaxedMeta(t: Translate, view: DownloadTaskView): string {
+  const parts: string[] = []
+  if (view.state === 'completed') {
+    if (view.sizeBytes > 0) parts.push(formatBytes(view.sizeBytes))
+    parts.push(kindLabel(t, view.kind))
+  } else {
+    parts.push(bytesProgress(view), percentLabel(view.progress))
+    if (view.state === 'downloading') {
+      if (view.speed !== null && view.speed > 0) parts.push(`${formatBytes(view.speed)}/s`)
+      if (view.etaSeconds !== null && view.etaSeconds <= MAX_ETA_SECS) parts.push(formatEta(t, view.etaSeconds))
+    }
+  }
+  const site = sourceSite(view)
+  if (site !== '') parts.push(site)
+  return parts.join(' · ')
+}
+
+/** 宽松密度状态列第二行：只给主列没有的信息（并发 / 排队 / 失败原因）；主文案只用状态名。 */
+export function relaxedStatusDetail(t: Translate, view: DownloadTaskView): string | null {
+  switch (view.state) {
+    case 'downloading':
+      return transferDetail(t, view)
+    case 'failed':
+    case 'pending':
+      return statusDetail(t, view)
     default:
       return null
   }
