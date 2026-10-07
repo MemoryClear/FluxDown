@@ -38,7 +38,7 @@ use crate::{
         counts::SidebarCounts,
         dispatch::DispatchSummary,
         format_bytes,
-        row_order::RowOrder,
+        row_order::{InteractionHold, RowOrder},
         view_prefs::{
             DateBucket, SortDir, ViewDensity, ViewGroupBy, ViewPrefs, ViewSortKey, state_group_key,
         },
@@ -879,9 +879,10 @@ impl DownloadTableDelegate {
         true
     }
 
-    /// 表格内指针活动（移动 / 滚动 / 按下）：推迟由行内容变化引起的重排，避免行在光标下跳走。
-    pub(crate) fn note_pointer_activity(&mut self) {
-        self.row_order.note_interaction(Instant::now());
+    /// 表格内指针活动（移动 / 滚动 / 按下）的记录句柄：推迟由行内容变化引起的重排，
+    /// 避免行在光标下跳走。
+    pub(crate) fn interaction_hold(&self) -> InteractionHold {
+        self.row_order.interaction_hold()
     }
 
     fn reorder_deadline(&self) -> Option<Instant> {
@@ -2851,9 +2852,9 @@ pub(crate) fn render_download_table(
         .min_h_0()
         .overflow_hidden()
         .bg(active_theme(cx).tokens().colors.surface)
-        .on_mouse_move(note_pointer::<MouseMoveEvent>(table_state))
-        .on_scroll_wheel(note_pointer::<ScrollWheelEvent>(table_state))
-        .capture_any_mouse_down(note_pointer::<MouseDownEvent>(table_state))
+        .on_mouse_move(note_pointer::<MouseMoveEvent>(table_state, cx))
+        .on_scroll_wheel(note_pointer::<ScrollWheelEvent>(table_state, cx))
+        .capture_any_mouse_down(note_pointer::<MouseDownEvent>(table_state, cx))
         .capture_any_mouse_down(clear_context_row_on_left_press(table_state))
         .child(
             div().absolute().inset_0().child(
@@ -2889,14 +2890,13 @@ pub(crate) fn render_download_table(
         })
 }
 
-/// 表格指针事件监听：只记录活动时刻，不触发重绘。
+/// 表格指针事件监听：只记录活动时刻，不写表格 entity、不触发重绘。
 fn note_pointer<E: 'static>(
     table_state: &Entity<TableState<DownloadTableDelegate>>,
+    cx: &App,
 ) -> impl Fn(&E, &mut Window, &mut App) + 'static {
-    let table_state = table_state.clone();
-    move |_, _, cx| {
-        table_state.update(cx, |table, _| table.delegate_mut().note_pointer_activity());
-    }
+    let hold = table_state.read(cx).delegate().interaction_hold();
+    move |_, _, _| hold.note(Instant::now())
 }
 
 /// 表格内左键按下即清除右键高亮行。
@@ -2917,11 +2917,11 @@ fn clear_context_row_on_left_press(
         if event.button != MouseButton::Left {
             return;
         }
-        table_state.update(cx, |table, cx| {
-            if table.right_clicked_row().is_some() {
-                table.set_right_clicked_row(None, cx);
-            }
-        });
+        // 先读后写：没有高亮行时不写表格，免得每次左键都让 gpui-fast 把表格记为已变化。
+        if table_state.read(cx).right_clicked_row().is_none() {
+            return;
+        }
+        table_state.update(cx, |table, cx| table.set_right_clicked_row(None, cx));
     }
 }
 

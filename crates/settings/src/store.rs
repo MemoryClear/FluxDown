@@ -511,6 +511,10 @@ impl SettingsStore {
     pub fn begin_load(&mut self, key: &'static str) -> bool {
         self.load_attempts.insert(key)
     }
+    /// 本轮是否已尝试过 `key` 的按需加载（只读，渲染期先判定再决定是否 `update`）。
+    pub fn load_attempted(&self, key: &'static str) -> bool {
+        self.load_attempts.contains(key)
+    }
     /// 清除指定加载标记，使下次渲染重新加载（如设置窗口重新打开）。
     pub fn reset_load(&mut self, key: &'static str) {
         self.load_attempts.remove(key);

@@ -57,6 +57,7 @@ impl GroupDetailView {
                 table.delegate_mut().set_strings(this.strings.clone());
                 table.delegate_mut().refresh_view();
                 table.refresh(cx);
+                cx.notify();
             });
             cx.notify();
         })
@@ -108,6 +109,8 @@ impl GroupDetailView {
             if delegate.take_columns_dirty() {
                 table.refresh(cx);
             }
+            // 行从共享的 `TaskStore` 读取：表格必须显式 notify，retained 渲染才会重画行。
+            cx.notify();
         });
         cx.notify();
     }
