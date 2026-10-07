@@ -65,6 +65,8 @@ class DownloadService : Service() {
         // startForegroundService 之后必须在数秒内 startForeground：先用当前量发出，再进入观察
         val container = (application as FluxApplication).container
         show(container.localActivity.value)
+        // 完成 / 失败通知的观察在应用作用域内：下载期间即使 Activity 已被划掉也不中断
+        DownloadNotifier.attach(container, applicationContext)
         if (watcher?.isActive != true) {
             watcher = scope.launch { watch(container) }
         }

@@ -16,6 +16,7 @@ import com.fluxdown.app.nav.LocalNavigator
 import com.fluxdown.app.nav.SheetRoute
 import com.fluxdown.app.shell.AppShell
 import com.fluxdown.app.shell.LocalAppContainer
+import com.fluxdown.app.service.NotificationIntents
 import com.fluxdown.fluxui.theme.FluxTheme
 
 class MainActivity : ComponentActivity() {
@@ -33,7 +34,7 @@ class MainActivity : ComponentActivity() {
                 ThemeMode.Dark -> true
                 ThemeMode.Light -> false
             }
-            FluxTheme(dark = dark, accent = appearance.accent, auraIntensity = appearance.auraIntensity) {
+            FluxTheme(dark = dark, accent = appearance.accent) {
                 CompositionLocalProvider(
                     LocalAppContainer provides container,
                     LocalNavigator provides navigator,
@@ -49,8 +50,10 @@ class MainActivity : ComponentActivity() {
         handleIntent(intent)
     }
 
-    /** N4：分享文本 / magnet: / ed2k:// 唤起 → 预填“新建下载”。 */
+    /** N4：分享文本 / magnet: / ed2k:// 唤起 → 预填“新建下载”；点按系统通知 → 打开任务详情。 */
     private fun handleIntent(intent: Intent?) {
+        val container = (application as FluxApplication).container
+        if (NotificationIntents.handle(container, navigator, intent)) return
         val text = when (intent?.action) {
             Intent.ACTION_SEND -> intent.getStringExtra(Intent.EXTRA_TEXT)
             Intent.ACTION_VIEW -> intent.dataString
