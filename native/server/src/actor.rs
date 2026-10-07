@@ -917,7 +917,6 @@ async fn apply_config(engine: &mut Engine, keys: &[String]) {
             | "bt_tracker_sub_urls"
             | "bt_tracker_sub_cache"
             | "bt_mse_mode"
-            | "bt_enabled"
                 if !bt_applied =>
             {
                 bt_applied = true;

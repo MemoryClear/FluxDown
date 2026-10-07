@@ -400,10 +400,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Tracker 订阅启动自动刷新：启用且缓存超过刷新周期未更新时，后台拉取一次
     // （镜像桌面 download_actor 的启动自刷新；不阻塞 serve）。
     {
-        let bt_enabled = all_cfg
-            .get("bt_enabled")
-            .map(|v| v == "true")
-            .unwrap_or(true);
         let sub_enabled = all_cfg
             .get("bt_tracker_sub_enabled")
             .map(|v| v == "true")
@@ -416,8 +412,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        if bt_enabled
-            && sub_enabled
+        if sub_enabled
             && now.saturating_sub(updated_at)
                 > fluxdown_engine::tracker_subscription::REFRESH_INTERVAL_SECS
         {
