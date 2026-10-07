@@ -77,6 +77,7 @@ export const SYNC_GROUPS: readonly SyncGroup[] = [
     id: 'bt',
     labelKey: 'syncScopeBt',
     keys: [
+      'bt.enabled',
       'bt.enable_dht',
       'bt.enable_upnp',
       'bt.custom_trackers',

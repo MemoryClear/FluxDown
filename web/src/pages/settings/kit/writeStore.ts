@@ -74,6 +74,7 @@ export const DAEMON_SYNC_KEYS: Readonly<Record<string, string>> = {
   auto_resume_on_start: 'download.auto_resume_on_start',
   use_server_time: 'download.use_server_time',
   global_user_agent: 'download.global_user_agent',
+  bt_enabled: 'bt.enabled',
   bt_enable_dht: 'bt.enable_dht',
   bt_enable_upnp: 'bt.enable_upnp',
   bt_custom_trackers: 'bt.custom_trackers',

@@ -198,6 +198,10 @@ pub fn bt_config_from_map(
         .map(|value| value == "true")
         .unwrap_or(true);
     fluxdown_engine::bt_downloader::BtConfig {
+        enabled: cfg
+            .get("bt_enabled")
+            .map(|value| value == "true")
+            .unwrap_or(true),
         enable_dht: cfg
             .get("bt_enable_dht")
             .map(|value| value == "true")

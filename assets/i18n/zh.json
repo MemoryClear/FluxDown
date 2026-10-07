@@ -1154,6 +1154,8 @@
   "searchKeywordsApiService": "api,服务,rpc,油猴,脚本,接管,浏览器,aria2,ariang,令牌,token,端口,mcp,自动化,管理",
   "btSettings": "BT 下载设置",
   "btSettingsDesc": "BitTorrent 协议相关配置",
+  "btEnabled": "启用 BitTorrent",
+  "btEnabledDesc": "启用 BitTorrent 下载、对等节点发现与网络监听",
   "btEnableDht": "启用 DHT",
   "btEnableDhtDesc": "分布式哈希表，无需 Tracker 即可发现对等节点",
   "btEnableUpnp": "启用 UPnP 端口映射",

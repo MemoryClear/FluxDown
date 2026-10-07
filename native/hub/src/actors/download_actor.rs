@@ -59,6 +59,7 @@ fn bt_config_from_map(cfg: &HashMap<String, String>) -> BtConfig {
         .map(|v| v == "true")
         .unwrap_or(true);
     BtConfig {
+        enabled: cfg.get("bt_enabled").map(|v| v == "true").unwrap_or(true),
         enable_dht: cfg
             .get("bt_enable_dht")
             .map(|v| v == "true")
@@ -1000,7 +1001,8 @@ async fn apply_config_key(
         }
         // BT session-level config keys — update in-memory BtConfig and invalidate
         // the current session so the next BT download picks up changes.
-        "bt_enable_dht"
+        "bt_enabled"
+        | "bt_enable_dht"
         | "bt_enable_upnp"
         | "bt_port_start"
         | "bt_port_end"
