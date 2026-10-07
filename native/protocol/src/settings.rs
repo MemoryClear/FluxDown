@@ -55,7 +55,7 @@ pub const MAX_SYNC_VALUE_BYTES: usize = 64 * 1024;
 
 /// 与 `lib/src/services/cloud/sync_catalog.dart` 对应的键，外加 GPUI 专属的 `ui.show_activity_*`、
 /// `custom_categories`（自定义分类，推送时剥离各设备不同的 `saveDir`）与 [`CUSTOM_THEMES_KEY`]
-/// （自定义主题集合；Flutter 拉到未知键会忽略），共 57 个。
+/// （自定义主题集合；Flutter 拉到未知键会忽略），共 58 个。
 pub const SYNC_SETTING_SPECS: &[SettingSpec] = &[
     spec!("appearance.theme_mode", Preferences),
     spec!("appearance.dark_theme", Preferences),
@@ -421,14 +421,14 @@ mod tests {
 
     #[test]
     fn catalog_has_exact_unique_flutter_count_and_namespaced_daemon_mapping() {
-        assert_eq!(SYNC_SETTING_SPECS.len(), 57);
+        assert_eq!(SYNC_SETTING_SPECS.len(), 58);
         assert_eq!(
             SYNC_SETTING_SPECS
                 .iter()
                 .map(|spec| spec.key)
                 .collect::<HashSet<_>>()
                 .len(),
-            57
+            58
         );
         let spec = setting_spec("download.max_concurrent_tasks").expect("download spec");
         assert_eq!(spec.owner, SettingOwner::Daemon);
