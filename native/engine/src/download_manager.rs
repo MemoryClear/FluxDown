@@ -12990,8 +12990,6 @@ mod tests {
             enabled: false,
             ..Default::default()
         });
-        mgr.invalidate_bt_session().await;
-        assert!(mgr.bt_session.is_none(), "BT session invalidated");
 
         mgr.resume_task(&bt_task_id).await;
         assert!(
@@ -13019,6 +13017,83 @@ mod tests {
             !mgr.active_tasks.contains_key(&bt_task_id),
             "auto_resume_on_start must skip BT task when BT is disabled"
         );
+    }
+
+    /// 禁用 BT 必须释放已建立的真实会话（关闭监听、停止做种），而不只是拒绝新任务；
+    /// 重新创建需等再次启用。
+    #[tokio::test]
+    async fn disabling_bt_releases_live_session_and_blocks_recreation() {
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let work = std::env::temp_dir().join(format!(
+            "fluxdown_bt_disable_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&work).expect("create work dir");
+        let port = std::net::TcpListener::bind(("0.0.0.0", 0))
+            .expect("bind ephemeral port")
+            .local_addr()
+            .expect("local addr")
+            .port();
+        let enabled_config = BtConfig {
+            enabled: true,
+            enable_dht: false,
+            enable_upnp: false,
+            port_start: port,
+            port_end: port,
+            ..Default::default()
+        };
+        let mut mgr = DownloadManager::new(
+            db,
+            DownloadManagerConfig {
+                max_concurrent: 1,
+                speed_limit_bps: 0,
+                upload_limit_bps: 0,
+                default_save_dir: work.to_string_lossy().into_owned(),
+                app_data_dir: work.to_string_lossy().into_owned(),
+                data_dir: work.clone(),
+                bt_config: enabled_config.clone(),
+                proxy_config: ProxyConfig::default(),
+                user_agent: String::new(),
+            },
+            Arc::new(RecordingSink::new()),
+            Arc::new(crate::NoopSelection),
+        )
+        .expect("construct manager");
+
+        mgr.ensure_bt_session()
+            .await
+            .expect("enabled BT must create a session");
+        assert!(mgr.bt_session.is_some(), "live session must exist");
+
+        mgr.set_bt_config(BtConfig {
+            enabled: false,
+            ..enabled_config
+        });
+        mgr.invalidate_bt_session().await;
+        assert!(
+            mgr.bt_session.is_none(),
+            "disabling BT must release the live session"
+        );
+        let err = mgr
+            .ensure_bt_session()
+            .await
+            .expect_err("disabled BT must not recreate the session");
+        assert!(
+            err.to_string()
+                .contains("BitTorrent is disabled in settings"),
+            "expected disabled message, got {err:?}"
+        );
+        assert!(mgr.bt_session.is_none(), "no session after refused ensure");
+
+        if let Err(error) = std::fs::remove_dir_all(&work) {
+            tracing::debug!(%error, "BT disable test directory cleanup skipped");
+        }
     }
 
     /// 暂停终态必须等下载器 flush + 最终进度落库后再进入 progress_reporter。
