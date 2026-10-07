@@ -233,15 +233,7 @@ pub(crate) async fn ffmpeg_usable(ffmpeg: &Path) -> bool {
     )
 }
 
-/// ffmpeg 流复制（`-c copy`，不转码）封装 mp4，写到 `output`。
-///
-/// - `audio = Some`：取 `video` 的首个视频流与 `audio` 的首个音频流；
-/// - `audio = None`：取 `video` 的全部视频与音频流（丢弃 TS 里 ffmpeg mp4 muxer
-///   不支持的 data/字幕流）。
-///
-/// 输出格式显式指定为 mp4，`output` 可以使用任意临时扩展名。失败或取消时清理
-/// `output`。`expected_bytes` 为产物预估大小，用于 ENOSPC 预检：mux 期间输入与
-/// 产物并存，峰值 ≈ 2x，空间不足时提前返回 Err，由调用方走各自的降级路径。
+/// 以 `codec_args` 运行一次 ffmpeg 封装；取消或无法启动时清理 `output`。
 async fn run_ffmpeg_mux_step(
     ffmpeg: &Path,
     video: &Path,
@@ -294,6 +286,16 @@ async fn run_ffmpeg_mux_step(
     }
 }
 
+/// ffmpeg 流复制（`-c copy`）封装 mp4，写到 `output`；独立音轨因编码不被 mp4 容器
+/// 支持而失败时，回退为视频直拷 + 音频转码 AAC 再试一次。
+///
+/// - `audio = Some`：取 `video` 的首个视频流与 `audio` 的首个音频流；
+/// - `audio = None`：取 `video` 的全部视频与音频流（丢弃 TS 里 ffmpeg mp4 muxer
+///   不支持的 data/字幕流）。
+///
+/// 输出格式显式指定为 mp4，`output` 可以使用任意临时扩展名。失败或取消时清理
+/// `output`。`expected_bytes` 为产物预估大小，用于 ENOSPC 预检：mux 期间输入与
+/// 产物并存，峰值 ≈ 2x，空间不足时提前返回 Err，由调用方走各自的降级路径。
 pub(crate) async fn ffmpeg_copy_to_mp4(
     video: &Path,
     audio: Option<&Path>,
@@ -333,11 +335,7 @@ pub(crate) async fn ffmpeg_copy_to_mp4(
     // 如果存在独立音频轨且未取消，尝试将音频转码为通用 AAC（-c:v copy -c:a aac -b:a 192k），
     // 消除 QuickTime / Apple AVFoundation / Windows Media Player 无声及容器封装失败。
     let is_codec_incompatible = first_stderr.contains("Could not find tag for codec")
-        || first_stderr.contains("codec not currently supported in container")
-        || first_stderr.contains("Error initializing output stream")
-        || first_stderr.contains("Could not write header")
-        || first_stderr.contains("incompatible")
-        || first_stderr.contains("tag");
+        || first_stderr.contains("codec not currently supported in container");
 
     if audio.is_some() && is_codec_incompatible && !cancel_token.is_cancelled() {
         if let Err(error) = tokio::fs::remove_file(output).await
