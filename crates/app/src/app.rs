@@ -555,12 +555,19 @@ fn apply_preferences(values: &BTreeMap<String, serde_json::Value>, cx: &mut App)
         } else {
             locale.to_owned()
         };
-        translator.update(cx, |translator, cx| {
-            if translator.set_locale(&target) {
+        let locale_changed = translator.update(cx, |translator, cx| {
+            let changed = translator.set_locale(&target);
+            if changed {
                 gpui_component::set_locale(component_locale(translator.locale()));
                 cx.notify();
             }
+            changed
         });
+        if locale_changed {
+            // gpui-component 自带文案读进程级静态 locale，不在被追踪的状态里；retained 渲染
+            // 下只有整窗刷新才能让没读 Translator 的库控件换成新语言。
+            cx.refresh_windows();
+        }
     }
 }
 

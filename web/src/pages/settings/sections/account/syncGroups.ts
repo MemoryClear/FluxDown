@@ -46,6 +46,7 @@ export const SYNC_GROUPS: readonly SyncGroup[] = [
       'ui.show_activity_rss',
       'ui.show_activity_webhooks',
       'ui.show_activity_theme',
+      'ui.show_activity_account',
       'ui.show_titlebar_pause_all',
       'ui.show_titlebar_resume_all',
       'ui.show_titlebar_settings',
