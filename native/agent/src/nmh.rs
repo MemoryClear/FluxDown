@@ -1385,10 +1385,6 @@ pub mod registry {
                 root = dir_name(parent.and_then(Path::parent));
             }
             match root {
-                "Chrome" => "Chrome",
-                "Chrome Beta" => "Chrome Beta",
-                "Chrome Dev" => "Chrome Dev",
-                "Chrome Canary" => "Chrome Canary",
                 "Microsoft Edge" => "Edge",
                 "Microsoft Edge Beta" => "Edge Beta",
                 "Microsoft Edge Dev" => "Edge Dev",
@@ -1706,7 +1702,7 @@ pub mod registry {
             }
         }
 
-        /// 只读注册快照；从不写清单、包装脚本或目录。
+        /// 选择用于诊断的清单目录：已有清单文件 > 已安装浏览器 > 首个候选。
         pub(crate) fn select_preferred_manifest_dir(
             dirs: &[PathBuf],
             is_installed: impl Fn(&Path) -> bool,
@@ -1717,6 +1713,7 @@ pub mod registry {
                 .or_else(|| dirs.first())
         }
 
+        /// 只读注册快照；从不写清单、包装脚本或目录。
         #[must_use]
         pub fn diagnose() -> NmhDiagnosis {
             let mut diagnosis = NmhDiagnosis::default();
