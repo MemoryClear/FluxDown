@@ -1699,16 +1699,6 @@ impl Db {
         Ok(uploaded)
     }
 
-    /// 读取任务已下载字节数。
-    pub async fn get_task_downloaded_bytes(&self, task_id: &str) -> Result<i64, DbError> {
-        let downloaded: i64 =
-            sqlx::query_scalar("SELECT downloaded_bytes FROM tasks WHERE id = $1")
-                .bind(task_id)
-                .fetch_one(&self.pool)
-                .await?;
-        Ok(downloaded)
-    }
-
     pub async fn update_task_file_info(
         &self,
         id: &str,
@@ -3042,29 +3032,6 @@ impl Db {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        Ok(())
-    }
-
-    /// Update only the end_byte of a segment (used when a segment is shrunk by a split).
-    ///
-    /// NOTE: Currently unused — `persist_split` handles both child upsert and
-    /// parent shrink atomically. Kept for potential future use.
-    #[allow(dead_code)]
-    pub async fn update_segment_end_byte(
-        &self,
-        task_id: &str,
-        segment_index: i32,
-        end_byte: i64,
-    ) -> Result<(), DbError> {
-        sqlx::query(
-            "UPDATE task_segments SET end_byte = $1
-             WHERE task_id = $2 AND segment_index = $3",
-        )
-        .bind(end_byte)
-        .bind(task_id)
-        .bind(segment_index)
-        .execute(&self.pool)
-        .await?;
         Ok(())
     }
 
@@ -4464,15 +4431,6 @@ impl Db {
             .execute(&self.pool)
             .await?;
         Ok(())
-    }
-
-    /// 读任务的 RSS 溯源指针（空 = 非 RSS 来源）。
-    pub async fn task_rss_source(&self, task_id: &str) -> Result<String, DbError> {
-        let v: Option<String> = sqlx::query_scalar("SELECT rss_source_id FROM tasks WHERE id = $1")
-            .bind(task_id)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(v.unwrap_or_default())
     }
 
     /// 写入展示用的原始来源链接（`url` 被换成本地哨兵时的补偿）。
