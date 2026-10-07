@@ -1200,16 +1200,60 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 /// Maximum retries for the probe phase (HEAD + GET).
 ///
 /// 3 attempts total:
-///   1. Original headers (incl. browser UA from extension, if any)
-///   2. Normal retry (same headers, covers DNS/TLS cold-start)
-///   3. **UA-downgrade retry** — strips browser UA from extra_headers so that
-///      the request uses the neutral `DEFAULT_UA`.  This handles Cloudflare
-///      Bot Management which rejects requests where the TLS fingerprint
-///      (rustls ≠ Chrome) contradicts a Chrome User-Agent header.
+///   1. Original headers (incl. browser UA from extension, or default UA)
+///   2. First adaptive retry:
+///      - If server rejected (403/429) and request carried a browser UA: strip browser UA
+///        (handles Cloudflare bot detection rejecting rustls TLS fingerprint with Chrome UA).
+///      - If server rejected (403/429) and request lacked browser UA: inject standard browser UA
+///        and inferred origin Referer (handles NVIDIA / Akamai / CDNs that block non-browser UAs
+///        or enforce same-origin anti-hotlinking).
+///   3. Second adaptive retry:
+///      - Stripped UA with inferred origin Referer (for Cloudflare with hotlink check)
+///      - Browser UA without inferred Referer (for CDNs rejecting synthetic referrers)
 const PROBE_MAX_RETRIES: u32 = 3;
 
-/// Base delay for probe retries (used with exponential backoff).
+/// Base delay for probe retries (used with exponential backoff on network errors).
 const PROBE_RETRY_BASE_DELAY: Duration = Duration::from_secs(1);
+
+/// 针对反爬 / 防盗链拒绝（如 NVIDIA / Akamai 返回 403 Forbidden）时可采用的默认浏览器 UA。
+/// 优先使用当前系统平台的典型 Chrome UA，确保指纹与操作系统一致。
+pub const DEFAULT_BROWSER_UA: &str = if cfg!(target_os = "macos") {
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+} else if cfg!(target_os = "windows") {
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+} else {
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+};
+
+/// 从 HTTP/HTTPS 目标 URL 推导出默认源站 Referer（例如 `https://cn.download.nvidia.com/...`
+/// 推导为 `https://cn.download.nvidia.com/`）。供防盗链检查要求同源/合法来源页的 CDN 回落使用。
+pub fn infer_origin_referrer(url: &str) -> Option<String> {
+    if let Ok(parsed) = url::Url::parse(url)
+        && matches!(parsed.scheme(), "http" | "https")
+        && let Some(host) = parsed.host_str()
+    {
+        let port_part = if let Some(p) = parsed.port() {
+            format!(":{}", p)
+        } else {
+            String::new()
+        };
+        return Some(format!("{}://{}{}/", parsed.scheme(), host, port_part));
+    }
+    None
+}
+
+/// 判断探测失败是否为服务端明确拒绝（403 Forbidden / 429 Too Many Requests / 401 Unauthorized）。
+pub(crate) fn is_probe_server_rejection(e: &DownloadError) -> bool {
+    if is_server_rejection(e) {
+        return true;
+    }
+    match e {
+        DownloadError::Other(msg) => {
+            msg.contains("403") || msg.contains("429") || msg.contains("401")
+        }
+        _ => false,
+    }
+}
 
 /// Resolve file info with automatic retry on transient failures.
 ///
@@ -1242,75 +1286,119 @@ fn spec_without_browser_ua(spec: &RequestSpec) -> RequestSpec {
     }
 }
 
-/// 把 UA 降级结果写回任务的持久化请求头，续传（尤其免探测的 hint 续传）沿用。
-async fn persist_ua_downgrade(db: &Db, task_id: &str) {
-    let Ok(Some((cookies, referrer, headers_json))) = db.load_task_request_context(task_id).await
+/// 为请求附加默认浏览器 UA（用于服务器拒绝非浏览器 UA / FluxDown 默认 UA 的场景）。
+fn spec_with_browser_ua(spec: &RequestSpec) -> RequestSpec {
+    let mut s = spec.clone();
+    s.extra_headers
+        .insert("User-Agent".to_string(), DEFAULT_BROWSER_UA.to_string());
+    s
+}
+
+/// 为请求附加推导来源页 Referer（用于 CDN 防盗链拒绝无 Referer 的场景）。
+fn spec_with_inferred_referrer(spec: &RequestSpec, url: &str) -> RequestSpec {
+    let mut s = spec.clone();
+    if s.referrer.is_empty()
+        && let Some(ref_url) = infer_origin_referrer(url)
+    {
+        s.referrer = ref_url;
+    }
+    s
+}
+
+/// 同时附加浏览器 UA 与推导 Referer。
+fn spec_with_browser_ua_and_referrer(spec: &RequestSpec, url: &str) -> RequestSpec {
+    let mut s = spec_with_browser_ua(spec);
+    if s.referrer.is_empty()
+        && let Some(ref_url) = infer_origin_referrer(url)
+    {
+        s.referrer = ref_url;
+    }
+    s
+}
+
+/// 把请求头自适应结果写回任务的持久化请求头，使后续分段 worker 与续传（尤其免探测的 hint 续传）沿用。
+async fn persist_adapted_spec(db: &Db, task_id: &str, adapted: &RequestSpec) {
+    let Ok(Some((cookies, current_referrer, headers_json))) =
+        db.load_task_request_context(task_id).await
     else {
         return;
     };
-    if headers_json.is_empty() {
-        return;
-    }
-    let Ok(mut headers) =
+
+    let mut headers = if headers_json.is_empty() {
+        std::collections::HashMap::new()
+    } else {
         serde_json::from_str::<std::collections::HashMap<String, String>>(&headers_json)
-    else {
-        return;
+            .unwrap_or_default()
     };
-    let before = headers.len();
-    headers.retain(|k, _| !k.eq_ignore_ascii_case("user-agent"));
-    if headers.len() == before {
+
+    let before_headers = headers.clone();
+    let before_referrer = current_referrer.clone();
+
+    // 同步 extra_headers（如去掉了浏览器 UA，或补充了默认浏览器 UA）
+    for (k, v) in &adapted.extra_headers {
+        headers.insert(k.clone(), v.clone());
+    }
+    // 如果 adapted 中显式移除了 user-agent，也从持久化 headers 中移除
+    if !adapted
+        .extra_headers
+        .keys()
+        .any(|k| k.eq_ignore_ascii_case("user-agent"))
+    {
+        headers.retain(|k, _| !k.eq_ignore_ascii_case("user-agent"));
+    }
+
+    let next_referrer = if !adapted.referrer.is_empty() {
+        &adapted.referrer
+    } else {
+        &current_referrer
+    };
+
+    if headers == before_headers && *next_referrer == before_referrer {
         return;
     }
+
     let Ok(json) = serde_json::to_string(&headers) else {
         return;
     };
+
     if let Err(e) = db
-        .set_task_request_context(task_id, &cookies, &referrer, &json)
+        .set_task_request_context(task_id, &cookies, next_referrer, &json)
         .await
     {
         log_warn!(
-            "[resolve] task {} failed to persist UA downgrade: {}",
+            "[resolve] task {} failed to persist adapted request context: {}",
             task_id,
             e
         );
     }
 }
 
-/// 同 [`resolve_file_info`]，额外返回探测是否靠「去掉浏览器 UA」才成功。
+/// 同 [`resolve_file_info`]，额外返回探测是否靠请求头自适应（去掉浏览器 UA /
+/// 补充浏览器 UA / 补充防盗链 Referer）才成功。成功时返回 `Some(adapted_spec)`。
 pub(crate) async fn resolve_file_info_with_ua_fallback(
     client: &Client,
     url: &str,
     spec: &RequestSpec,
-) -> Result<(FileInfo, bool), DownloadError> {
+) -> Result<(FileInfo, Option<RequestSpec>), DownloadError> {
     let has_browser_ua = spec
         .extra_headers
         .keys()
         .any(|k| k.eq_ignore_ascii_case("user-agent"));
 
-    // Holder for the UA-downgraded variant; allocated once outside the loop so
-    // we can borrow it without repeated cloning.
-    let downgraded_spec = has_browser_ua.then(|| spec_without_browser_ua(spec));
-
     let mut last_err = None;
+    let mut current_adapted: Option<RequestSpec> = None;
+
     for attempt in 0..PROBE_MAX_RETRIES {
-        // Last attempt: if extra_headers carried a browser UA, drop it so
-        // the request falls back to DEFAULT_UA ("FluxDown/<version>").  This
-        // avoids Cloudflare's TLS-fingerprint-vs-UA bot detection.
-        let downgraded = match &downgraded_spec {
-            Some(d) if attempt > 0 && attempt + 1 == PROBE_MAX_RETRIES => {
-                log_info!(
-                    "[resolve] retry {}/{}: stripping browser UA to avoid bot detection",
-                    attempt + 1,
-                    PROBE_MAX_RETRIES
-                );
-                Some(d)
-            }
-            _ => None,
+        let attempt_spec = if attempt == 0 {
+            spec
+        } else if let Some(ref adapted) = current_adapted {
+            adapted
+        } else {
+            spec
         };
-        let attempt_spec = downgraded.unwrap_or(spec);
 
         match resolve_file_info_once(client, url, attempt_spec).await {
-            Ok(info) => return Ok((info, downgraded.is_some())),
+            Ok(info) => return Ok((info, current_adapted)),
             Err(e) => {
                 log_info!(
                     "[resolve] probe attempt {}/{} failed: {}",
@@ -1318,9 +1406,57 @@ pub(crate) async fn resolve_file_info_with_ua_fallback(
                     PROBE_MAX_RETRIES,
                     e
                 );
+                let is_rejection = is_probe_server_rejection(&e);
                 last_err = Some(e);
+
                 if attempt + 1 < PROBE_MAX_RETRIES {
-                    let delay = PROBE_RETRY_BASE_DELAY * 2u32.saturating_pow(attempt);
+                    // 若收到 403 / 429 等服务端拒绝，根据当前请求头生成自适应候选：
+                    if is_rejection {
+                        if has_browser_ua {
+                            // 场景 A（Cloudflare 反爬）：浏览器 UA 与 rustls 指纹冲突，剥离 UA
+                            if attempt == 0 {
+                                log_info!(
+                                    "[resolve] server rejection (403/429): stripping browser UA to avoid bot detection"
+                                );
+                                current_adapted = Some(spec_without_browser_ua(spec));
+                            } else if spec.referrer.is_empty() {
+                                // 若剥离 UA 依然被拒绝且无 Referer，尝试补全推导 Referer
+                                log_info!(
+                                    "[resolve] server rejection persists: trying stripped UA with inferred origin Referer"
+                                );
+                                current_adapted = Some(spec_with_inferred_referrer(
+                                    &spec_without_browser_ua(spec),
+                                    url,
+                                ));
+                            }
+                        } else {
+                            // 场景 B（NVIDIA / Akamai 反盗链/爬虫）：默认 UA（FluxDown/*）或缺 Referer 被拒
+                            if attempt == 0 {
+                                log_info!(
+                                    "[resolve] server rejection (403/429): adapting with browser UA and inferred origin Referer"
+                                );
+                                current_adapted =
+                                    Some(spec_with_browser_ua_and_referrer(spec, url));
+                            } else if attempt == 1 {
+                                // 尝试仅补充浏览器 UA（不带推导 Referer，防某些站点对非官方页面 Referer 反向校验）
+                                log_info!(
+                                    "[resolve] server rejection persists: trying browser UA without inferred Referer"
+                                );
+                                current_adapted = Some(spec_with_browser_ua(spec));
+                            }
+                        }
+                    } else if has_browser_ua && attempt + 2 == PROBE_MAX_RETRIES {
+                        // 最后一轮重试前的兜底降级（即便不是明确 403）：尝试剥离浏览器 UA
+                        current_adapted = Some(spec_without_browser_ua(spec));
+                    }
+
+                    // 服务端拒绝无需长时退避，短等待 200ms 即可切换新请求头重试；
+                    // 网络抖动保持指数退避。
+                    let delay = if is_rejection {
+                        Duration::from_millis(200)
+                    } else {
+                        PROBE_RETRY_BASE_DELAY * 2u32.saturating_pow(attempt)
+                    };
                     tokio::time::sleep(delay).await;
                 }
             }
@@ -3058,7 +3194,7 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
     //   -1   — size unknown but confirmed downloadable (webRequest sniffed),
     //          skip probe to preserve one-time tokens
     //    0   — no hint, run normal probe
-    let mut ua_stripped_spec: Option<RequestSpec> = None;
+    let mut applied_spec: Option<RequestSpec> = None;
     let info = if p.hint_file_size != 0 {
         // fresh hint 任务：持久化 Range 验证状态。浏览器扩展 hint → 0（未验证，
         // coordinator 首响应证实支持后置回 1；resume 据此延续「首连接 plain GET」
@@ -3121,13 +3257,13 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
         }
     } else {
         log_info!("[download] task {} resolving file info...", p.task_id);
-        let (info, ua_downgraded) =
-            resolve_file_info_with_ua_fallback(client, &p.url, &p.spec).await?;
-        if ua_downgraded {
-            // 探测靠去掉浏览器 UA 才通过：真实下载（含分段 worker）必须用同一份
-            // 请求头，否则探测通过、下载 403；并落库让续传保持一致。
-            ua_stripped_spec = Some(spec_without_browser_ua(&p.spec));
-            persist_ua_downgrade(&p.db, &p.task_id).await;
+        let (info, adapted) = resolve_file_info_with_ua_fallback(client, &p.url, &p.spec).await?;
+        if let Some(adapted_spec) = adapted {
+            // 探测靠请求头自适应（去 UA / 补浏览器 UA / 补防盗链 Referer）才通过：
+            // 真实下载（含分段 worker）必须用同一份请求头，否则探测通过、下载 403；
+            // 并落库让续传保持一致。
+            persist_adapted_spec(&p.db, &p.task_id, &adapted_spec).await;
+            applied_spec = Some(adapted_spec);
         }
         log_info!(
             "[download] task {} resolved: name={}, size={}, range={}",
@@ -3138,7 +3274,7 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
         );
         info
     };
-    let spec_ref: &RequestSpec = ua_stripped_spec.as_ref().unwrap_or(&p.spec);
+    let spec_ref: &RequestSpec = applied_spec.as_ref().unwrap_or(&p.spec);
 
     // Safety net (probe 阶段)：服务器在 probe 阶段返回 HTML 但用户期望二进制
     // 文件——典型场景：Lanzou 等 CDN transit page、form-POST 端点用 GET 访问。
@@ -5660,6 +5796,137 @@ mod tests {
             msg,
             "probes failed: HEAD=network-error: connection refused, ranged GET=network-error: connection refused, plain GET=403"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Adaptive header fallback tests (Issue #782 / NVIDIA 403 & anti-hotlinking)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn infer_origin_referrer_extracts_origin_with_slash() {
+        assert_eq!(
+            super::infer_origin_referrer(
+                "https://cn.download.nvidia.com/Windows/617.42/617.42-notebook.exe"
+            ),
+            Some("https://cn.download.nvidia.com/".to_string())
+        );
+        assert_eq!(
+            super::infer_origin_referrer("http://example.com:8080/path/file.bin?query=1"),
+            Some("http://example.com:8080/".to_string())
+        );
+        assert_eq!(
+            super::infer_origin_referrer("ftp://ftp.example.com/file"),
+            None
+        );
+        assert_eq!(super::infer_origin_referrer("not-a-valid-url"), None);
+    }
+
+    #[test]
+    fn is_probe_server_rejection_detects_forbidden_and_rate_limits() {
+        let err403 = super::DownloadError::Other(
+            "probes failed: HEAD=403, ranged GET=403, plain GET=403".to_string(),
+        );
+        assert!(super::is_probe_server_rejection(&err403));
+
+        let err429 = super::DownloadError::Other(
+            "probes failed: HEAD=429, ranged GET=429, plain GET=429".to_string(),
+        );
+        assert!(super::is_probe_server_rejection(&err429));
+
+        let err401 = super::DownloadError::Other(
+            "probes failed: HEAD=401, ranged GET=401, plain GET=401".to_string(),
+        );
+        assert!(super::is_probe_server_rejection(&err401));
+
+        let err_net = super::DownloadError::Other(
+            "probes failed: HEAD=network-error: connection refused, ranged GET=network-error: connection refused, plain GET=network-error: connection refused".to_string(),
+        );
+        assert!(!super::is_probe_server_rejection(&err_net));
+    }
+
+    #[test]
+    fn spec_adaptation_helpers_manage_browser_ua_and_referrer() {
+        let spec_empty = super::RequestSpec::empty_get();
+        let adapted = super::spec_with_browser_ua_and_referrer(
+            &spec_empty,
+            "https://cn.download.nvidia.com/Windows/617.42/driver.exe",
+        );
+        assert_eq!(
+            adapted.extra_headers.get("User-Agent").map(|s| s.as_str()),
+            Some(super::DEFAULT_BROWSER_UA)
+        );
+        assert_eq!(adapted.referrer, "https://cn.download.nvidia.com/");
+
+        // Preserves custom referrer if already set
+        let mut spec_with_custom_ref = super::RequestSpec::empty_get();
+        spec_with_custom_ref.referrer = "https://www.nvidia.com/drivers".to_string();
+        let adapted2 = super::spec_with_browser_ua_and_referrer(
+            &spec_with_custom_ref,
+            "https://cn.download.nvidia.com/Windows/617.42/driver.exe",
+        );
+        assert_eq!(adapted2.referrer, "https://www.nvidia.com/drivers");
+
+        // Stripping browser UA
+        let stripped = super::spec_without_browser_ua(&adapted);
+        assert!(!stripped.extra_headers.contains_key("User-Agent"));
+        assert_eq!(stripped.referrer, "https://cn.download.nvidia.com/");
+    }
+
+    #[tokio::test]
+    async fn resolve_file_info_adapts_to_403_rejection_with_browser_ua_and_referrer() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 1024];
+                    while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        let n = stream.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                    }
+                    let text = String::from_utf8_lossy(&buf);
+                    let has_browser_ua = text.lines().any(|l| {
+                        let l = l.to_lowercase();
+                        l.starts_with("user-agent:") && l.contains("mozilla")
+                    });
+                    let has_referrer = text.lines().any(|l| {
+                        let l = l.to_lowercase();
+                        l.starts_with("referer:") && !l.trim().ends_with("referer:")
+                    });
+
+                    let resp = if has_browser_ua && has_referrer {
+                        if text.starts_with("HEAD") {
+                            "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n"
+                        } else {
+                            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-0/1000\r\nContent-Length: 1\r\nConnection: close\r\n\r\nX"
+                        }
+                    } else {
+                        "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    };
+                    let _ = stream.write_all(resp.as_bytes()).await.ok();
+                    let _ = stream.shutdown().await.ok();
+                });
+            }
+        });
+
+        let client = super::build_client(&crate::proxy_config::ProxyConfig::default(), "").unwrap();
+        let url = format!("http://127.0.0.1:{}/test-driver.exe", port);
+        let spec = super::RequestSpec::empty_get();
+
+        let (info, adapted) = super::resolve_file_info_with_ua_fallback(&client, &url, &spec)
+            .await
+            .expect("probe should succeed after adapting headers");
+
+        assert_eq!(info.total_bytes, 1000);
+        let adapted = adapted.expect("should have adapted headers");
+        assert!(adapted.extra_headers.contains_key("User-Agent"));
+        assert_eq!(adapted.referrer, format!("http://127.0.0.1:{}/", port));
     }
 
     // -----------------------------------------------------------------------
