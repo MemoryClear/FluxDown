@@ -1,5 +1,7 @@
 package com.fluxdown.core.protocol
 
+import com.fluxdown.core.format.UrlText
+
 /**
  * 自定义分类（偏好键 `custom_categories`，与 `native/protocol/src/agent.rs::CustomCategoryDto`、
  * Dart / Web 同 JSON 形状；对应 iOS `Preferences.swift` 的 `CustomCategoryDto`）。
@@ -302,6 +304,44 @@ object CategoryRules {
         val index = list.indexOfFirst { it.id == entry.id }
         return if (index >= 0) list.toMutableList().also { it[index] = entry } else list + entry
     }
+
+    /**
+     * 外部唤起的分类保存目录（同 agent `category_dir.rs::category_save_dir` / Flutter `resolveCategorySaveDir`）：
+     * 只看可见分类、按 [list] 顺序（调用方传 [CustomCategoryDto.fromPreference] 的已排序结果）；先取首个
+     * 配置了目录且命中的普通分类（非 all / other），否则文件不命中任何普通分类时取 other 的目录。
+     * [fileName] 不含 `.` 时用 URL 路径末段（百分号解码后含 `.`）参与匹配；无命中 / 未配置目录返回 null。
+     */
+    fun saveDirFor(list: List<CustomCategoryDto>, fileName: String, url: String): String? {
+        val name = if ('.' in fileName) fileName else fileNameFromUrl(url) ?: fileName
+        if (name.isEmpty()) return null
+        val visible = list.filter { it.visible }
+        val normals = visible.filter { it.builtinType != "all" && it.builtinType != "other" }
+        normals.firstOrNull { it.saveDir.isNotEmpty() && matchesName(it, name) }?.let { return it.saveDir }
+        val other = visible.firstOrNull { it.builtinType == "other" } ?: return null
+        if (other.saveDir.isEmpty() || normals.any { matchesName(it, name) }) return null
+        return other.saveDir
+    }
+
+    /** 正则不区分大小写、任意位置命中，非法正则视为不命中；扩展名比较不区分大小写（同 `category_dir.rs::matches`）。 */
+    private fun matchesName(category: CustomCategoryDto, name: String): Boolean {
+        if (category.matchMode == "regex") {
+            if (category.regexPattern.isEmpty()) return false
+            val regex = try {
+                Regex(category.regexPattern, RegexOption.IGNORE_CASE)
+            } catch (_: IllegalArgumentException) {
+                return false
+            }
+            return regex.containsMatchIn(name)
+        }
+        val dot = name.lastIndexOf('.')
+        if (dot < 0) return false
+        val extension = name.substring(dot + 1)
+        return extension.isNotEmpty() && category.extensions.any { it.trimStart('.').equals(extension, ignoreCase = true) }
+    }
+
+    /** URL 路径末段（百分号解码）含 `.` 时作为文件名。 */
+    private fun fileNameFromUrl(url: String): String? =
+        UrlText.lastPathSegment(url)?.let { UrlText.percentDecode(it) }?.takeIf { '.' in it }
 }
 
 /**

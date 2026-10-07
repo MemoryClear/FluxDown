@@ -14,7 +14,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.FileProvider
 import com.fluxdown.app.AppContainer
-import com.fluxdown.app.MainActivity
+import com.fluxdown.app.HomeActivity
 import com.fluxdown.app.R
 import com.fluxdown.app.data.DeviceSettings
 import com.fluxdown.app.i18n.str
@@ -47,7 +47,7 @@ import java.io.File
 enum class NotifyAuthorization { Authorized, NotDetermined, Denied }
 
 /**
- * 点按通知回到应用的意图（MainActivity 经 [handle] 消费）：切到通知所属主机 → 下载页 → 任务详情。
+ * 点按通知回到应用的意图（[HomeActivity] 经 [handle] 消费）：切到通知所属主机 → 下载页 → 任务详情。
  */
 object NotificationIntents {
     const val ACTION_OPEN = "com.fluxdown.app.action.OPEN_FROM_NOTIFICATION"
@@ -322,7 +322,7 @@ object DownloadNotifier {
     // ── 底层 ────────────────────────────────────────────────────────────────
 
     private fun openApp(context: Context, hostId: String, taskId: String, code: Int): PendingIntent {
-        val intent = Intent(context, MainActivity::class.java)
+        val intent = Intent(context, HomeActivity::class.java)
             .setAction(NotificationIntents.ACTION_OPEN)
             .putExtra(NotificationIntents.EXTRA_HOST, hostId)
             .putExtra(NotificationIntents.EXTRA_TASK, taskId)

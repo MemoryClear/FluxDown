@@ -7,6 +7,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateSet
 import androidx.compose.runtime.staticCompositionLocalOf
+import com.fluxdown.core.capture.ExternalDownload
 
 /** 顶层目的地（浮动导航坞 / Rail）。 */
 enum class AppTab { Downloads, Rss, Devices, Settings }
@@ -29,8 +30,11 @@ enum class SettingsPage {
 
 /** 浮动 Sheet（同时最多一个；X1–X3 选择请求由 shell 依据主机状态单独呈现）。 */
 sealed interface SheetRoute {
-    /** N1：[prefill] = 预填链接（粘贴 / 分享 / 扫码）。 */
-    data class NewDownload(val prefill: String = "") : SheetRoute
+    /**
+     * N1：[prefill] = 预填链接（粘贴 / 扫码）；[external] = 外部唤起（浏览器外部下载器 / 分享 / 协议链接）的
+     * 请求，带 Cookie / 来源页 / 请求头 / 建议文件名。Sheet 打开期间再次打开 = 追加到当前表单。
+     */
+    data class NewDownload(val prefill: String = "", val external: ExternalDownload? = null) : SheetRoute
     /** R3：新建（[sourceId] = null，[prefillUrl] 预填地址）/ 编辑订阅。 */
     data class RssEditor(val sourceId: String? = null, val prefillUrl: String = "") : SheetRoute
     /** D1v：视图（分组 / 排序 / 密度 / 卡片字段）。 */

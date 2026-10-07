@@ -70,6 +70,13 @@ data class HostState(
     val isReadOnly: Boolean get() = connection != Connection.Live
 
     fun task(id: String): Task? = tasks.firstOrNull { it.taskId == id }
+
+    /** 新建任务的默认队列：配置 `default_queue_id`（仍存在时）→ 主队列 → 首个队列；无队列为空串（= daemon 默认）。 */
+    fun defaultQueueId(): String =
+        config["default_queue_id"]?.takeIf { id -> queues.any { it.queueId == id } }
+            ?: queues.firstOrNull { it.queueId == Queue.MAIN }?.queueId
+            ?: queues.firstOrNull()?.queueId
+            ?: ""
 }
 
 /**

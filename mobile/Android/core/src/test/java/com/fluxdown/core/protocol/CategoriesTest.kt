@@ -242,4 +242,53 @@ class CategoriesTest {
         // 队列芯片显示 → 非空
         assertFalse(hidden.isEmpty(hasCategories = false, hasScopeChip = true))
     }
+
+    // ── 外部唤起的分类保存目录（同 agent `category_dir.rs` 的用例）──
+
+    private fun dirCategory(id: String, builtin: String?, exts: List<String>, saveDir: String, position: Long, visible: Boolean = true) =
+        CustomCategoryDto(
+            id = id, name = id, extensions = exts, position = position, visible = visible,
+            isBuiltin = builtin != null, builtinType = builtin, saveDir = saveDir,
+        )
+
+    private fun sorted(vararg list: CustomCategoryDto) = list.sortedBy { it.position }
+
+    @Test fun firstMatchingCategoryWithDirWinsInPositionOrder() {
+        val list = sorted(
+            dirCategory("video2", null, listOf("mp4"), "/second", 5),
+            dirCategory("video", "video", listOf("mp4", "mkv"), "/videos", 1),
+            dirCategory("docs", "document", listOf("pdf"), "", 2),
+        )
+        assertEquals("/videos", CategoryRules.saveDirFor(list, "Movie.MP4", ""))
+        // 命中但未配置目录 → 不回退到其他分类的目录。
+        assertNull(CategoryRules.saveDirFor(list, "a.pdf", ""))
+    }
+
+    @Test fun otherDirAppliesOnlyWhenNoNormalCategoryMatches() {
+        val list = sorted(
+            dirCategory("video", "video", listOf("mp4"), "", 1),
+            dirCategory("other", "other", emptyList(), "/other", 7),
+        )
+        assertEquals("/other", CategoryRules.saveDirFor(list, "setup.exe", ""))
+        assertNull(CategoryRules.saveDirFor(list, "clip.mp4", ""))
+    }
+
+    @Test fun urlSegmentFillsMissingNameAndHiddenCategoriesAreIgnored() {
+        val list = sorted(
+            dirCategory("music", null, listOf("flac"), "/music-hidden", 1, visible = false),
+            dirCategory("audio", "audio", listOf("flac"), "/music", 2),
+        )
+        assertEquals("/music", CategoryRules.saveDirFor(list, "", "https://x.test/a/My%20Song.flac?x=1"))
+        assertNull(CategoryRules.saveDirFor(list, "", "https://x.test/download"))
+        // 非层级链接（magnet）没有路径末段可用。
+        assertNull(CategoryRules.saveDirFor(list, "", "magnet:?xt=urn:btih:abc&dn=a.flac"))
+    }
+
+    @Test fun regexMatchesCaseInsensitivelyAndInvalidRegexNeverMatches() {
+        val list = sorted(
+            CustomCategoryDto(id = "bad", name = "bad", matchMode = "regex", regexPattern = "(", position = 1, saveDir = "/bad"),
+            CustomCategoryDto(id = "iso", name = "iso", matchMode = "regex", regexPattern = "^ubuntu-.*\\.iso$", position = 2, saveDir = "/iso"),
+        )
+        assertEquals("/iso", CategoryRules.saveDirFor(list, "Ubuntu-24.04.ISO", ""))
+    }
 }
