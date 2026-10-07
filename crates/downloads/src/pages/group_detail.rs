@@ -16,7 +16,9 @@ use gpui::{
 use gpui_component::{table::TableState, v_flex};
 
 use crate::{
-    components::task_table::{DownloadTableDelegate, TableFilter, render_download_table},
+    components::task_table::{
+        DownloadTableDelegate, TableFilter, render_download_table, spawn_midnight_refresh,
+    },
     controller::{DownloadsController, DownloadsPort, GroupSummary},
     pages::task_detail::detail_row,
     strings::DownloadStrings,
@@ -50,6 +52,7 @@ impl GroupDetailView {
                 .row_selectable(false)
                 .col_selectable(false)
         });
+        spawn_midnight_refresh(&table_state, cx);
 
         cx.observe(&translator, |this, translator, cx| {
             this.strings = DownloadStrings::from_translator(translator.read(cx));

@@ -16,7 +16,10 @@ use crate::{
         TogglePauseSelected,
     },
     components::{
-        task_table::{DownloadTableDelegate, SelectionSummary, TableFilter, ToolbarCommand},
+        task_table::{
+            DownloadTableDelegate, SelectionSummary, TableFilter, ToolbarCommand,
+            spawn_midnight_refresh,
+        },
         title_bar::{DownloadTitleBar, left_edge_probe},
     },
     controller::{DownloadsCommand, DownloadsController, DownloadsPort},
@@ -175,6 +178,7 @@ impl DownloadView {
             .row_selectable(false)
             .col_selectable(false)
         });
+        spawn_midnight_refresh(&table_state, cx);
         let weak_self = cx.weak_entity();
         table_state.update(cx, |table, _| {
             table.delegate_mut().set_host(weak_self);
