@@ -132,7 +132,7 @@ private struct CloudDeviceDetail: View {
             }
         }
         .sheet(isPresented: $showDispatch) {
-            DispatchSheet(target: .cloud(record, presenceKnown: presenceKnown))
+            DispatchSheet(target: DispatchTarget(cloud: record, presenceKnown: presenceKnown))
         }
     }
 
@@ -263,7 +263,7 @@ private struct LinkDeviceDetail: View {
             }
         }
         .sheet(isPresented: $showDispatch) {
-            DispatchSheet(target: .link(info))
+            DispatchSheet(target: DispatchTarget(link: info))
         }
         .confirmationDialog(
             L("linkedDeviceRemoveTitle"),

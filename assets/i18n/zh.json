@@ -2187,6 +2187,7 @@
   "downloadToPartial": "已向 {device} 发送 {ok} 个，{failed} 个失败",
   "downloadToOfflineHint": "该设备当前离线，上线后才会开始下载。",
   "downloadToRemoteOptionsIgnored": "仅发送链接、文件名和保存目录；其余高级选项只对本服务器生效。",
+  "downloadToTorrentLocalOnly": "种子文件无法下发到其他设备，请把「下载到」切回当前主机后再导入。",
   "downloadToRemoteDirHint": "留空则使用目标设备的默认下载目录。",
   "downloadToRemoteDirDefault": "默认：{dir}",
   "downloadToRemoteDirUseDefault": "目标设备的默认下载目录",

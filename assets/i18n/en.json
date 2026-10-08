@@ -2187,6 +2187,7 @@
   "downloadToPartial": "{ok} sent to {device}, {failed} failed",
   "downloadToOfflineHint": "This device is offline; the task starts once it comes online.",
   "downloadToRemoteOptionsIgnored": "Only the links, file name and folder are sent; other advanced options apply on this server only.",
+  "downloadToTorrentLocalOnly": "Torrent files can't be sent to another device. Switch \"Download to\" back to start them here.",
   "downloadToRemoteDirHint": "Leave empty to use the target device's default download folder.",
   "downloadToRemoteDirDefault": "Default: {dir}",
   "downloadToRemoteDirUseDefault": "Target device's default folder",
