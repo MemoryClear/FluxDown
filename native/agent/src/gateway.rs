@@ -71,6 +71,8 @@ pub struct GatewayService {
     open_associations: crate::open_association::OpenAssociationGuard,
     local: GatewayShell,
     server_mode: bool,
+    /// 嵌入宿主：`exportLogs` 的目标路径由同进程 App 给出（应用沙盒内），server 模式下仍放行。
+    local_log_export: bool,
     link: Option<Arc<LinkService>>,
     gateway_patch_lock: tokio::sync::Mutex<()>,
     listener_control: restart::GatewayControl,
@@ -134,6 +136,7 @@ impl GatewayService {
             open_associations,
             local,
             server_mode: false,
+            local_log_export: false,
             link: None,
             gateway_patch_lock: tokio::sync::Mutex::new(()),
             listener_control: restart::GatewayControl::new(),
@@ -144,6 +147,13 @@ impl GatewayService {
     #[must_use]
     pub fn with_server_mode(mut self, enabled: bool) -> Self {
         self.server_mode = enabled;
+        self
+    }
+
+    /// 嵌入宿主（移动端进程内 agent）：只有同进程 App 能调用，放行写入 App 自选路径的日志导出。
+    #[must_use]
+    pub fn with_local_log_export(mut self) -> Self {
+        self.local_log_export = true;
         self
     }
 
@@ -204,7 +214,7 @@ impl GatewayService {
         {
             return Err(RpcErrorData::new(ApplicationErrorCode::Unsupported, false));
         }
-        if self.server_mode && server_mode_denies(&request) {
+        if self.server_mode && server_mode_denies(&request, self.local_log_export) {
             return Err(RpcErrorData::new(ApplicationErrorCode::Unsupported, false));
         }
         match request.method.as_str() {
@@ -1866,9 +1876,9 @@ fn local_platform_method_allowed(method: &str) -> bool {
 /// headless 宿主不提供桌面集成：打开路径、写注册表 / 关联、请求管理员授权、打开系统设置与
 /// 测试通知的诊断动作，以及可写任意目标路径的日志导出。Web 的 Doctor 仍可用其余动作（刷新
 /// tracker / ed2k 服务器、修复托管组件执行权限等），日志导出走 `/api/web/logs/export`。
-fn server_mode_denies(request: &RpcRequest) -> bool {
+fn server_mode_denies(request: &RpcRequest, local_log_export: bool) -> bool {
     match request.method.as_str() {
-        method::AGENT_DIAGNOSTICS_EXPORT_LOGS => true,
+        method::AGENT_DIAGNOSTICS_EXPORT_LOGS => !local_log_export,
         method::AGENT_DIAGNOSTICS_REPAIR => request
             .params
             .as_ref()

@@ -236,20 +236,23 @@ pub async fn start_embedded(
         events.clone(),
         shell.clone(),
     ));
-    // 兼容 API 不存在：开关恒关、令牌为空，诊断只做与网关无关的探测。
+    // 兼容 API 不存在：开关恒关、令牌为空，诊断省略网关 / 兼容 API / 硬盘休眠检查。
     let api_switches = Arc::new(fluxdown_api::server::ApiRuntimeSwitches::new(
         false, false, false, false, false,
     ));
     let api_token = fluxdown_api::auth::TokenCell::new("");
-    let diagnostics = Arc::new(crate::diagnostics::DiagnosticsService::new(
-        daemon.clone(),
-        daemon_config,
-        events.clone(),
-        shared_state.clone(),
-        store.clone(),
-        api_switches.clone(),
-        api_token.clone(),
-    ));
+    let diagnostics = Arc::new(
+        crate::diagnostics::DiagnosticsService::new(
+            daemon.clone(),
+            daemon_config,
+            events.clone(),
+            shared_state.clone(),
+            store.clone(),
+            api_switches.clone(),
+            api_token.clone(),
+        )
+        .for_embedded_host(),
+    );
     let update = Arc::new(crate::update::UpdateService::unsupported(
         events.clone(),
         store.data_dir().to_path_buf(),
@@ -277,7 +280,9 @@ pub async fn start_embedded(
         },
     )
     // 与 headless 宿主相同的能力面：桌面平台集成与宿主诊断修复返回 Unsupported。
-    .with_server_mode(true);
+    .with_server_mode(true)
+    // 只有同进程 App 能连到嵌入式网关：日志导出写入 App 自己给出的沙盒路径。
+    .with_local_log_export();
     if let Some(link) = &link {
         gateway = gateway.with_link(link.clone());
     }

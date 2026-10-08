@@ -65,6 +65,10 @@ impl LocalHost {
             return Err(FluxError::invalid_argument("data_dir is empty"));
         }
         let data_dir = PathBuf::from(data_dir);
+        let agent_data_dir = data_dir.join("agent");
+        // 先于 daemon 装订阅者：同进程的 daemon / agent 事件都落到 `<agent>/logs/agent.log`
+        // （诊断「日志目录」检查与日志导出读这里）；移动端没有可读的 stderr。
+        fluxdown_agent::logging::init_embedded(&agent_data_dir, &data_dir);
         let host_cancel = CancellationToken::new();
 
         let (ready_tx, ready_rx) = oneshot::channel::<DaemonReady>();
@@ -100,7 +104,7 @@ impl LocalHost {
 
         let agent = match start_embedded(
             EmbeddedConfig {
-                agent_data_dir: data_dir.join("agent"),
+                agent_data_dir,
                 engine_data_dir: data_dir,
                 daemon_url: format!("ws://{}/rpc", ready.addr),
                 daemon_token: ready.token,
