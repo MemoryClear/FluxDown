@@ -258,6 +258,8 @@ internal fun CloudDeviceDto.toCore() = CloudDevice(
     isOnline = isOnline,
     isCurrent = isCurrent,
     appVersion = appVersion,
+    defaultSaveDir = defaultSaveDir,
+    pathStyle = pathStyle,
 )
 
 internal fun LinkDeviceDto.toCore() = LinkDevice(
@@ -265,6 +267,8 @@ internal fun LinkDeviceDto.toCore() = LinkDevice(
     name = name,
     platform = platform,
     online = online,
+    defaultSaveDir = defaultSaveDir,
+    pathStyle = pathStyle,
 )
 
 internal fun CategoryDto.toCore() = Category(

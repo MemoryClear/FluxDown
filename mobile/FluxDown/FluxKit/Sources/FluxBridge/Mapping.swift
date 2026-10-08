@@ -227,14 +227,23 @@ extension CloudDeviceDto {
             platform: platform,
             isOnline: isOnline,
             isCurrent: isCurrent,
-            appVersion: appVersion
+            appVersion: appVersion,
+            defaultSaveDir: defaultSaveDir,
+            pathStyle: pathStyle.map(PathStyle.init(wire:))
         )
     }
 }
 
 extension LinkDeviceDto {
     var domain: LinkDevice {
-        LinkDevice(fingerprint: fingerprint, name: name, platform: platform, online: online)
+        LinkDevice(
+            fingerprint: fingerprint,
+            name: name,
+            platform: platform,
+            online: online,
+            defaultSaveDir: defaultSaveDir,
+            pathStyle: pathStyle.map(PathStyle.init(wire:))
+        )
     }
 }
 

@@ -390,6 +390,16 @@ impl From<&proto::RssSourceDto> for RssSourceDto {
     }
 }
 
+/// 设备自报的路径风格 → wire 名（`windows` / `posix`）；未上报或本端不认识为 `None`，
+/// 由客户端按 `platform` 推断（同 `CloudDevice::effective_path_style`）。
+fn path_style_wire(style: Option<proto::PathStyle>) -> Option<String> {
+    match style? {
+        proto::PathStyle::Windows => Some("windows".to_owned()),
+        proto::PathStyle::Posix => Some("posix".to_owned()),
+        proto::PathStyle::Unknown => None,
+    }
+}
+
 /// 云端已信任设备（`CloudDevice` 子集）。
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct CloudDeviceDto {
@@ -399,6 +409,10 @@ pub struct CloudDeviceDto {
     pub is_online: bool,
     pub is_current: bool,
     pub app_version: Option<String>,
+    /// 设备自报的默认下载目录（远程下发不填保存目录时目标使用它）。
+    pub default_save_dir: Option<String>,
+    /// 见 [`path_style_wire`]。
+    pub path_style: Option<String>,
 }
 
 impl From<&proto::CloudDevice> for CloudDeviceDto {
@@ -410,6 +424,8 @@ impl From<&proto::CloudDevice> for CloudDeviceDto {
             is_online: device.is_online,
             is_current: device.is_current,
             app_version: device.app_version.clone(),
+            default_save_dir: device.default_save_dir.clone(),
+            path_style: path_style_wire(device.path_style),
         }
     }
 }
@@ -421,6 +437,10 @@ pub struct LinkDeviceDto {
     pub name: String,
     pub platform: Option<String>,
     pub online: bool,
+    /// 设备自报的默认下载目录（远程下发不填保存目录时目标使用它）。
+    pub default_save_dir: Option<String>,
+    /// 见 [`path_style_wire`]。
+    pub path_style: Option<String>,
 }
 
 impl From<&proto::LinkDeviceInfo> for LinkDeviceDto {
@@ -430,6 +450,8 @@ impl From<&proto::LinkDeviceInfo> for LinkDeviceDto {
             name: device.name.clone(),
             platform: device.platform.clone(),
             online: device.online,
+            default_save_dir: device.default_save_dir.clone(),
+            path_style: path_style_wire(device.path_style),
         }
     }
 }

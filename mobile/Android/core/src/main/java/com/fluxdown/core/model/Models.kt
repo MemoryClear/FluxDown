@@ -222,6 +222,10 @@ data class CloudDevice(
     val isOnline: Boolean,
     val isCurrent: Boolean,
     val appVersion: String?,
+    /** 设备自报的默认下载目录（远程下发不填保存目录时目标使用它）。 */
+    val defaultSaveDir: String? = null,
+    /** 设备自报的路径风格 wire 名（`windows` / `posix`）；null = 未上报，按 [platform] 推断。 */
+    val pathStyle: String? = null,
 )
 
 /** 局域网已配对设备（`LinkDeviceInfo` 子集）。 */
@@ -230,4 +234,8 @@ data class LinkDevice(
     val name: String,
     val platform: String?,
     val online: Boolean,
+    /** 设备自报的默认下载目录（远程下发不填保存目录时目标使用它）。 */
+    val defaultSaveDir: String? = null,
+    /** 设备自报的路径风格 wire 名（`windows` / `posix`）；null = 未上报，按 [platform] 推断。 */
+    val pathStyle: String? = null,
 )
