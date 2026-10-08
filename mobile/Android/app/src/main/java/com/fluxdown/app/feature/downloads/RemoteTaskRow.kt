@@ -1,8 +1,6 @@
 package com.fluxdown.app.feature.downloads
 
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
@@ -13,7 +11,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.boundsInRoot
@@ -59,7 +56,8 @@ import com.fluxdown.fluxui.overlay.FluxSwipeTone
 import com.fluxdown.fluxui.overlay.FluxToastKind
 import com.fluxdown.fluxui.overlay.LocalFluxOverlays
 import com.fluxdown.fluxui.overlay.SwipeReveal
-import com.fluxdown.fluxui.theme.FluxText
+import com.fluxdown.fluxui.material.FlowInGate
+import com.fluxdown.fluxui.material.fluxFlowIn
 import com.fluxdown.fluxui.theme.FluxTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -122,32 +120,16 @@ internal class RemoteCommands(private val container: AppContainer) {
     }
 }
 
-/** 「远程任务」分区头（同历史分区头的安静小标题）。 */
-@Composable
-internal fun RemoteSectionHeader(e: RemoteHeaderEntry) {
-    val c = FluxTheme.colors
-    val t = FluxTheme.type
-    val margin = FluxTheme.space.screenMargin
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(start = margin + 6.dp, end = margin + 6.dp, top = 26.dp, bottom = 8.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        FluxText(str(R.string.remoteTasksGroup), style = t.micro, color = c.inkMuted, maxLines = 1)
-        FluxText(str(R.string.nTasks, "n" to e.count), style = t.monoS, color = c.inkFaint, maxLines = 1)
-    }
-}
-
 /**
- * 其他设备上执行的远程任务行（同 iOS `RemoteTaskRow` / PC 下载页远程行）：`→ 目标设备` + 状态 + 进度 / 字节 / 速度；
- * 环 = 暂停 / 继续（命令在途旋转；没有主操作时打开动作菜单），滑动取消 / 删除，长按含全部可用动作。
- * 控制矩阵只走 [RemoteTaskRules.canIssue]；未知状态没有任何控制。不参与多选，没有详情页。
+ * 其他设备上执行的远程任务行（同 iOS `RemoteTaskRow` / PC 下载页远程行）：与本地行同一列表、同一分区样式；
+ * `→ 目标设备` + 状态 + 进度 / 字节 / 速度；环 = 暂停 / 继续（命令在途旋转；没有主操作时打开动作菜单），
+ * 滑动取消 / 删除，长按含全部可用动作。控制矩阵只走 [RemoteTaskRules.canIssue]；未知状态没有任何控制。
+ * 不参与多选，没有详情页。
  */
 @Composable
-internal fun RemoteTaskRow(entry: RemoteRowEntry, style: RowStyle, a11y: Boolean) {
-    val task = entry.task
+internal fun RemoteTaskRow(entry: RemoteRowEntry, style: RowStyle, flowIndex: Int, gate: FlowInGate, a11y: Boolean) {
+    val item = entry.item
+    val task = item.task
     val view = LocalDownloadsView.current
     val overlays = LocalFluxOverlays.current
     val haptics = FluxTheme.haptics
@@ -185,7 +167,7 @@ internal fun RemoteTaskRow(entry: RemoteRowEntry, style: RowStyle, a11y: Boolean
     }
 
     fun copyLink() {
-        context.copyText(entry.name, latest.url)
+        context.copyText(item.name, latest.url)
         overlays.toast(context.getString(R.string.urlCopied), FluxToastKind.Success, FluxIcons.Copy)
     }
 
@@ -193,7 +175,7 @@ internal fun RemoteTaskRow(entry: RemoteRowEntry, style: RowStyle, a11y: Boolean
         overlays.showDialog(
             FluxDialogSpec(
                 title = context.getString(R.string.deleteTask),
-                message = entry.name,
+                message = item.name,
                 icon = FluxIcons.Trash2,
                 buttons = buildList {
                     add(FluxDialogButton(context.getString(R.string.cancel)))
@@ -328,19 +310,28 @@ internal fun RemoteTaskRow(entry: RemoteRowEntry, style: RowStyle, a11y: Boolean
         emptyList()
     }
 
-    Box(Modifier.fillMaxWidth().padding(horizontal = margin)) {
+    val history = entry.zone == RowZone.History
+    val inset = if (compact) 60.dp else 68.dp
+    val noPane = remember { mutableStateOf(false) }
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .then(if (flowIndex in 0..11) Modifier.fluxFlowIn(flowIndex, gate, item.id) else Modifier)
+            .then(if (history) Modifier else Modifier.padding(horizontal = margin)),
+    ) {
         Box(
             Modifier
                 .fillMaxWidth()
-                .cardSegment(entry.first, entry.last)
+                .then(if (history) Modifier else Modifier.cardSegment(entry.first, entry.last))
+                .rowDecor(entry.zone, entry.first, entry.last, inset, noPane)
                 .onGloballyPositioned { coords[0] = it },
         ) {
             SwipeReveal(startActions = startActions, endActions = endActions, enabled = !readOnly) {
                 TaskRow(
-                    fileName = entry.name,
+                    fileName = item.name,
                     meta = meta,
-                    tileIcon = entry.category.tileIcon(bt = task.url.startsWith("magnet:")),
-                    categoryColor = colors.category(entry.category.fileCategory()),
+                    tileIcon = item.category.tileIcon(bt = task.url.startsWith("magnet:")),
+                    categoryColor = colors.category(item.category.fileCategory()),
                     ringKind = ringKind,
                     ringProgress = if (showFlow || busy) progress else null,
                     ringContentDescription = primaryLabel,
@@ -351,7 +342,7 @@ internal fun RemoteTaskRow(entry: RemoteRowEntry, style: RowStyle, a11y: Boolean
                     flowSegments = if (showFlow) listOf(FlowSegmentUi(1f, progress, task.status == RemoteTaskStatus.Downloading)) else null,
                     flowState = flowState,
                     density = if (compact) TaskRowDensity.Compact else TaskRowDensity.Comfortable,
-                    horizontalPadding = 18.dp,
+                    horizontalPadding = if (history) 20.dp else 18.dp,
                     onClickLabel = s.more,
                     customActions = customActions,
                 )

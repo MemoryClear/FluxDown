@@ -54,7 +54,7 @@ class RemoteTasksTest {
     }
 
     @Test
-    fun visibleDropsMirrorsAndSortPutsUnfinishedFirst() {
+    fun visibleDropsMirrorsOfCurrentDevice() {
         val tasks = listOf(
             RemoteTaskDto("done-new", toDevice = "mac", status = RemoteTaskStatus.Completed, updatedAt = "2026-03"),
             RemoteTaskDto("run-old", toDevice = "mac", status = RemoteTaskStatus.Downloading, updatedAt = "2026-01"),
@@ -62,8 +62,16 @@ class RemoteTasksTest {
             RemoteTaskDto("run-new", toDevice = "pc", status = RemoteTaskStatus.Paused, updatedAt = "2026-02"),
         )
         val visible = RemoteTaskRules.visible(tasks, currentDeviceId = "me")
-        assertEquals(listOf("run-new", "run-old", "done-new"), RemoteTaskRules.sorted(visible).map { it.id })
+        assertEquals(listOf("done-new", "run-old", "run-new"), visible.map { it.id })
         assertEquals(4, RemoteTaskRules.visible(tasks, currentDeviceId = null).size)
+    }
+
+    @Test
+    fun createdAtParsesIsoWithOrWithoutFraction() {
+        assertEquals(1_767_225_600L, RemoteTaskDto("a", createdAt = "2026-01-01T00:00:00Z").createdAtSeconds)
+        assertEquals(1_767_225_600L, RemoteTaskDto("a", createdAt = "2026-01-01T08:00:00.123456+08:00").createdAtSeconds)
+        assertEquals(0L, RemoteTaskDto("a", createdAt = "").createdAtSeconds)
+        assertEquals(0L, RemoteTaskDto("a", createdAt = "yesterday").createdAtSeconds)
     }
 
     @Test

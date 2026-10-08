@@ -5,6 +5,7 @@ import android.content.Context
 import android.os.Build
 import android.provider.Settings
 import android.util.Log
+import androidx.compose.runtime.snapshots.SnapshotStateSet
 import androidx.datastore.preferences.preferencesDataStore
 import com.fluxdown.app.data.AppearanceRepo
 import com.fluxdown.app.data.HostRepo
@@ -70,6 +71,9 @@ class AppContainer(context: Context) {
     private val appContext = context.applicationContext
 
     val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    /** 正在抓取的订阅 id（订阅列表与条目流共用：两页都显示抓取中状态）。 */
+    val rssFetching = SnapshotStateSet<String>()
 
     /** HostStore 要求串行调度（工作副本单线程访问）。 */
     private val storeScope = CoroutineScope(SupervisorJob() + Dispatchers.Default.limitedParallelism(1))

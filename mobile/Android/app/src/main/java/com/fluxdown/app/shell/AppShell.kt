@@ -60,6 +60,7 @@ import com.fluxdown.app.feature.newtask.MoveToQueueSheet
 import com.fluxdown.app.feature.newtask.NewDownloadSheet
 import com.fluxdown.app.feature.rss.RssEditorSheet
 import com.fluxdown.app.feature.rss.RssEditorTarget
+import com.fluxdown.app.feature.rss.RssItemsScreen
 import com.fluxdown.app.feature.rss.RssScreen
 import com.fluxdown.app.feature.search.CommandSearch
 import com.fluxdown.app.feature.selection.FileConflictHost
@@ -307,6 +308,7 @@ private fun RouteContent(route: Route, inPane: Boolean) {
     val nav = LocalNavigator.current
     when (route) {
         is Route.TaskDetail -> TaskDetailScreen(taskId = route.taskId, inPane = inPane, onClose = { nav.pop() })
+        is Route.RssItems -> RssItemsScreen(sourceId = route.sourceId)
         is Route.Settings -> SettingsPageScreen(route.page, route.arg)
     }
 }

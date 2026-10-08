@@ -40,6 +40,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import com.fluxdown.app.R
 import com.fluxdown.app.actions.LocalTaskActions
+import com.fluxdown.core.capture.TorrentFile
 import com.fluxdown.app.i18n.str
 import com.fluxdown.app.nav.SheetRoute
 import com.fluxdown.app.shell.LocalAppContainer
@@ -298,7 +299,15 @@ private fun NewDownloadSheetImpl(visible: Boolean, route: SheetRoute.NewDownload
             NewDownloadFooter(form, target, ::submit, onSubmitRemote = { target?.let(::submitRemote) })
         },
     ) {
-        NewDownloadContent(form, targets, target, onOpenAdvanced = { advancedOpen = true })
+        NewDownloadContent(
+            form, targets, target,
+            onOpenAdvanced = { advancedOpen = true },
+            // 本机建了任务：拉起前台服务；表单里没有待提交的链接时关闭（同 iOS `importTorrents`）
+            onTorrentImported = {
+                submitted()
+                if (form.urlText.isBlank()) dismiss()
+            },
+        )
     }
 
     FluxSheet(
@@ -351,6 +360,7 @@ private fun NewDownloadContent(
     targets: List<DispatchTarget>,
     target: DispatchTarget?,
     onOpenAdvanced: () -> Unit,
+    onTorrentImported: () -> Unit,
 ) {
     val container = LocalAppContainer.current
     val overlays = LocalFluxOverlays.current
@@ -392,6 +402,39 @@ private fun NewDownloadContent(
                 val (merged, added) = appendEntries(form.urlText, found)
                 form.urlText = merged
                 overlays.toast(importFound.fill("count" to added), FluxToastKind.Success, FluxIcons.FileText)
+            }
+        }
+    }
+    var importingTorrent by remember { mutableStateOf(false) }
+    val taskActions = LocalTaskActions.current
+    val torrentLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris: List<Uri> ->
+        if (uris.isEmpty() || importingTorrent || form.submitting) return@rememberLauncherForActivityResult
+        if (!form.saveDirValid) {
+            haptics.reject()
+            return@rememberLauncherForActivityResult
+        }
+        // 本机主机：目录不可写在提交前拦住（同 `submit`）
+        if (container.host.value is HostRef.Local && !com.fluxdown.app.ui.isLocalDirWritable(form.saveDir)) {
+            haptics.reject()
+            overlays.toast(context.str(R.string.mobileSaveDirNotWritable, "dir" to form.saveDir.trim()), FluxToastKind.Error)
+            return@rememberLauncherForActivityResult
+        }
+        val queues = container.store.state.value.queues
+        val queueId = (queues.firstOrNull { it.queueId == form.queueId } ?: queues.firstOrNull())?.queueId ?: form.queueId
+        importingTorrent = true
+        container.appScope.launch {
+            val created = try {
+                TorrentImport.submit(
+                    context, container, overlays, taskActions::errorText, uris, form.saveDir, queueId, startPaused = false,
+                )
+            } finally {
+                importingTorrent = false
+            }
+            if (created > 0) {
+                haptics.confirm()
+                onTorrentImported()
+            } else {
+                haptics.reject()
             }
         }
     }
@@ -457,6 +500,23 @@ private fun NewDownloadContent(
                 fullWidth = true,
                 enabled = !busy,
             )
+            FluxButton(
+                str(R.string.openTorrentFile),
+                { torrentLauncher.launch(arrayOf(TorrentFile.MIME_TYPE, "application/octet-stream")) },
+                size = ButtonSize.Sm,
+                icon = FluxIcons.FileUp,
+                fullWidth = true,
+                enabled = !busy && !importingTorrent && target == null,
+            )
+            // 种子只能在当前主机建任务：「下载到」选了其他设备时禁用并说明（同 iOS `torrentButton(remote:)`）
+            if (target != null) {
+                FluxText(
+                    str(R.string.downloadToTorrentLocalOnly),
+                    style = type.sm,
+                    color = c.inkFaint,
+                    modifier = Modifier.padding(horizontal = 6.dp),
+                )
+            }
         }
 
         // 预览：前 3 条

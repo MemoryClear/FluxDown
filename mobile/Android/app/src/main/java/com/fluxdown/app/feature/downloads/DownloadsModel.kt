@@ -37,11 +37,13 @@ enum class StatusFolder {
     }
 }
 
-/** 列表筛选：状态文件夹 · 分类 · 队列范围 · 搜索词。 */
+/** 列表筛选：状态文件夹 · 分类（或「远程任务」）· 队列范围 · 搜索词。 */
 @Immutable
 data class DownloadsFilter(
     val folder: StatusFolder = StatusFolder.All,
     val categoryId: String? = null,
+    /** 只看其他设备上的远程任务（分类芯片行的「远程任务」芯片，与 [categoryId] 互斥）。 */
+    val remoteOnly: Boolean = false,
     /** 已规范化的队列 id（主队列 = [Queue.MAIN]）；null = 全部队列。 */
     val queueId: String? = null,
     val query: String = "",
@@ -51,6 +53,28 @@ data class DownloadsFilter(
 }
 
 internal fun normQueue(id: String): String = if (id.isEmpty()) Queue.MAIN else id
+
+/**
+ * 本地任务与远程任务共用的排序 / 分区 / 分组投影：两者进同一个列表、同一个比较器（同 iOS）。
+ * 状态桶 [statusBucket]：0 下载中 · 1 等待 · 2 失败 · 3 已暂停 · 4 已完成。
+ */
+sealed interface DownloadItem {
+    val id: String
+
+    /** 智能排序档（§3.9）：优先下载 0 → 活跃 1 → 排队 2 → 失败 3 → 暂停 4 → 完成 5。 */
+    val sortTier: Int
+    val createdSec: Long
+    val sortName: String
+    val sizeBytes: Long
+    val sortProgress: Float?
+    val sortSpeed: Long
+
+    /** 「传输中」分区（其余进「历史」）。 */
+    val inflight: Boolean
+    val statusBucket: Int
+    val category: Category?
+    val site: String
+}
 
 /**
  * 一行任务的全部展示输入（在后台线程派生并复用实例：未变化的任务得到同一个对象，
@@ -63,15 +87,81 @@ data class TaskItem(
     val speedUp: Long,
     val queuePosition: Int,
     val boosted: Boolean,
-    val category: Category?,
+    override val category: Category?,
     val queue: Queue?,
-    val site: String,
+    override val site: String,
     val visual: TaskVisualState,
     val flow: List<FlowSegmentUi>?,
     val flowState: FlowStripState,
     val eta: Long?,
-) {
-    val id: String get() = task.taskId
+) : DownloadItem {
+    override val id: String get() = task.taskId
+    override val sortTier: Int
+        get() {
+            val st = task.status
+            return when {
+                boosted && (st == TaskStatus.Downloading || st == TaskStatus.Pending) -> 0
+                st == TaskStatus.Downloading || st == TaskStatus.Preparing -> 1
+                st == TaskStatus.Pending -> 2
+                st == TaskStatus.Failed -> 3
+                st == TaskStatus.Paused -> 4
+                else -> 5
+            }
+        }
+    override val createdSec: Long get() = task.createdAt
+    override val sortName: String get() = task.fileName
+    override val sizeBytes: Long get() = task.totalBytes
+    override val sortProgress: Float? get() = task.progress
+    override val sortSpeed: Long get() = speedDown
+    override val inflight: Boolean
+        get() = task.status == TaskStatus.Pending || task.status == TaskStatus.Downloading || task.status == TaskStatus.Preparing
+    override val statusBucket: Int
+        get() = when (task.status) {
+            TaskStatus.Downloading -> 0
+            TaskStatus.Pending, TaskStatus.Preparing -> 1
+            TaskStatus.Failed -> 2
+            TaskStatus.Paused -> 3
+            TaskStatus.Completed, TaskStatus.Unknown -> 4
+        }
+}
+
+/**
+ * 其他设备上执行的远程任务（云端下发，同 PC 下载页的远程行）。状态投影与 [StatusFolder.accepts] 一致：
+ * 等待接单 / 已接单 / 未知 → 等待（传输中），失败 / 已取消 → 失败。不参与多选。
+ */
+@Immutable
+data class RemoteItem(
+    val task: RemoteTaskDto,
+    /** 显示名：云端未带文件名时按 URL 推断。 */
+    val name: String,
+    override val category: Category?,
+    override val site: String,
+    /** `createdAt`（ISO-8601）解析出的 Unix 秒；解析失败 0。 */
+    override val createdSec: Long,
+) : DownloadItem {
+    override val id: String get() = "remote:${task.id}"
+    override val sortTier: Int
+        get() = when (task.status) {
+            RemoteTaskStatus.Downloading -> 1
+            RemoteTaskStatus.Pending, RemoteTaskStatus.Accepted, is RemoteTaskStatus.Unknown -> 2
+            RemoteTaskStatus.Failed, RemoteTaskStatus.Canceled -> 3
+            RemoteTaskStatus.Paused -> 4
+            RemoteTaskStatus.Completed -> 5
+        }
+    override val sortName: String get() = name
+    override val sizeBytes: Long get() = task.totalBytes ?: 0L
+    override val sortProgress: Float?
+        get() = if (task.status is RemoteTaskStatus.Unknown) null else task.progress.toFloat().coerceIn(0f, 1f)
+    override val sortSpeed: Long get() = if (task.status.isTerminal) 0L else task.speed
+    override val inflight: Boolean get() = sortTier <= 2
+    override val statusBucket: Int
+        get() = when (task.status) {
+            RemoteTaskStatus.Downloading -> 0
+            RemoteTaskStatus.Pending, RemoteTaskStatus.Accepted, is RemoteTaskStatus.Unknown -> 1
+            RemoteTaskStatus.Failed, RemoteTaskStatus.Canceled -> 2
+            RemoteTaskStatus.Paused -> 3
+            RemoteTaskStatus.Completed -> 4
+        }
 }
 
 /** 行所在的容器：传输中 / 分组卡片（圆角玻璃分区）与历史（出血安静列表）。 */
@@ -107,8 +197,7 @@ internal object ContentType {
     const val Empty = 10
     const val Skeleton = 11
     const val Scope = 12
-    const val RemoteHeader = 13
-    const val RowRemote = 14
+    const val RowRemote = 13
 }
 
 /** 「传输中」分区头：右侧实时汇总下行速度 + 任务数。 */
@@ -153,23 +242,15 @@ data class RowEntry(
         }
 }
 
-/** 「远程任务」分区头（其他设备上执行的云端下发任务，同 PC 下载页的远程行）。 */
-@Immutable
-data class RemoteHeaderEntry(val count: Int) : ListEntry {
-    override val key: String get() = "h:remote"
-    override val contentType: Int get() = ContentType.RemoteHeader
-}
-
-/** 远程任务行：不参与多选；[category] 按显示名解析（同本地行）。 */
+/** 远程任务行：与本地行同一列表、同一分区样式（[zone]）；不参与多选。 */
 @Immutable
 data class RemoteRowEntry(
-    val task: RemoteTaskDto,
-    val name: String,
-    val category: Category?,
+    val item: RemoteItem,
+    val zone: RowZone,
     val first: Boolean,
     val last: Boolean,
 ) : ListEntry {
-    override val key: String get() = "r:${task.id}"
+    override val key: String get() = "r:${item.task.id}"
     override val contentType: Int get() = ContentType.RowRemote
 }
 
@@ -201,10 +282,12 @@ data class Facets(
     val queues: List<QueueFacet>,
     /** 当前筛选结果行数。 */
     val matching: Int,
+    /** 范围内、当前文件夹内的远程任务数（分类筛选之前）：「远程任务」芯片的计数与显隐。 */
+    val remoteCount: Int,
 ) {
     fun count(folder: StatusFolder): Int = folderCounts.getOrElse(folder.ordinal) { 0 }
 
     companion object {
-        val Initial = Facets(List(StatusFolder.entries.size) { 0 }, emptyList(), emptyList(), 0)
+        val Initial = Facets(List(StatusFolder.entries.size) { 0 }, emptyList(), emptyList(), 0, 0)
     }
 }

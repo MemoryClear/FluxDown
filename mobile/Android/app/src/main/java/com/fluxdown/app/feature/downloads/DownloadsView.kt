@@ -124,11 +124,17 @@ class DownloadsView internal constructor(private val container: AppContainer) {
     private val refresh = MutableStateFlow(0)
 
     fun setFolder(f: StatusFolder) {
-        filter = filter.copy(folder = f, categoryId = null)
+        filter = filter.copy(folder = f, categoryId = null, remoteOnly = false)
     }
 
+    /** 选分类同时取消「远程任务」（芯片行单选）。 */
     fun setCategory(id: String?) {
-        filter = filter.copy(categoryId = id)
+        filter = filter.copy(categoryId = id, remoteOnly = if (id != null) false else filter.remoteOnly)
+    }
+
+    /** 只看远程任务；打开时清除分类（芯片行单选）。 */
+    fun setRemoteOnly(on: Boolean) {
+        filter = filter.copy(remoteOnly = on, categoryId = if (on) null else filter.categoryId)
     }
 
     /** [id] 为 null 清除队列范围；与当前相同则同样清除（Rail 再点取消）。 */
@@ -175,6 +181,7 @@ class DownloadsView internal constructor(private val container: AppContainer) {
                 if (!v.status && filter.folder != StatusFolder.All) setFolder(StatusFolder.All)
                 if (!v.queues && filter.queueId != null) setQueue(null)
                 if (!v.categories && filter.categoryId != null) setCategory(null)
+                if (!v.categories && filter.remoteOnly) setRemoteOnly(false)
             }
         }
         launch {

@@ -15,6 +15,8 @@ enum class AppTab { Downloads, Rss, Devices, Settings }
 /** 推入页。medium / expanded 档下 [TaskDetail] 进入右侧详情栏（paneable）。 */
 sealed interface Route {
     data class TaskDetail(val taskId: String) : Route
+    /** R2：某订阅的条目流（订阅页点按订阅行进入）。 */
+    data class RssItems(val sourceId: String) : Route
     /** [arg]：子页参数（如插件详情的插件标识）；分类根页为空。 */
     data class Settings(val page: SettingsPage, val arg: String = "") : Route
 }

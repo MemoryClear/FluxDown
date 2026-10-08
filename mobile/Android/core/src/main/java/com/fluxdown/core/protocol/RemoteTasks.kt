@@ -1,5 +1,8 @@
 package com.fluxdown.core.protocol
 
+import java.time.OffsetDateTime
+import java.time.format.DateTimeParseException
+
 // 跨设备任务（`agent.remote.*`，经 FluxCloud）。镜像 `native/protocol/src/agent.rs::RemoteTaskDto` 与
 // iOS `FluxDomain/Protocol/RemoteTasks.swift`；控制矩阵镜像 Web `batchPlan.ts::remoteCan` ↔ GPUI
 // `dispatch.rs::remote_action_applies`。
@@ -104,6 +107,14 @@ data class RemoteTaskDto(
     val createdAt: String = "",
     val updatedAt: String = "",
 ) {
+    /** `createdAt`（ISO-8601，带 / 不带小数秒、`Z` 或偏移）→ Unix 秒；解析失败 0。 */
+    val createdAtSeconds: Long
+        get() = try {
+            OffsetDateTime.parse(createdAt).toEpochSecond()
+        } catch (_: DateTimeParseException) {
+            0L
+        }
+
     companion object {
         /** `id` 缺失视为非法（null）；其余字段宽松同 serde `#[serde(default)]`。 */
         fun fromJson(v: JsonValue?): RemoteTaskDto? {
@@ -165,10 +176,4 @@ object RemoteTaskRules {
         task.status.allows(RemoteCommandAction.Resume) -> RemoteCommandAction.Resume
         else -> null
     }
-
-    /** 排序：未结束优先，同组按 `updatedAt`（ISO 字符串）降序；配合稳定排序使用。 */
-    val order: Comparator<RemoteTaskDto> =
-        compareBy<RemoteTaskDto> { it.status.isTerminal }.thenByDescending { it.updatedAt }
-
-    fun sorted(tasks: List<RemoteTaskDto>): List<RemoteTaskDto> = tasks.sortedWith(order)
 }

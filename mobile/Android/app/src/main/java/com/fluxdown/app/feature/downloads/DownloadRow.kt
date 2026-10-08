@@ -268,7 +268,7 @@ private fun ringProgressOf(item: TaskItem): Float? = when (item.visual) {
 
 /** 详情栏当前任务底色（draw 阶段读取，不触发重组）+ 行间发丝线（历史区首行另画顶线）。 */
 @Composable
-private fun Modifier.rowDecor(
+internal fun Modifier.rowDecor(
     zone: RowZone,
     first: Boolean,
     last: Boolean,
