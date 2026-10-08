@@ -23,6 +23,7 @@ struct DownloadRowView: View, Equatable {
     var onOpen: (() -> Void)?
 
     @Environment(TaskActions.self) private var actions
+    @Environment(\.confirmTaskDelete) private var confirmDelete
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.fluxAccent) private var accent
 
@@ -139,7 +140,7 @@ struct DownloadRowView: View, Equatable {
             Button(L(item.boosted ? "cancelBoost" : "boostDownload")) { actions.boost(task, boosted: item.boosted) }
         }
         Button(L("copyUrl")) { actions.copyLink(task) }
-        Button(L("delete")) { actions.confirmDelete([task]) }
+        Button(L("delete")) { confirmDelete?([task]) }
     }
 }
 

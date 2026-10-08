@@ -98,17 +98,6 @@ private struct ExtensionsContent: View {
         } message: {
             Text(missingMessage)
         }
-        .confirmationDialog(
-            L("pluginUninstallTitle"),
-            isPresented: Binding(get: { uninstallTarget != nil }, set: { if !$0 { uninstallTarget = nil } }),
-            titleVisibility: .visible,
-            presenting: uninstallTarget
-        ) { plugin in
-            Button(L("pluginUninstallTooltip"), role: .destructive) { Task { await model.uninstall(plugin) } }
-            Button(L("cancel"), role: .cancel) {}
-        } message: { plugin in
-            Text(L("pluginUninstallMsg", ["name": plugin.name]))
-        }
     }
 
     private static let packageTypes: [UTType] = {
@@ -168,6 +157,19 @@ private struct ExtensionsContent: View {
                 }
                 .contextMenu {
                     pluginMenu(plugin, readOnly: readOnly)
+                }
+                .confirmationDialog(
+                    L("pluginUninstallTitle"),
+                    isPresented: Binding(
+                        get: { uninstallTarget?.identity == plugin.identity },
+                        set: { if !$0 { uninstallTarget = nil } }
+                    ),
+                    titleVisibility: .visible
+                ) {
+                    Button(L("pluginUninstallTooltip"), role: .destructive) { Task { await model.uninstall(plugin) } }
+                    Button(L("cancel"), role: .cancel) {}
+                } message: {
+                    Text(L("pluginUninstallMsg", ["name": plugin.name]))
                 }
             }
         } header: {

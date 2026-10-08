@@ -145,31 +145,9 @@ private struct DevicesContent: View {
             }
             .fluxAnimation(.smooth, value: current.id)
             .sensoryFeedback(.selection, trigger: current.id)
-            .confirmationDialog(
-                pendingRemoval.map { Text(verbatim: L("mobileHostRemoveTitle", ["name": $0.displayName])) } ?? Text(verbatim: ""),
-                isPresented: Binding(get: { pendingRemoval != nil }, set: { if !$0 { pendingRemoval = nil } }),
-                titleVisibility: .visible,
-                presenting: pendingRemoval
-            ) { ref in
-                Button(L("mobileHostRemoveConfirm"), role: .destructive) {
-                    Task { await HostFlow.remove(ref, container: container) }
-                }
-            } message: { _ in
-                Text(L("mobileHostRemoveMessage"))
-            }
         }
-        .cloudDeviceDialogs(renaming: $renaming, deleting: $deleting)
+        .cloudDeviceRenameAlert(renaming: $renaming)
         .environment(model)
-        .confirmationDialog(
-            L("linkedDeviceRemoveTitle"),
-            isPresented: Binding(get: { pendingUnpair != nil }, set: { if !$0 { pendingUnpair = nil } }),
-            titleVisibility: .visible,
-            presenting: pendingUnpair
-        ) { device in
-            Button(L("linkedDeviceRemove"), role: .destructive) { unpair(device) }
-        } message: { device in
-            Text(L("linkedDeviceRemoveDesc", ["name": device.name]))
-        }
         .sheet(item: $sheet, onDismiss: sheetDismissed) { item in
             switch item {
             case .addDevice:
@@ -250,6 +228,17 @@ private struct DevicesContent: View {
                         container.toasts.show(text: L("webCopied"), tone: .success)
                     }
                     Button(L("mobileHostRemoveConfirm"), systemImage: FluxSymbol.delete, role: .destructive) { pendingRemoval = ref }
+                }
+                .confirmationDialog(
+                    Text(verbatim: L("mobileHostRemoveTitle", ["name": ref.displayName])),
+                    isPresented: Binding(get: { pendingRemoval?.id == ref.id }, set: { if !$0 { pendingRemoval = nil } }),
+                    titleVisibility: .visible
+                ) {
+                    Button(L("mobileHostRemoveConfirm"), role: .destructive) {
+                        Task { await HostFlow.remove(ref, container: container) }
+                    }
+                } message: {
+                    Text(L("mobileHostRemoveMessage"))
                 }
         } else {
             row
@@ -445,6 +434,18 @@ private struct DevicesContent: View {
                             pendingUnpair = device
                         }
                     }
+                }
+                .confirmationDialog(
+                    L("linkedDeviceRemoveTitle"),
+                    isPresented: Binding(
+                        get: { pendingUnpair?.fingerprint == device.fingerprint },
+                        set: { if !$0 { pendingUnpair = nil } }
+                    ),
+                    titleVisibility: .visible
+                ) {
+                    Button(L("linkedDeviceRemove"), role: .destructive) { unpair(device) }
+                } message: {
+                    Text(L("linkedDeviceRemoveDesc", ["name": device.name]))
                 }
             }
             if case let .failed(error) = model.linkPhase {

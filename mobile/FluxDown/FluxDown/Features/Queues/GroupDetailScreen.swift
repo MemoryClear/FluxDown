@@ -81,7 +81,7 @@ final class GroupDetailModel {
             nowMs: Int64(Date().timeIntervalSince1970 * 1000),
             interactionMs: 0
         )
-        let nextItems = result.list.sections.flatMap(\.items)
+        let nextItems = result.list.sections.flatMap(\.rows).compactMap(\.item)
         if nextItems != items { items = nextItems }
 
         if state.isReadOnly != isReadOnly { isReadOnly = state.isReadOnly }

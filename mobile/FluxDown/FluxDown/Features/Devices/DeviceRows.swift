@@ -121,12 +121,13 @@ struct PresenceMark: View {
 // MARK: - 行操作
 
 extension View {
-    /// 云端设备行的滑动 / 长按操作：重命名、删除（只读时不提供）。对话框由 `cloudDeviceDialogs` 承接。
+    /// 云端设备行的滑动 / 长按操作：重命名、删除（只读时不提供）。删除确认框由本函数挂在该行上；重命名 `alert` 由 `cloudDeviceRenameAlert` 承接。
     func cloudDeviceActions(
         _ record: CloudDeviceRecord,
         enabled: Bool,
         renaming: Binding<CloudDeviceRecord?>,
-        deleting: Binding<CloudDeviceRecord?>
+        deleting: Binding<CloudDeviceRecord?>,
+        onDeleted: @escaping (CloudDeviceRecord) -> Void = { _ in }
     ) -> some View {
         // 删除只弹确认框：不用 `role: .destructive`（会让 List 先行移除该行而数据未变，导致行数不一致崩溃）。
         swipeActions(edge: .trailing, allowsFullSwipe: false) {
@@ -149,25 +150,29 @@ extension View {
                 }
             }
         }
+        .cloudDeviceDeleteConfirmation(record, deleting: deleting, onDeleted: onDeleted)
     }
 
-    /// 云端设备的重命名 `alert`（`accountDeviceRenameTitle` / `accountFieldDeviceName`，1–64 字符校验）与删除确认
-    /// （删除本机追加 `accountDeviceDeleteCurrentWarning`，并在成功后提示已退出登录）。`onDeleted` 在删除成功后回调。
-    func cloudDeviceDialogs(
-        renaming: Binding<CloudDeviceRecord?>,
+    /// 云端设备的重命名 `alert`（`accountDeviceRenameTitle` / `accountFieldDeviceName`，1–64 字符校验）。
+    func cloudDeviceRenameAlert(renaming: Binding<CloudDeviceRecord?>) -> some View {
+        modifier(CloudDeviceRenameAlert(renaming: renaming))
+    }
+
+    /// 云端设备删除确认框（删除本机追加 `accountDeviceDeleteCurrentWarning`，并在成功后提示已退出登录）。
+    /// 必须挂在触发删除的行 / 按钮上；`onDeleted` 在删除成功后回调。
+    func cloudDeviceDeleteConfirmation(
+        _ record: CloudDeviceRecord,
         deleting: Binding<CloudDeviceRecord?>,
         onDeleted: @escaping (CloudDeviceRecord) -> Void = { _ in }
     ) -> some View {
-        modifier(CloudDeviceDialogs(renaming: renaming, deleting: deleting, onDeleted: onDeleted))
+        modifier(CloudDeviceDeleteConfirmation(record: record, deleting: deleting, onDeleted: onDeleted))
     }
 }
 
-private struct CloudDeviceDialogs: ViewModifier {
+private struct CloudDeviceRenameAlert: ViewModifier {
     @Environment(AppContainer.self) private var container
     @Environment(DevicesModel.self) private var model
     @Binding var renaming: CloudDeviceRecord?
-    @Binding var deleting: CloudDeviceRecord?
-    let onDeleted: (CloudDeviceRecord) -> Void
 
     /// 编辑中的名称，按设备 id 归属（别的设备的残留草稿不会串到本次输入框）。
     private struct Draft {
@@ -204,16 +209,6 @@ private struct CloudDeviceDialogs: ViewModifier {
             } message: {
                 if !valid { Text(L("accountDeviceRenameInvalid")) }
             }
-            .confirmationDialog(
-                L("accountDeviceDeleteConfirmTitle"),
-                isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
-                titleVisibility: .visible,
-                presenting: deleting
-            ) { record in
-                Button(L("accountDeviceDeleteAction"), role: .destructive) { performDelete(record) }
-            } message: { record in
-                Text(deleteMessage(record))
-            }
     }
 
     private func text(for record: CloudDeviceRecord?) -> String {
@@ -221,10 +216,6 @@ private struct CloudDeviceDialogs: ViewModifier {
         return record?.name ?? ""
     }
 
-    private func deleteMessage(_ record: CloudDeviceRecord) -> String {
-        let base = L("accountDeviceDeleteConfirmDesc")
-        return record.isCurrent ? base + "\n" + L("accountDeviceDeleteCurrentWarning") : base
-    }
 
     private func submitRename() {
         guard let record = renameTarget else { return }
@@ -236,6 +227,34 @@ private struct CloudDeviceDialogs: ViewModifier {
                 container.toasts.show(text: AccountText.error(error), tone: .error)
             }
         }
+    }
+
+}
+
+/// 删除确认框：挂在触发它的行 / 按钮上（iOS 26 的确认框锚定在挂载视图上，挂整页会指向页顶）。
+private struct CloudDeviceDeleteConfirmation: ViewModifier {
+    @Environment(AppContainer.self) private var container
+    @Environment(DevicesModel.self) private var model
+    let record: CloudDeviceRecord
+    @Binding var deleting: CloudDeviceRecord?
+    let onDeleted: (CloudDeviceRecord) -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .confirmationDialog(
+                L("accountDeviceDeleteConfirmTitle"),
+                isPresented: Binding(get: { deleting?.id == record.id }, set: { if !$0 { deleting = nil } }),
+                titleVisibility: .visible
+            ) {
+                Button(L("accountDeviceDeleteAction"), role: .destructive) { performDelete(record) }
+            } message: {
+                Text(deleteMessage(record))
+            }
+    }
+
+    private func deleteMessage(_ record: CloudDeviceRecord) -> String {
+        let base = L("accountDeviceDeleteConfirmDesc")
+        return record.isCurrent ? base + "\n" + L("accountDeviceDeleteCurrentWarning") : base
     }
 
     private func performDelete(_ record: CloudDeviceRecord) {

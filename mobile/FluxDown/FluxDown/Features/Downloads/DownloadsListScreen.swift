@@ -101,15 +101,17 @@ struct DownloadsListScreen: View {
             } else if !list.isEmpty {
                 ForEach(list.sections) { section in
                     Section {
-                        ForEach(section.items) { item in
-                            row(item, style: style, editing: editing)
+                        ForEach(section.rows) { entry in
+                            switch entry {
+                            case let .task(item):
+                                self.row(item, style: style, editing: editing)
+                            case let .remote(remote):
+                                DownloadsRemoteRow(task: remote.task, readOnly: model.chrome.isReadOnly)
+                            }
                         }
                     } header: {
                         sectionHeader(section)
                     }
-                }
-                if !list.remote.isEmpty {
-                    DownloadsRemoteSection(tasks: list.remote, readOnly: model.chrome.isReadOnly)
                 }
                 Section {} footer: {
                     Text(footerText)
@@ -486,11 +488,11 @@ private extension View {
     }
 }
 
-/// 其他设备上执行的远程任务（同 PC 下载页的远程行）：状态 / 进度由云端经 agent 实时推送，
+/// 其他设备上执行的远程任务行（同 PC 下载页的远程行）：状态 / 进度由云端经 agent 实时推送，
 /// 控制（暂停 / 继续 / 取消 / 删除）走 `agent.remote.command`，与设备页共用 `DevicesModel` 的在途状态。
 /// 单独成视图：只有它读主机状态（目标设备名 / 在线），列表页 body 不随 10 Hz 状态重算。
-private struct DownloadsRemoteSection: View {
-    let tasks: [RemoteTaskDto]
+private struct DownloadsRemoteRow: View {
+    let task: RemoteTaskDto
     let readOnly: Bool
 
     @Environment(AppContainer.self) private var container
@@ -498,30 +500,17 @@ private struct DownloadsRemoteSection: View {
     var body: some View {
         let state = container.store.state
         let devices = container.devices
-        let presenceKnown = devices.presenceKnown(state)
-        Section {
-            ForEach(tasks) { task in
-                let target = devices.target(for: task.toDevice, state: state)
-                RemoteTaskRow(
-                    task: task,
-                    targetName: target?.name ?? task.toDevice,
-                    targetOnline: presenceKnown ? target?.online : nil,
-                    busy: devices.isBusy(task),
-                    readOnly: readOnly
-                ) { action, deleteFiles in
-                    devices.issue(action, to: task, deleteFiles: deleteFiles)
-                }
-                .selectionDisabled()
-            }
-        } header: {
-            HStack {
-                Text(L("remoteTasksGroup"))
-                Spacer(minLength: 0)
-                Text(L("nTasks", ["n": tasks.count])).monospacedDigit()
-            }
-            .font(.subheadline.weight(.semibold))
-            .foregroundStyle(.secondary)
-            .textCase(nil)
+        let target = devices.target(for: task.toDevice, state: state)
+        RemoteTaskRow(
+            task: task,
+            targetName: target?.name ?? task.toDevice,
+            targetOnline: devices.presenceKnown(state) ? target?.online : nil,
+            busy: devices.isBusy(task),
+            readOnly: readOnly
+        ) { action, deleteFiles in
+            devices.issue(action, to: task, deleteFiles: deleteFiles)
         }
+        // 远程行不参与多选（全选范围 / visibleIds 不含远程）。
+        .selectionDisabled()
     }
 }

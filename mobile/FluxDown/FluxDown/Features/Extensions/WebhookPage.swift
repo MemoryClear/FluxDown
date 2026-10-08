@@ -73,17 +73,6 @@ private struct WebhookContent: View {
             case let .edit(endpoint): WebhookEditorSheet(existing: endpoint, model: model)
             }
         }
-        .confirmationDialog(
-            L("webhookRowDeleteConfirm"),
-            isPresented: Binding(get: { deleteTarget != nil }, set: { if !$0 { deleteTarget = nil } }),
-            titleVisibility: .visible,
-            presenting: deleteTarget
-        ) { endpoint in
-            Button(L("webhookRowDelete"), role: .destructive) { Task { await model.remove(endpoint) } }
-            Button(L("cancel"), role: .cancel) {}
-        } message: { endpoint in
-            Text(endpoint.name)
-        }
     }
 
     // MARK: 端点
@@ -108,6 +97,19 @@ private struct WebhookContent: View {
                     onTest: { Task { await model.test(endpoint) } },
                     onDelete: { deleteTarget = endpoint }
                 )
+                .confirmationDialog(
+                    L("webhookRowDeleteConfirm"),
+                    isPresented: Binding(
+                        get: { deleteTarget?.id == endpoint.id },
+                        set: { if !$0 { deleteTarget = nil } }
+                    ),
+                    titleVisibility: .visible
+                ) {
+                    Button(L("webhookRowDelete"), role: .destructive) { Task { await model.remove(endpoint) } }
+                    Button(L("cancel"), role: .cancel) {}
+                } message: {
+                    Text(endpoint.name)
+                }
             }
             Button {
                 editing = .new

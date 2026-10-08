@@ -217,13 +217,22 @@ final class DownloadsModel {
     // MARK: 筛选
 
     func setFolder(_ folder: StatusFolder) {
-        guard filter.folder != folder || filter.categoryId != nil else { return }
+        guard filter.folder != folder || filter.categoryId != nil || filter.remoteOnly else { return }
         filter.folder = folder
         filter.categoryId = nil
+        filter.remoteOnly = false
     }
 
+    /// 选分类清「远程任务」（二者互斥）；nil 仅清分类。
     func setCategory(_ id: String?) {
         filter.categoryId = id
+        if id != nil { filter.remoteOnly = false }
+    }
+
+    /// 「远程任务」芯片：开 = 只看远程任务并清分类（二者互斥）。
+    func setRemoteOnly(_ on: Bool) {
+        filter.remoteOnly = on
+        if on { filter.categoryId = nil }
     }
 
     /// nil 清除队列范围。

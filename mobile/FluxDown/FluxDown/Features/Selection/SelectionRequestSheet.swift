@@ -120,6 +120,10 @@ private struct BtSelectionView: View {
 
     private var selectedBytes: Int64 { selected.reduce(0) { $0 + (sizes[$1] ?? 0) } }
     private var dirty: Bool { selected != initial }
+    /// 只有清单里有目录时文件行才需要让出折叠箭头的位置（箭头 32 + 间距 8）；纯文件清单左对齐。
+    private var chevronGutter: CGFloat {
+        tree.children.contains { if case .folder = $0 { true } else { false } } ? 40 : 0
+    }
 
     var body: some View {
         let rows = flattenBtTree(tree, collapsed: collapsed)
@@ -192,7 +196,7 @@ private struct BtSelectionView: View {
             }
             Spacer()
             Text(L("selectedCount", ["n": selected.count]) + " · " + sizeText)
-                .font(.footnote.monospaced())
+                .font(.footnote.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
@@ -261,7 +265,7 @@ private struct BtSelectionView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .padding(.leading, indent + 40)
+            .padding(.leading, indent + chevronGutter)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(name)
             .accessibilityValue(Format.bytes(file.size).description)
