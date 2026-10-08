@@ -545,6 +545,7 @@ fn apply_preferences(values: &BTreeMap<String, serde_json::Value>, cx: &mut App)
         log::warn!("failed to load imported theme: {failure}");
     }
     fluxdown_ui_theme::apply_appearance_preferences(values, cx);
+    fluxdown_ui_icon_pack::apply_icon_pack_preference(values, cx);
     apply_activity_bar_preferences(values, cx);
     if let Some(locale) = values
         .get("general.locale")

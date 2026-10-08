@@ -1,26 +1,13 @@
-// 任务表 / 卡片共用的文案与映射（状态文案、并发详情、类型图标）。
+// 任务表 / 卡片共用的文案与映射（状态文案、并发详情、类别名）。
 
-import { AppWindow, Disc3, File, FileArchive, FileImage, FileMusic, FilePlay, FileText, Smartphone } from 'lucide-react'
-import type { LucideIcon } from 'lucide-react'
+import type { FileKind } from '../../../lib/icon-pack'
 import { activeTransfers, formatBytes, MAX_ETA_SECS, percentLabel, sourceSite } from '../model/task'
-import type { DownloadTaskView, TaskKind, TaskState } from '../model/task'
+import type { DownloadTaskView, TaskState } from '../model/task'
 import { stateLabel } from '../state'
 
 export type Translate = (key: string, params?: Record<string, string | number>) => string
 
-export const KIND_ICON: Record<TaskKind, LucideIcon> = {
-  video: FilePlay,
-  audio: FileMusic,
-  document: FileText,
-  image: FileImage,
-  archive: FileArchive,
-  diskImage: Disc3,
-  application: AppWindow,
-  mobile: Smartphone,
-  other: File,
-}
-
-const KIND_LABEL_KEY: Record<TaskKind, string> = {
+const KIND_LABEL_KEY: Record<FileKind, string> = {
   video: 'categoryVideo',
   audio: 'categoryAudio',
   document: 'categoryDocument',
@@ -32,7 +19,7 @@ const KIND_LABEL_KEY: Record<TaskKind, string> = {
   other: 'categoryOther',
 }
 
-export const kindLabel = (t: Translate, kind: TaskKind): string => t(KIND_LABEL_KEY[kind])
+export const kindLabel = (t: Translate, kind: FileKind): string => t(KIND_LABEL_KEY[kind])
 
 export const STATUS_TEXT: Record<TaskState, string> = {
   downloading: 'text-status-downloading',

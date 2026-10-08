@@ -301,6 +301,7 @@ jobs:
                 # Web SPA 构建期引用共享文案与 GPUI 主题解析器（web/vite.config.ts 别名）
                 assets/i18n/*)       APP=true; MOBILE=true; SERVER=true ;;
                 website-v2/src/lib/gpui-theme/*) SERVER=true ;;
+                assets/icon-packs/*) APP=true; SERVER=true ;;
                 website/*)  ;;
                 docs/*|*.md) ;;
                 *)          APP=true ;;

@@ -21,6 +21,7 @@ export const SYNC_GROUPS: readonly SyncGroup[] = [
       'appearance.color_scheme',
       'appearance.custom_color',
       'appearance.custom_themes',
+      'appearance.file_icon_pack',
     ],
   },
   {

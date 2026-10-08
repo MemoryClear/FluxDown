@@ -12,9 +12,9 @@ class SettingsCatalogTest {
 
     @Test
     fun syncCatalogMatchesRustSpecCount() {
-        // SYNC_SETTING_SPECS（native/protocol/src/settings.rs）：29 个 daemon 键 + 28 个偏好键 + 1 个集合范围键 = 58
+        // SYNC_SETTING_SPECS（native/protocol/src/settings.rs）：29 个 daemon 键 + 29 个偏好键 + 1 个集合范围键 = 59
         assertEquals(29, SettingsCatalog.daemonSyncNames.size)
-        assertEquals(28, SettingsCatalog.syncedPreferenceKeys.size)
+        assertEquals(29, SettingsCatalog.syncedPreferenceKeys.size)
         assertEquals(SettingsCatalog.daemonSyncNames.size, SettingsCatalog.syncNameToDaemonKey.size)
     }
 

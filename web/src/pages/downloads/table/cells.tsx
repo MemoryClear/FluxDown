@@ -2,22 +2,31 @@
 
 import { LoaderCircle } from 'lucide-react'
 import { cn } from '../../../lib/cn'
+import { FileIcon } from '../../../lib/icon-pack'
 import { Icon } from '../../../ui'
 import { percentLabel, sourceSite } from '../model/task'
 import type { DownloadTaskView } from '../model/task'
 import type { ViewDensity } from '../model/viewPrefs'
 import { stateLabel } from '../state'
 import { SegmentProgress } from './SegmentProgress'
-import { KIND_ICON, kindLabel, relaxedMeta, relaxedStatusDetail, statusDetail, statusLabel, STATUS_TEXT } from './text'
+import { kindLabel, relaxedMeta, relaxedStatusDetail, statusDetail, statusLabel, STATUS_TEXT } from './text'
 import type { Translate } from './text'
+
+/** 文件图标边长：常规与 GPUI 选择列紧凑档同为 `icon.lg`，宽松密度放进 32px 底块（与三行主列等量）。 */
+const GLYPH_SIZE = 'var(--fx-icon-lg)'
+const TILE_GLYPH_SIZE = 'calc(var(--fx-icon-lg) + 2px)'
 
 export function KindGlyph({ view, className, tile = false }: { view: DownloadTaskView; className?: string; tile?: boolean }) {
   const glyph = view.metadataPending ? (
     <Icon icon={LoaderCircle} size="md" className={cn('animate-spin text-muted-foreground', className)} />
   ) : (
-    <Icon icon={KIND_ICON[view.kind]} size={tile ? 'xl' : 'lg'} className={cn('text-muted-foreground', className)} />
+    <FileIcon
+      name={view.name}
+      kind={view.kind}
+      size={tile ? TILE_GLYPH_SIZE : GLYPH_SIZE}
+      className={cn('text-muted-foreground', view.state === 'completed' && view.fileMissing && 'opacity-50', className)}
+    />
   )
-  // 宽松密度：图标放进 32px 圆角底块，与三行主列等量。
   return tile ? <div className="flex size-8 items-center justify-center rounded-md bg-progress-track">{glyph}</div> : glyph
 }
 

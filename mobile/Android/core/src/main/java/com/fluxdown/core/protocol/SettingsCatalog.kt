@@ -183,7 +183,7 @@ object SettingsCatalog {
     /** 偏好 / agent 所有、参与云同步的键（`SYNC_SETTING_SPECS` 中 owner ≠ Daemon，不含集合范围键）。 */
     val syncedPreferenceKeys: Set<String> = setOf(
         "appearance.theme_mode", "appearance.dark_theme", "appearance.light_theme",
-        "appearance.color_scheme", "appearance.custom_color",
+        "appearance.color_scheme", "appearance.custom_color", "appearance.file_icon_pack",
         "general.locale", "general.update_channel", "general.auto_check_update",
         "general.clipboard_watch", "general.floating_ball_enabled", "general.floating_ball_active_only",
         "ui.show_sidebar_status", "ui.show_sidebar_queues", "ui.show_sidebar_category",

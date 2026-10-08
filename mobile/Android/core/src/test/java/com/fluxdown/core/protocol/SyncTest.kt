@@ -74,7 +74,7 @@ class SyncTest {
     @Test
     fun syncGroupsPartitionTheFullCatalogWithoutOverlap() {
         val all = SyncRules.groups.flatMap { it.keys }
-        assertEquals(58, all.size)
+        assertEquals(59, all.size)
         assertEquals(all.size, all.toSet().size)
         assertEquals(SyncGroupId.values().toList(), SyncRules.groups.map { it.id })
         assertTrue("custom_categories" in all)

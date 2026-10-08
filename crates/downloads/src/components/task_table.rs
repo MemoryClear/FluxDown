@@ -7,6 +7,7 @@ use std::{
 
 use fluxdown_protocol::{RemoteCommandAction, RemoteCommandParams, RemoteTaskStatus};
 use fluxdown_ui_components::{CheckState, FluxIcon, check_mark, tabular_numbers};
+use fluxdown_ui_icon_pack::FileKind;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, Edges, Entity, FocusHandle, FontWeight, Hsla,
@@ -27,13 +28,10 @@ use gpui_component::{
 
 use crate::{
     batch::{MAX_IN_FLIGHT, coalesce_commands, retry_copy, retry_delay},
-    components::{
-        file_icon::{SystemFileIcon, system_file_icon},
-        task_drag::DraggedTasks,
-    },
+    components::{file_icon::task_file_icon, task_drag::DraggedTasks},
     controller::DownloadsCommand,
     model::{
-        CategoryIndex, DownloadFilter, DownloadTaskView, RowId, RowKey, SidebarSelection, TaskKind,
+        CategoryIndex, DownloadFilter, DownloadTaskView, RowId, RowKey, SidebarSelection,
         TaskProtocol, TaskSource, TaskState, TaskStore,
         counts::SidebarCounts,
         dispatch::DispatchSummary,
@@ -73,9 +71,9 @@ const PROGRESS_GAP: f32 = 8.;
 const PAUSED_BAR_ALPHA: f32 = 0.4;
 /// 行悬停操作按钮边长。
 const ROW_ACTION_SIZE: f32 = 24.;
-/// 舒适密度下系统文件图标相对 `icon.lg`（16）的倍数：24px，与双行文字块（约 34px）协调。
+/// 舒适密度下文件图标相对 `icon.lg`（16）的倍数：24px，与双行文字块（约 34px）协调。
 const FILE_ICON_COMFORTABLE_SCALE: f32 = 1.5;
-/// 宽松密度下系统文件图标相对 `icon.lg` 的倍数：32px，与三行主列（名称 / 进度条 / 元信息）协调。
+/// 宽松密度下文件图标相对 `icon.lg` 的倍数：32px，与三行主列（名称 / 进度条 / 元信息）协调。
 const FILE_ICON_RELAXED_SCALE: f32 = 2.;
 /// 选中底色左右内缩（inset 样式）。
 const SELECTED_INSET_X: f32 = 4.;
@@ -1418,19 +1416,19 @@ impl DownloadTableDelegate {
         self.view_dirty = true;
     }
 
-    /// 文件类型图标与类别名。
-    fn kind_visual(&self, kind: TaskKind) -> (FluxIcon, SharedString) {
+    /// 文件大类的类别名。
+    fn kind_label(&self, kind: FileKind) -> SharedString {
         let strings = &self.strings;
-        let label = match kind {
-            TaskKind::Video => &strings.category_video,
-            TaskKind::Audio => &strings.category_audio,
-            TaskKind::Document => &strings.category_document,
-            TaskKind::Image => &strings.category_image,
-            TaskKind::Archive | TaskKind::DiskImage => &strings.category_archive,
-            TaskKind::Application | TaskKind::Mobile => &strings.category_program,
-            TaskKind::Other => &strings.category_other,
-        };
-        (kind_icon(kind), label.clone())
+        match kind {
+            FileKind::Video => &strings.category_video,
+            FileKind::Audio => &strings.category_audio,
+            FileKind::Document => &strings.category_document,
+            FileKind::Image => &strings.category_image,
+            FileKind::Archive | FileKind::DiskImage => &strings.category_archive,
+            FileKind::Application | FileKind::Mobile => &strings.category_program,
+            FileKind::Other => &strings.category_other,
+        }
+        .clone()
     }
 
     /// 状态列主文案：下载中显示「速度 · 剩余时间」（只显示已知部分），其余为状态名。
@@ -1505,7 +1503,7 @@ impl DownloadTableDelegate {
             if task.size_bytes > 0 {
                 parts.push(task.size.clone());
             }
-            parts.push(self.kind_visual(task.kind).1.to_string());
+            parts.push(self.kind_label(task.kind).to_string());
         } else {
             parts.push(bytes_progress(task));
             parts.push(percent_label(task.progress).to_string());
@@ -1569,24 +1567,13 @@ impl DownloadTableDelegate {
                     .color(muted)
                     .into_any_element();
             }
-            // 双行 / 三行密度给系统图标更大的尺寸（与文字块等高感），紧凑单行与文字同高。
+            // 双行 / 三行密度给文件图标更大的尺寸（与文字块等高感），紧凑单行与文字同高。
             let size = match self.prefs.density {
                 ViewDensity::Relaxed => icon_sizes.lg * FILE_ICON_RELAXED_SCALE,
                 ViewDensity::Comfortable => icon_sizes.lg * FILE_ICON_COMFORTABLE_SCALE,
                 ViewDensity::Compact => icon_sizes.lg,
             };
-            match system_file_icon(task, size, window, cx) {
-                SystemFileIcon::Ready(icon) => icon,
-                SystemFileIcon::Loading => div().size(size).into_any_element(),
-                SystemFileIcon::Unavailable => Icon::new(self.kind_visual(task.kind).0)
-                    .size(if self.prefs.density == ViewDensity::Relaxed {
-                        icon_sizes.lg * FILE_ICON_COMFORTABLE_SCALE
-                    } else {
-                        icon_sizes.lg
-                    })
-                    .text_color(muted)
-                    .into_any_element(),
-            }
+            task_file_icon(task, size, window, cx)
         });
         let checkbox = div()
             .id(("download-task-multi-select", row_ix))
@@ -1657,7 +1644,7 @@ impl DownloadTableDelegate {
             )
         };
         let meta = (self.prefs.density.two_line() && !task.metadata_pending).then(|| {
-            let (_, category) = self.kind_visual(task.kind);
+            let category = self.kind_label(task.kind);
             let site = task.source_site();
             if site.is_empty() {
                 category
@@ -2544,9 +2531,13 @@ impl TableDelegate for DownloadTableDelegate {
             return div().id(("download-group-row", row_ix)).h(row_height);
         };
         let Some((key, drag_visual)) = self.store.row(id).map(|row| {
-            let drag_visual = row
-                .has_local_file()
-                .then(|| (kind_icon(row.kind), SharedString::from(row.name.clone())));
+            let drag_visual = row.has_local_file().then(|| {
+                (
+                    row.kind,
+                    SharedString::from(row.name_fold.clone()),
+                    SharedString::from(row.name.clone()),
+                )
+            });
             (row.key.clone(), drag_visual)
         }) else {
             return div().id(("download-task-row", row_ix)).h(row_height);
@@ -2557,9 +2548,10 @@ impl TableDelegate for DownloadTableDelegate {
             theme.components().task_row_radius,
         );
         // 已完成且文件仍在下载目录的行可按住拖到系统文件管理器 / 桌面。
-        let dragged = drag_visual.map(|(icon, name)| DraggedTasks {
+        let dragged = drag_visual.map(|(kind, name_fold, name)| DraggedTasks {
             anchor: key.clone(),
-            icon,
+            kind,
+            name_fold,
             name,
             table: cx.weak_entity(),
             host: self.host.clone(),
@@ -2914,21 +2906,6 @@ pub(crate) fn progress_bar_color(state: TaskState, cx: &App) -> Hsla {
         TaskState::Failed => colors.status_failed,
         TaskState::Pending => colors.status_queued,
         TaskState::Completed => colors.status_completed,
-    }
-}
-
-/// 文件类型图标：任务表与独立进度窗口共用。
-pub(crate) fn kind_icon(kind: TaskKind) -> FluxIcon {
-    match kind {
-        TaskKind::Video => FluxIcon::FilePlay,
-        TaskKind::Audio => FluxIcon::FileMusic,
-        TaskKind::Document => FluxIcon::FileText,
-        TaskKind::Image => FluxIcon::FileImage,
-        TaskKind::Archive => FluxIcon::FileArchive,
-        TaskKind::DiskImage => FluxIcon::Disc3,
-        TaskKind::Application => FluxIcon::AppWindow,
-        TaskKind::Mobile => FluxIcon::Smartphone,
-        TaskKind::Other => FluxIcon::File,
     }
 }
 

@@ -37,6 +37,7 @@ export const SYNCED_PREF_KEYS: ReadonlySet<string> = new Set([
   'appearance.color_scheme',
   'appearance.custom_color',
   'appearance.custom_themes',
+  'appearance.file_icon_pack',
   'general.locale',
   'general.update_channel',
   'general.auto_check_update',

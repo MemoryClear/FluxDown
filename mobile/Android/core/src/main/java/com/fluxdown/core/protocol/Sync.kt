@@ -88,6 +88,7 @@ object SyncRules {
             listOf(
                 "appearance.theme_mode", "appearance.dark_theme", "appearance.light_theme",
                 "appearance.color_scheme", "appearance.custom_color", "appearance.custom_themes",
+                "appearance.file_icon_pack",
             ),
         ),
         SyncGroup(

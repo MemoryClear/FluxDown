@@ -3100,6 +3100,7 @@ dependencies = [
  "fluxdown_ui_downloads",
  "fluxdown_ui_extensions",
  "fluxdown_ui_i18n",
+ "fluxdown_ui_icon_pack",
  "fluxdown_ui_rss",
  "fluxdown_ui_settings",
  "fluxdown_ui_shell",
@@ -3156,6 +3157,7 @@ dependencies = [
  "fluxdown_protocol",
  "fluxdown_ui_components",
  "fluxdown_ui_i18n",
+ "fluxdown_ui_icon_pack",
  "fluxdown_ui_theme",
  "gpui-component",
  "gpui-pre",
@@ -3188,6 +3190,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fluxdown_ui_icon_pack"
+version = "0.1.0"
+dependencies = [
+ "fluxdown_protocol",
+ "gpui-pre",
+ "serde_json",
+]
+
+[[package]]
 name = "fluxdown_ui_rss"
 version = "0.1.0"
 dependencies = [
@@ -3208,6 +3219,7 @@ dependencies = [
  "fluxdown_protocol",
  "fluxdown_ui_components",
  "fluxdown_ui_i18n",
+ "fluxdown_ui_icon_pack",
  "fluxdown_ui_theme",
  "gpui-component",
  "gpui-pre",
