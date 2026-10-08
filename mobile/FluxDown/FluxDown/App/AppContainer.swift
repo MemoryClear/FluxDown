@@ -183,7 +183,8 @@ final class AppContainer {
                 try prepareLocalDirectories()
                 let session = try await FluxBridge.openLocal(
                     dataDir: LocalPaths.dataDirectory.path,
-                    saveDir: LocalPaths.documents.path
+                    saveDir: LocalPaths.documents.path,
+                    deviceName: LocalDevice.name
                 )
                 return .success(session)
             case let .remote(id, _, endpoint):

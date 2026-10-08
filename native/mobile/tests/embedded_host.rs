@@ -67,6 +67,7 @@ impl Daemon {
             daemon_url: format!("ws://{}/rpc", self.ready.addr),
             daemon_token: self.ready.token.clone(),
             client_platform: "android".to_owned(),
+            client_device_name: None,
             enable_link: false,
         }
     }
@@ -377,6 +378,7 @@ async fn non_loopback_daemon_endpoint_is_refused_without_side_effects() {
             daemon_url: "ws://203.0.113.7:17801/rpc".to_owned(),
             daemon_token: "token".to_owned(),
             client_platform: "android".to_owned(),
+            client_device_name: None,
             enable_link: false,
         },
         CancellationToken::new(),
