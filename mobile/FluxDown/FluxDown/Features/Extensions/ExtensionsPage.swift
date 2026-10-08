@@ -158,13 +158,12 @@ private struct ExtensionsContent: View {
                 .contextMenu {
                     pluginMenu(plugin, readOnly: readOnly)
                 }
-                .confirmationDialog(
+                .alert(
                     L("pluginUninstallTitle"),
                     isPresented: Binding(
                         get: { uninstallTarget?.identity == plugin.identity },
                         set: { if !$0 { uninstallTarget = nil } }
-                    ),
-                    titleVisibility: .visible
+                    )
                 ) {
                     Button(L("pluginUninstallTooltip"), role: .destructive) { Task { await model.uninstall(plugin) } }
                     Button(L("cancel"), role: .cancel) {}

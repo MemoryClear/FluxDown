@@ -56,11 +56,12 @@ struct CategoryEditorSheet: View {
                                 .frame(minHeight: 44, alignment: .leading)
                                 .contentShape(.rect)
                         }
-                        .confirmationDialog(L("deleteCategory"), isPresented: $confirmDelete, titleVisibility: .visible) {
+                        .alert(L("deleteCategory"), isPresented: $confirmDelete) {
                             Button(L("delete"), role: .destructive) {
                                 onDelete?()
                                 dismiss()
                             }
+                            Button(L("cancel"), role: .cancel) {}
                         } message: {
                             Text(L("deleteCategoryConfirm"))
                         }
@@ -75,9 +76,7 @@ struct CategoryEditorSheet: View {
                     Button(L("cancel")) {
                         if isDirty { confirmDiscard = true } else { dismiss() }
                     }
-                    .confirmationDialog(
-                        L("mobileGeneralDiscardTitle"), isPresented: $confirmDiscard, titleVisibility: .visible
-                    ) {
+                    .alert(L("mobileGeneralDiscardTitle"), isPresented: $confirmDiscard) {
                         Button(L("mobileGeneralDiscard"), role: .destructive) { dismiss() }
                         Button(L("mobileGeneralKeepEditing"), role: .cancel) {}
                     }

@@ -229,14 +229,14 @@ private struct DevicesContent: View {
                     }
                     Button(L("mobileHostRemoveConfirm"), systemImage: FluxSymbol.delete, role: .destructive) { pendingRemoval = ref }
                 }
-                .confirmationDialog(
+                .alert(
                     Text(verbatim: L("mobileHostRemoveTitle", ["name": ref.displayName])),
-                    isPresented: Binding(get: { pendingRemoval?.id == ref.id }, set: { if !$0 { pendingRemoval = nil } }),
-                    titleVisibility: .visible
+                    isPresented: Binding(get: { pendingRemoval?.id == ref.id }, set: { if !$0 { pendingRemoval = nil } })
                 ) {
                     Button(L("mobileHostRemoveConfirm"), role: .destructive) {
                         Task { await HostFlow.remove(ref, container: container) }
                     }
+                    Button(L("cancel"), role: .cancel) {}
                 } message: {
                     Text(L("mobileHostRemoveMessage"))
                 }
@@ -435,15 +435,15 @@ private struct DevicesContent: View {
                         }
                     }
                 }
-                .confirmationDialog(
+                .alert(
                     L("linkedDeviceRemoveTitle"),
                     isPresented: Binding(
                         get: { pendingUnpair?.fingerprint == device.fingerprint },
                         set: { if !$0 { pendingUnpair = nil } }
-                    ),
-                    titleVisibility: .visible
+                    )
                 ) {
                     Button(L("linkedDeviceRemove"), role: .destructive) { unpair(device) }
+                    Button(L("cancel"), role: .cancel) {}
                 } message: {
                     Text(L("linkedDeviceRemoveDesc", ["name": device.name]))
                 }

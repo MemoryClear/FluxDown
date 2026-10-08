@@ -249,12 +249,12 @@ private struct LinkDeviceDetail: View {
                     }
                 }
                 .disabled(readOnly || unpairing)
-                .confirmationDialog(
+                .alert(
                     L("linkedDeviceRemoveTitle"),
-                    isPresented: $confirmingUnpair,
-                    titleVisibility: .visible
+                    isPresented: $confirmingUnpair
                 ) {
                     Button(L("linkedDeviceRemove"), role: .destructive) { unpair(info) }
+                    Button(L("cancel"), role: .cancel) {}
                 } message: {
                     Text(L("linkedDeviceRemoveDesc", ["name": info.name]))
                 }

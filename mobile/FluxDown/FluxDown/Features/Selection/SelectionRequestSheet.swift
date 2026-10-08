@@ -152,6 +152,12 @@ private struct BtSelectionView: View {
                     Button(L("cancel"), systemImage: FluxSymbol.close) {
                         if dirty { showDiscard = true } else { resolver.cancel(request, onSuccess: close) }
                     }
+                    .alert(L("mobileSelectionDiscardTitle"), isPresented: $showDiscard) {
+                        Button(L("mobileDiscard"), role: .destructive) { resolver.cancel(request, onSuccess: close) }
+                        Button(L("mobileKeepEditing"), role: .cancel) {}
+                    } message: {
+                        Text(L("mobileSelectionDiscardMessage"))
+                    }
                 }
             }
             .toolbar {
@@ -173,12 +179,6 @@ private struct BtSelectionView: View {
                     .disabled(selected.isEmpty)
                 }
             }
-        }
-        .confirmationDialog(L("mobileSelectionDiscardTitle"), isPresented: $showDiscard, titleVisibility: .visible) {
-            Button(L("mobileDiscard"), role: .destructive) { resolver.cancel(request, onSuccess: close) }
-            Button(L("mobileKeepEditing"), role: .cancel) {}
-        } message: {
-            Text(L("mobileSelectionDiscardMessage"))
         }
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)

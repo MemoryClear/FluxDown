@@ -150,7 +150,7 @@ struct WebhookEditorSheet: View {
                         if isDirty { confirmDiscard = true } else { dismiss() }
                     }
                     .disabled(saving)
-                    .confirmationDialog(L("mobileWebhookDiscardTitle"), isPresented: $confirmDiscard, titleVisibility: .visible) {
+                    .alert(L("mobileWebhookDiscardTitle"), isPresented: $confirmDiscard) {
                         Button(L("mobileWebhookDiscard"), role: .destructive) { dismiss() }
                         Button(L("mobileWebhookKeepEditing"), role: .cancel) {}
                     }

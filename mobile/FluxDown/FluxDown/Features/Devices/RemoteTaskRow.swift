@@ -86,12 +86,13 @@ struct RemoteTaskRow: View {
                 Button(L("delete"), systemImage: FluxSymbol.delete, role: .destructive) { confirmingDelete = true }
             }
         }
-        .confirmationDialog(L("deleteTask"), isPresented: $confirmingDelete, titleVisibility: .visible) {
+        .alert(L("deleteTask"), isPresented: $confirmingDelete) {
             Button(L("deleteTask"), role: .destructive) { issue(.delete, false) }
             // 目标离线时无法让它删除文件，只能删记录：不提供「同时删除文件」。
             if targetOnline != false {
                 Button(L("deleteTaskAndFile"), role: .destructive) { issue(.delete, true) }
             }
+            Button(L("cancel"), role: .cancel) {}
         } message: {
             Text(displayName)
         }

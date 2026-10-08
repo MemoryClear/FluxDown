@@ -54,12 +54,12 @@ struct TaskMenuItems: View {
             }
         }
         Section {
-            Button(L("delete"), systemImage: FluxSymbol.delete, role: .destructive) { confirmDelete?([task]) }
+            Button(L("delete"), systemImage: FluxSymbol.delete, role: .destructive) { confirmDelete?.confirm([task]) }
         }
     }
 }
 
-// MARK: - 删除确认（锚定在触发视图）
+// MARK: - 删除确认
 
 /// 待确认的任务删除：保留文件 / 连同文件（PC 同两档）。
 nonisolated struct TaskDeleteRequest {
@@ -67,11 +67,11 @@ nonisolated struct TaskDeleteRequest {
     let onDone: (@MainActor () -> Void)?
 }
 
-/// 触发视图（行 / 菜单）向最近的 `taskDeleteHost()` 申请删除确认；确认框因此锚定在该视图上。
+/// 触发视图（行 / 菜单）向最近的 `taskDeleteHost()` 申请删除确认。
 struct TaskDeleteAction {
     let request: @MainActor ([DownloadTask], (@MainActor () -> Void)?) -> Void
 
-    func callAsFunction(_ tasks: [DownloadTask], onDone: (@MainActor () -> Void)? = nil) {
+    func confirm(_ tasks: [DownloadTask], onDone: (@MainActor () -> Void)? = nil) {
         request(tasks, onDone)
     }
 }
@@ -86,9 +86,9 @@ extension View {
         modifier(TaskActionDialogs(actions: actions))
     }
 
-    /// 任务删除确认框挂在本视图上（iOS 26 起确认框是锚定在挂载视图上的弹出框）：
-    /// 本视图子树内的 `TaskMenuItems` / 行滑动 / 行无障碍菜单经环境 `confirmTaskDelete` 申请，确认框指向本视图。
-    /// 须挂在**单个任务行 / 菜单按钮**上，而不是整页。
+    /// 任务删除确认 alert 挂在本视图上：
+    /// 本视图子树内的 `TaskMenuItems` / 行滑动 / 行无障碍菜单经环境 `confirmTaskDelete` 申请。
+    /// 挂在**单个任务行 / 菜单按钮**上。
     func taskDeleteHost() -> some View {
         modifier(TaskDeleteHost())
     }
@@ -117,10 +117,9 @@ private struct TaskDeleteDialog: ViewModifier {
     @Environment(TaskActions.self) private var actions
 
     func body(content: Content) -> some View {
-        content.confirmationDialog(
+        content.alert(
             request.map { $0.tasks.count == 1 ? L("deleteTask") : L("mobileDeleteNTitle", ["n": $0.tasks.count]) } ?? "",
             isPresented: Binding(get: { request != nil }, set: { if !$0 { request = nil } }),
-            titleVisibility: .visible,
             presenting: request
         ) { pending in
             let ids = pending.tasks.map(\.taskId)

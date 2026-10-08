@@ -323,9 +323,12 @@ struct AccountPage: View {
                 }
             }
             .disabled(readOnly || loggingOut)
-            // iOS 26 起确认框以弹出框锚定在挂载视图上：挂在触发按钮上，而不是整页（否则会指向页顶）。
-            .confirmationDialog(L("accountLogout"), isPresented: $confirmingLogout, titleVisibility: .visible) {
+            // 退出登录确认 alert 由触发按钮挂载。
+            .alert(L("accountLogoutConfirmTitle"), isPresented: $confirmingLogout) {
                 Button(L("accountLogout"), role: .destructive, action: logout)
+                Button(L("cancel"), role: .cancel) {}
+            } message: {
+                Text(L("accountLogoutConfirmMessage"))
             }
         }
     }

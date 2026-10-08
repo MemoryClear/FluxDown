@@ -62,7 +62,7 @@ struct SiteAuthSection: View {
                 isRunning: model.isClearing
             ) { confirmClear = true }
                 .disabled(readOnly || model.entries.isEmpty)
-                .confirmationDialog(L("settingsSiteAuthClearAll"), isPresented: $confirmClear, titleVisibility: .visible) {
+                .alert(L("settingsSiteAuthClearAll"), isPresented: $confirmClear) {
                     Button(L("settingsSiteAuthClearAll"), role: .destructive) { clearAll() }
                     Button(L("cancel"), role: .cancel) {}
                 } message: {

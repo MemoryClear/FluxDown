@@ -28,6 +28,8 @@ struct DownloadsListScreen: View {
     @State private var clearIds: [String] = []
     @State private var confirmingClear = false
     @State private var pendingGroupDelete: GroupDeleteRequest?
+    /// 多选底栏「删除」待确认的任务（确认 alert 由该按钮挂载）。
+    @State private var pendingSelectionDelete: TaskDeleteRequest?
     /// 待确认「忽略插件重试」的任务（`daemon.plugin.ignoreRetry`）。
     @State private var ignoreRetryTaskId: String?
 
@@ -54,7 +56,6 @@ struct DownloadsListScreen: View {
             .safeAreaBar(edge: .top, spacing: 0) {
                 DownloadsFilterBar(model: model)
             }
-            .groupDeleteConfirmation($pendingGroupDelete)
             .alert(L("taskIgnorePluginRetryTitle"), isPresented: Binding(
                 get: { ignoreRetryTaskId != nil },
                 set: { if !$0 { ignoreRetryTaskId = nil } }
@@ -176,6 +177,7 @@ struct DownloadsListScreen: View {
                 .environment(actions)
                 .environment(\.fluxAccent, accent)
         }
+        .taskDeleteHost()
     }
 
     // MARK: 分区头
@@ -261,6 +263,7 @@ struct DownloadsListScreen: View {
         .contextMenu {
             if let groupId { groupMenuItems(groupId, name: name) }
         }
+        .groupDeleteConfirmation($pendingGroupDelete, groupId: groupId)
     }
 
     /// 组动作：详情 · 全部暂停 / 继续 · 删除（各自确认）。
@@ -400,9 +403,10 @@ struct DownloadsListScreen: View {
             ToolbarSpacer(.flexible, placement: .bottomBar)
             ToolbarItem(placement: .bottomBar) {
                 Button(L("delete"), systemImage: FluxSymbol.delete, role: .destructive) {
-                    actions.confirmDelete(model.selectedTasks()) { model.isSelecting = false }
+                    pendingSelectionDelete = actions.deleteRequest(model.selectedTasks()) { model.isSelecting = false }
                 }
                 .disabled(model.selection.isEmpty)
+                .taskDeleteDialog($pendingSelectionDelete)
             }
         }
     }

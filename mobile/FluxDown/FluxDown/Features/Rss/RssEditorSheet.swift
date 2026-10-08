@@ -40,19 +40,6 @@ struct RssEditorSheet: View {
         .interactiveDismissDisabled(model.isDirty || model.saving)
         .presentationDetents([.large])
         .presentationSizing(.form)
-        .confirmationDialog(L("mobileRssDiscardTitle"), isPresented: $confirmDiscard, titleVisibility: .visible) {
-            Button(L("mobileDiscard"), role: .destructive) { dismiss() }
-            Button(L("mobileRssKeepEditing"), role: .cancel) {}
-        }
-        .confirmationDialog(
-            L("rssDeleteSource"),
-            isPresented: $confirmDelete,
-            titleVisibility: .visible
-        ) {
-            Button(L("rssDeleteSource"), role: .destructive) { delete() }
-        } message: {
-            Text(L("rssDeleteConfirmDesc", ["name": displayName]))
-        }
     }
 
     // MARK: 骨架
@@ -112,6 +99,10 @@ struct RssEditorSheet: View {
                 if model.isDirty { confirmDiscard = true } else { dismiss() }
             }
             .disabled(model.saving)
+            .alert(L("mobileRssDiscardTitle"), isPresented: $confirmDiscard) {
+                Button(L("mobileDiscard"), role: .destructive) { dismiss() }
+                Button(L("mobileRssKeepEditing"), role: .cancel) {}
+            }
         }
         ToolbarItem(placement: .confirmationAction) {
             if model.saving {
@@ -230,6 +221,15 @@ struct RssEditorSheet: View {
                 Section {
                     Button(L("rssDeleteSource"), role: .destructive) { confirmDelete = true }
                         .disabled(model.saving)
+                        .alert(
+                            L("rssDeleteSource"),
+                            isPresented: $confirmDelete
+                        ) {
+                            Button(L("rssDeleteSource"), role: .destructive) { delete() }
+                            Button(L("cancel"), role: .cancel) {}
+                        } message: {
+                            Text(L("rssDeleteConfirmDesc", ["name": displayName]))
+                        }
                 }
             }
         }

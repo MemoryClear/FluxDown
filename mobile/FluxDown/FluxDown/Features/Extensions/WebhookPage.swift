@@ -97,13 +97,12 @@ private struct WebhookContent: View {
                     onTest: { Task { await model.test(endpoint) } },
                     onDelete: { deleteTarget = endpoint }
                 )
-                .confirmationDialog(
+                .alert(
                     L("webhookRowDeleteConfirm"),
                     isPresented: Binding(
                         get: { deleteTarget?.id == endpoint.id },
                         set: { if !$0 { deleteTarget = nil } }
-                    ),
-                    titleVisibility: .visible
+                    )
                 ) {
                     Button(L("webhookRowDelete"), role: .destructive) { Task { await model.remove(endpoint) } }
                     Button(L("cancel"), role: .cancel) {}

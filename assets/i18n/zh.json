@@ -464,6 +464,8 @@
   "accountHeroSubtitle": "登录后即可使用配置同步等云功能；不登录则保持纯本地，不产生任何账户网络请求",
   "accountLogin": "登录",
   "accountLogout": "退出登录",
+  "accountLogoutConfirmTitle": "确定要退出登录吗？",
+  "accountLogoutConfirmMessage": "退出后本设备将停止云同步与多设备协同，已有下载任务不受影响。",
   "accountRegister": "注册",
   "accountOriginIdCopied": "Origin ID 已复制",
   "accountSecurityGroup": "账号与安全",

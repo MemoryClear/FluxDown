@@ -464,6 +464,8 @@
   "accountHeroSubtitle": "Sign in to use cloud features like settings sync; stay signed out to keep everything local with zero account requests",
   "accountLogin": "Sign in",
   "accountLogout": "Sign out",
+  "accountLogoutConfirmTitle": "Sign out of FluxDown?",
+  "accountLogoutConfirmMessage": "This device will stop cloud sync and multi-device features. Existing downloads are not affected.",
   "accountRegister": "Sign up",
   "accountOriginIdCopied": "Origin ID copied",
   "accountSecurityGroup": "Account & Security",

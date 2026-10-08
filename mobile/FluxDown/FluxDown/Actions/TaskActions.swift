@@ -3,8 +3,8 @@ import FluxUI
 import SwiftUI
 import UIKit
 
-/// 需要确认 / 输入的任务对话框（由根视图的 `.taskActionDialogs()` 统一呈现；均为居中 alert，不受锚点影响）。
-/// 删除确认不在此列：它是锚定在触发视图上的 `confirmationDialog`（见 `taskDeleteHost()`）。
+/// 需要确认 / 输入的任务对话框（由根视图的 `.taskActionDialogs()` 统一呈现）。
+/// 删除确认不在此列：它由触发视图挂载的 alert 承担（见 `taskDeleteHost()`）。
 nonisolated enum TaskDialog: Identifiable {
     case redownload(DownloadTask)
     case rename(DownloadTask)

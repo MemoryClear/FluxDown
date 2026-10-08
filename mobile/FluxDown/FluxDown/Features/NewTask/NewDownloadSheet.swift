@@ -105,6 +105,12 @@ private struct NewDownloadContent: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(L("cancel"), systemImage: FluxSymbol.close, action: requestClose)
                         .disabled(form.submitting)
+                        .alert(L("mobileDiscardTitle"), isPresented: $showDiscard) {
+                            Button(L("mobileDiscard"), role: .destructive, action: close)
+                            Button(L("mobileKeepEditing"), role: .cancel) {}
+                        } message: {
+                            Text(L("mobileDiscardMessage"))
+                        }
                 }
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
@@ -135,12 +141,6 @@ private struct NewDownloadContent: View {
         }
         .fluxAnimation(.snappy, value: dropTargeted)
         .interactiveDismissDisabled(form.isDirty || form.submitting)
-        .confirmationDialog(L("mobileDiscardTitle"), isPresented: $showDiscard, titleVisibility: .visible) {
-            Button(L("mobileDiscard"), role: .destructive, action: close)
-            Button(L("mobileKeepEditing"), role: .cancel) {}
-        } message: {
-            Text(L("mobileDiscardMessage"))
-        }
         .fileImporter(
             isPresented: $showImporter,
             allowedContentTypes: importerKind == .torrent ? [TorrentImport.contentType] : [.plainText, .text, .data],

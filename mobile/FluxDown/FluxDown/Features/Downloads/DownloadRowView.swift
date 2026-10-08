@@ -140,7 +140,7 @@ struct DownloadRowView: View, Equatable {
             Button(L(item.boosted ? "cancelBoost" : "boostDownload")) { actions.boost(task, boosted: item.boosted) }
         }
         Button(L("copyUrl")) { actions.copyLink(task) }
-        Button(L("delete")) { confirmDelete?([task]) }
+        Button(L("delete")) { confirmDelete?.confirm([task]) }
     }
 }
 

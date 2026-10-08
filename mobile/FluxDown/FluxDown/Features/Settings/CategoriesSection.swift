@@ -168,8 +168,9 @@ struct CategoriesSection: View {
         SettingsActionRow(title: L("resetBuiltinCategories"), systemImage: "arrow.counterclockwise", role: .destructive) {
             confirmReset = true
         }
-        .confirmationDialog(L("resetBuiltinCategories"), isPresented: $confirmReset, titleVisibility: .visible) {
+        .alert(L("resetBuiltinCategories"), isPresented: $confirmReset) {
             Button(L("resetBuiltinCategories"), role: .destructive) { store.resetBuiltin() }
+            Button(L("cancel"), role: .cancel) {}
         } message: {
             Text(L("resetAllCategoriesConfirm"))
         }

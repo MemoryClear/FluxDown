@@ -354,10 +354,9 @@ private struct ComponentCardBody: View {
                 if hasManaged {
                     Button(L("componentsUninstallButton"), role: .destructive) { confirmUninstall = true }
                         .disabled(busy)
-                        .confirmationDialog(
+                        .alert(
                             L("componentsUninstallConfirmTitle", ["name": title]),
-                            isPresented: $confirmUninstall,
-                            titleVisibility: .visible
+                            isPresented: $confirmUninstall
                         ) {
                             Button(L("componentsUninstallButton"), role: .destructive) { Task { await controller.uninstall() } }
                             Button(L("cancel"), role: .cancel) {}

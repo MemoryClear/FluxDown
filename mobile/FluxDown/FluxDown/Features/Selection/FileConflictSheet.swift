@@ -115,14 +115,6 @@ private struct FileConflictList: View {
         .listStyle(.insetGrouped)
         .navigationTitle(L("fileConflictTitleMany", ["count": requests.count]))
         .navigationBarTitleDisplayMode(.inline)
-        .confirmationDialog(L("fileConflictOverwriteAll"), isPresented: $confirmOverwriteAll, titleVisibility: .visible) {
-            Button(L("fileConflictOverwriteAll"), role: .destructive) {
-                resolver.resolveAll(requests, outcome: .fileExists(action: .overwrite))
-            }
-            Button(L("cancel"), role: .cancel) {}
-        } message: {
-            Text(L("fileConflictOverwriteHint"))
-        }
         .toolbar {
             ToolbarItem(placement: .bottomBar) {
                 Menu {
@@ -138,6 +130,14 @@ private struct FileConflictList: View {
                     }
                 } label: {
                     Label(L("mobileSelectionToolbar"), systemImage: "ellipsis")
+                }
+                .alert(L("fileConflictOverwriteAll"), isPresented: $confirmOverwriteAll) {
+                    Button(L("fileConflictOverwriteAll"), role: .destructive) {
+                        resolver.resolveAll(requests, outcome: .fileExists(action: .overwrite))
+                    }
+                    Button(L("cancel"), role: .cancel) {}
+                } message: {
+                    Text(L("fileConflictOverwriteHint"))
                 }
             }
             ToolbarSpacer(.flexible, placement: .bottomBar)

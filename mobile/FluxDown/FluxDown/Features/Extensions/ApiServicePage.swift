@@ -212,7 +212,7 @@ private struct ApiServiceContent: View {
                 Button(role: .destructive) { confirmForget = true } label: {
                     Label(L("mobileApiForgetHost"), systemImage: "rectangle.portrait.and.arrow.right")
                 }
-                .confirmationDialog(L("mobileApiForgetHost"), isPresented: $confirmForget, titleVisibility: .visible) {
+                .alert(L("mobileApiForgetHost"), isPresented: $confirmForget) {
                     Button(L("mobileApiForgetHost"), role: .destructive) { Task { await model.forgetHost() } }
                     Button(L("cancel"), role: .cancel) {}
                 } message: {
@@ -487,7 +487,7 @@ private struct TokenSection: View {
                 Label(L("apiServiceTokenGenerate"), systemImage: FluxSymbol.syncing)
             }
             .disabled(readOnly || busy)
-            .confirmationDialog(L("apiServiceTokenGenerate"), isPresented: $confirmRegenerate, titleVisibility: .visible) {
+            .alert(L("apiServiceTokenGenerate"), isPresented: $confirmRegenerate) {
                 Button(L("apiServiceTokenGenerate")) { Task { await model.regenerate() } }
                 Button(L("cancel"), role: .cancel) {}
             } message: {

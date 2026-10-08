@@ -231,7 +231,7 @@ private struct CloudDeviceRenameAlert: ViewModifier {
 
 }
 
-/// 删除确认框：挂在触发它的行 / 按钮上（iOS 26 的确认框锚定在挂载视图上，挂整页会指向页顶）。
+/// 删除确认 alert：挂在触发它的行 / 按钮上。
 private struct CloudDeviceDeleteConfirmation: ViewModifier {
     @Environment(AppContainer.self) private var container
     @Environment(DevicesModel.self) private var model
@@ -241,12 +241,12 @@ private struct CloudDeviceDeleteConfirmation: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .confirmationDialog(
+            .alert(
                 L("accountDeviceDeleteConfirmTitle"),
-                isPresented: Binding(get: { deleting?.id == record.id }, set: { if !$0 { deleting = nil } }),
-                titleVisibility: .visible
+                isPresented: Binding(get: { deleting?.id == record.id }, set: { if !$0 { deleting = nil } })
             ) {
                 Button(L("accountDeviceDeleteAction"), role: .destructive) { performDelete(record) }
+                Button(L("cancel"), role: .cancel) {}
             } message: {
                 Text(deleteMessage(record))
             }
