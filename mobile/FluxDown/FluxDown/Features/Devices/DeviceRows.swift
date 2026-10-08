@@ -128,11 +128,13 @@ extension View {
         renaming: Binding<CloudDeviceRecord?>,
         deleting: Binding<CloudDeviceRecord?>
     ) -> some View {
+        // 删除只弹确认框：不用 `role: .destructive`（会让 List 先行移除该行而数据未变，导致行数不一致崩溃）。
         swipeActions(edge: .trailing, allowsFullSwipe: false) {
             if enabled {
-                Button(L("accountDeviceDeleteAction"), systemImage: FluxSymbol.delete, role: .destructive) {
+                Button(L("accountDeviceDeleteAction"), systemImage: FluxSymbol.delete) {
                     deleting.wrappedValue = record
                 }
+                .tint(Color.fdStatusFailed)
                 Button(L("renameTask"), systemImage: FluxSymbol.edit) {
                     renaming.wrappedValue = record
                 }

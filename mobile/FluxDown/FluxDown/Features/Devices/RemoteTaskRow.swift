@@ -55,9 +55,12 @@ struct RemoteTaskRow: View {
             trailing
         }
         .padding(.vertical, 2)
+        // 滑动删除只弹确认框：不能用 `role: .destructive`，否则 List 会立即动画移除该行，
+        // 数据源仍有这一行 → UICollectionView 行数不一致崩溃（同本地任务行，用红色 tint 代替）。
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             if allows(.delete) {
-                Button(L("delete"), systemImage: FluxSymbol.delete, role: .destructive) { confirmingDelete = true }
+                Button(L("delete"), systemImage: FluxSymbol.delete) { confirmingDelete = true }
+                    .tint(Color.fdStatusFailed)
             }
             if allows(.cancel) {
                 Button(L("cancel"), systemImage: "xmark.circle") { issue(.cancel, false) }

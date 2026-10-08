@@ -244,8 +244,10 @@ private struct WebhookEndpointRow: View {
             .disabled(readOnly)
             if testing { ProgressView() }
         }
+        // 删除只弹确认框：不用 `role: .destructive`（会让 List 先行移除该行而数据未变，导致行数不一致崩溃）。
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            Button(L("webhookRowDelete"), systemImage: FluxSymbol.delete, role: .destructive, action: onDelete)
+            Button(L("webhookRowDelete"), systemImage: FluxSymbol.delete, action: onDelete)
+                .tint(Color.fdStatusFailed)
                 .disabled(readOnly)
         }
         .swipeActions(edge: .leading, allowsFullSwipe: false) {

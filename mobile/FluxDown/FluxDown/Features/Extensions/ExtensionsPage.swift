@@ -142,8 +142,10 @@ private struct ExtensionsContent: View {
                         yanked: PluginMarket.installedVersionYanked(model.marketEntries, plugin: plugin)
                     )
                 }
+                // 卸载只弹确认框：不用 `role: .destructive`（会让 List 先行移除该行而数据未变，导致行数不一致崩溃）。
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                    Button(L("pluginUninstallTooltip"), systemImage: FluxSymbol.delete, role: .destructive) { uninstallTarget = plugin }
+                    Button(L("pluginUninstallTooltip"), systemImage: FluxSymbol.delete) { uninstallTarget = plugin }
+                        .tint(Color.fdStatusFailed)
                         .disabled(readOnly)
                     if !plugin.loadFailed, !plugin.settings.isEmpty {
                         Button(L("pluginSettingsTooltip"), systemImage: "gearshape") { model.sheet = .settings(plugin.identity) }

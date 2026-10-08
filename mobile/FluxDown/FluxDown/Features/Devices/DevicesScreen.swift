@@ -238,8 +238,10 @@ private struct DevicesContent: View {
 
         if case let .remote(_, _, endpoint) = ref {
             row
+                // 删除只弹确认框：不用 `role: .destructive`（会让 List 先行移除该行而数据未变，导致行数不一致崩溃）。
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                    Button(L("mobileHostRemoveConfirm"), systemImage: FluxSymbol.delete, role: .destructive) { pendingRemoval = ref }
+                    Button(L("mobileHostRemoveConfirm"), systemImage: FluxSymbol.delete) { pendingRemoval = ref }
+                        .tint(Color.fdStatusFailed)
                 }
                 .contextMenu {
                     Button(L("mobileDevicesSwitchHost"), systemImage: "arrow.left.arrow.right") { switchTo(ref) }
@@ -428,11 +430,13 @@ private struct DevicesContent: View {
                 NavigationLink(value: DevicesRoute.linkDevice(fingerprint: device.fingerprint)) {
                     LinkDeviceRow(name: device.name, platform: device.platform, online: device.online)
                 }
+                // 解除只弹确认框：不用 `role: .destructive`（会让 List 先行移除该行而数据未变，导致行数不一致崩溃）。
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                     if !readOnly {
-                        Button(L("linkedDeviceRemove"), systemImage: "minus.circle", role: .destructive) {
+                        Button(L("linkedDeviceRemove"), systemImage: "minus.circle") {
                             pendingUnpair = device
                         }
+                        .tint(Color.fdStatusFailed)
                     }
                 }
                 .contextMenu {
