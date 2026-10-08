@@ -153,6 +153,7 @@ pub async fn start_embedded(
         linked_devices: crate::link::public_devices(&state),
         remote_tasks: state.remote_tasks.clone(),
         shell: crate::shell::shell_status(availability, &state.preferences),
+        update: crate::update::initial_status(&crate::update::unsupported_target()),
         ..AgentSnapshot::default()
     };
     let events = AgentEventHub::new(initial);
@@ -249,8 +250,9 @@ pub async fn start_embedded(
         api_switches.clone(),
         api_token.clone(),
     ));
-    let update = Arc::new(crate::update::UpdateService::new(
-        fluxdown_protocol::APP_VERSION,
+    let update = Arc::new(crate::update::UpdateService::unsupported(
+        events.clone(),
+        store.data_dir().to_path_buf(),
     ));
     let mut gateway = GatewayService::new(
         daemon.clone(),

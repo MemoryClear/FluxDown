@@ -16,9 +16,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use fluxdown_protocol::method;
 use fluxdown_protocol::{
-    ApplicationErrorCode, CLOSE_REASON_SERVICE_QUIT, ClientHello, EventFrame, RpcErrorData,
-    RpcErrorObject, RpcNotification, RpcRequest, RpcResponse, ServiceHello, ServiceRole,
-    validate_first_request,
+    ApplicationErrorCode, ClientHello, EventFrame, RpcErrorData, RpcErrorObject, RpcNotification,
+    RpcRequest, RpcResponse, ServiceHello, ServiceRole, validate_first_request,
 };
 use futures_util::StreamExt;
 use reqwest::Method;
@@ -567,6 +566,19 @@ impl GatewayService {
                 diagnostics_value(self.diagnostics.export_logs(&params).await).and_then(to_value)
             }
             method::AGENT_UPDATE_CHECK => self.update_check(params_or_empty(request.params)).await,
+            method::AGENT_UPDATE_DOWNLOAD => self
+                .update
+                .download()
+                .await
+                .map_err(update_error)
+                .and_then(to_value),
+            method::AGENT_UPDATE_INSTALL => self
+                .update
+                .install()
+                .await
+                .map_err(update_error)
+                .and_then(to_value),
+            method::AGENT_UPDATE_CANCEL => to_value(self.update.cancel()),
             name if name.starts_with("daemon.") => {
                 self.daemon
                     .call::<serde_json::Value, serde_json::Value>(name, request.params)
@@ -1135,16 +1147,11 @@ impl GatewayService {
                 .unwrap_or("stable")
                 .to_owned(),
         };
-        match self.update.check(&channel).await {
-            Ok(result) => to_value(result),
-            Err(UpdateError::InvalidChannel(_)) => Err(invalid_field("channel")),
-            Err(UpdateError::Http(_) | UpdateError::Status(_)) => {
-                Err(RpcErrorData::new(ApplicationErrorCode::Unavailable, true))
-            }
-            Err(UpdateError::Client(_) | UpdateError::Decode(_)) => {
-                Err(RpcErrorData::new(ApplicationErrorCode::Internal, false))
-            }
-        }
+        self.update
+            .check(&channel)
+            .await
+            .map_err(update_error)
+            .and_then(to_value)
     }
 
     async fn platform_task(
@@ -1210,6 +1217,20 @@ fn pagination(params: &serde_json::Value) -> Result<(u32, u32), RpcErrorData> {
         .filter(|value| (1..=100).contains(value))
         .ok_or_else(|| invalid_field("pageSize"))?;
     Ok((page, page_size))
+}
+
+fn update_error(error: UpdateError) -> RpcErrorData {
+    match error {
+        UpdateError::InvalidChannel(_) => invalid_field("channel"),
+        UpdateError::Http(_) | UpdateError::Status(_) => {
+            RpcErrorData::new(ApplicationErrorCode::Unavailable, true)
+        }
+        UpdateError::Client(_) | UpdateError::Decode(_) => {
+            RpcErrorData::new(ApplicationErrorCode::Internal, false)
+        }
+        UpdateError::NoUpdate => RpcErrorData::new(ApplicationErrorCode::Conflict, false),
+        UpdateError::Manual(_) => RpcErrorData::new(ApplicationErrorCode::Unsupported, false),
+    }
 }
 
 fn invalid_field(field: &str) -> RpcErrorData {
@@ -1655,12 +1676,9 @@ async fn run_socket(
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
-                // 完全退出时客户端必须停止重连 / 重拉；仅 agent 退出（SIGTERM）时允许重拉。
-                let reason = if service.local.lifecycle.quit_requested() {
-                    CLOSE_REASON_SERVICE_QUIT
-                } else {
-                    "agent-shutdown"
-                };
+                // 完全退出时客户端必须停止重连 / 重拉；仅 agent 退出（SIGTERM）时允许重拉；
+                // headless 服务器为更新重启时浏览器保持重连（见 `Lifecycle::close_reason`）。
+                let reason = service.local.lifecycle.close_reason();
                 if let Err(error) = socket.send(Message::Close(Some(CloseFrame {
                     code: 1001,
                     reason: reason.into(),
@@ -2465,8 +2483,9 @@ mod tests {
                 api_switches.clone(),
                 api_token.clone(),
             ));
-            let update = Arc::new(crate::update::UpdateService::new(
-                fluxdown_protocol::APP_VERSION,
+            let update = Arc::new(crate::update::UpdateService::unsupported(
+                events.clone(),
+                dir.join("update-data"),
             ));
             let link = crate::link::LinkService::new(crate::link::LinkServiceParts {
                 events: events.clone(),

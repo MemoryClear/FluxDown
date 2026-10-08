@@ -155,6 +155,7 @@ pub(crate) async fn run_with(
     // 不等 daemon 就绪就开 Gateway：首个快照先带偏好 / 外壳状态（`daemon_connected=false`），
     // 界面据此立即决定主题、语言与启动时是否只驻留托盘；daemon 连上后由投影任务替换
     // daemon 快照并发布 `DaemonConnectionChanged(true)`，与运行期断线重连同一路径。
+    let update_target = crate::update::install::detect(server.is_some());
     let initial = AgentSnapshot {
         daemon_connected: false,
         session: state
@@ -167,6 +168,7 @@ pub(crate) async fn run_with(
         linked_devices: crate::link::public_devices(&state),
         remote_tasks: state.remote_tasks.clone(),
         shell: crate::shell::shell_status(host.availability, &state.preferences),
+        update: crate::update::initial_status(&update_target),
         ..AgentSnapshot::default()
     };
     let events = AgentEventHub::new(initial);
@@ -342,8 +344,17 @@ pub(crate) async fn run_with(
         diagnostics.with_desktop_checks(notifier.clone())
     });
     let update = Arc::new(crate::update::UpdateService::new(
-        fluxdown_protocol::APP_VERSION,
+        crate::update::UpdateParts {
+            events: events.clone(),
+            data_dir: store.data_dir().to_path_buf(),
+            target: update_target,
+            request_restart: {
+                let lifecycle = lifecycle.clone();
+                Box::new(move || lifecycle.request_restart())
+            },
+        },
     ));
+    update.start(cancel.clone(), true);
     let cloud = Arc::new(cloud_api);
     let gateway_service = Arc::new(
         GatewayService::new(
