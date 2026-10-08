@@ -24,6 +24,7 @@ import com.fluxdown.core.protocol.FilterBarVisibility
 import com.fluxdown.core.protocol.preferences
 import com.fluxdown.core.format.Format
 import com.fluxdown.core.format.Measure
+import com.fluxdown.core.model.FileConflicts
 import com.fluxdown.core.model.TaskStatus
 import com.fluxdown.core.store.Connection
 import com.fluxdown.core.store.HostState
@@ -102,6 +103,10 @@ class DownloadsView internal constructor(private val container: AppContainer) {
     var connecting by mutableStateOf(true)
         private set
 
+    /** 有待选 fileExists 的任务（行「待确认」角标；每个行只读自己 id 的成员关系，集合变化才重组对应行）。 */
+    var conflictTaskIds by mutableStateOf<Set<String>>(emptySet())
+        private set
+
     internal val wave = WaveBuffer()
 
     /** 最近一次指针活动（动态排序键重排节流用）。 */
@@ -163,6 +168,9 @@ class DownloadsView internal constructor(private val container: AppContainer) {
                 if (!v.queues && filter.queueId != null) setQueue(null)
                 if (!v.categories && filter.categoryId != null) setCategory(null)
             }
+        }
+        launch {
+            container.store.state.map { FileConflicts.taskIds(it.selections) }.distinctUntilChanged().collect { conflictTaskIds = it }
         }
         launch {
             container.store.state.map { it.speedHistory }.distinctUntilChanged().collect { wave.update(it) }

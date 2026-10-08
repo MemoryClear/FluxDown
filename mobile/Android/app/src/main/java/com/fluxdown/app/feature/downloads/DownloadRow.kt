@@ -135,6 +135,15 @@ internal fun DownloadRow(
         else -> TaskRowSelection.Unselected
     }
 
+    // 待选 fileExists：只读自己 id 的成员关系，集合变化时仅对应行重组
+    val conflict by remember(id, view) { derivedStateOf { id in view.conflictTaskIds } }
+    val openConflicts = remember(nav, haptics) {
+        {
+            haptics.tick()
+            nav.reopenFileConflicts()
+        }
+    }
+
     val paned = FluxTheme.windowClass != FluxWindowClass.Compact
     val inPane = remember(id, nav, paned) { derivedStateOf { paned && (nav.top as? Route.TaskDetail)?.taskId == id } }
 
@@ -165,10 +174,11 @@ internal fun DownloadRow(
     }
 
     val customActions = if (a11y) {
-        remember(item, text, actions) {
-            actions.menuItems(item.task, item.boosted) { nav.enterSelection(id) }
+        remember(item, text, actions, conflict) {
+            val menu = actions.menuItems(item.task, item.boosted) { nav.enterSelection(id) }
                 .filterIsInstance<FluxMenuItem.Action>()
                 .map { a -> CustomAccessibilityAction(a.label) { a.onClick(); true } }
+            if (conflict) menu + CustomAccessibilityAction(text.conflictTooltip) { nav.reopenFileConflicts(); true } else menu
         }
     } else {
         emptyList()
@@ -241,6 +251,8 @@ internal fun DownloadRow(
                     horizontalPadding = hPad,
                     onClickLabel = text.openDetails,
                     customActions = customActions,
+                    badge = if (conflict) text.conflictPending else null,
+                    onBadgeClick = if (conflict) openConflicts else null,
                 )
             }
         }

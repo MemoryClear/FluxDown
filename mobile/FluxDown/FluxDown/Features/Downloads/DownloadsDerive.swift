@@ -34,6 +34,7 @@ struct DownloadsDeriver {
         let up: Int64
         let queuePosition: Int
         let boosted: Bool
+        let awaitingDecision: Bool
         let category: TaskCategory?
         let queue: TaskQueue?
         let item: TaskItem
@@ -70,9 +71,12 @@ struct DownloadsDeriver {
         for queue in s.queues { queuesById[normalizedQueueId(queue.queueId)] = queue }
 
         // 1. 行模型（输入未变化的复用同一值）
+        let conflictTasks = Set(s.selections.fileConflicts.map(\.taskId))
         var all: [TaskItem] = []
         all.reserveCapacity(s.tasks.count)
-        for task in s.tasks { all.append(item(for: task, state: s, queuesById: queuesById)) }
+        for task in s.tasks {
+            all.append(item(for: task, state: s, queuesById: queuesById, awaitingDecision: conflictTasks.contains(task.taskId)))
+        }
         if entries.count > all.count {
             let ids = Set(all.map(\.id))
             entries = entries.filter { ids.contains($0.key) }
@@ -220,7 +224,9 @@ struct DownloadsDeriver {
 
     // MARK: 行模型
 
-    private mutating func item(for task: DownloadTask, state s: HostState, queuesById: [String: TaskQueue]) -> TaskItem {
+    private mutating func item(
+        for task: DownloadTask, state s: HostState, queuesById: [String: TaskQueue], awaitingDecision: Bool
+    ) -> TaskItem {
         let speed = s.speeds[task.taskId]
         let down = speed?.down ?? 0
         let up = speed?.up ?? 0
@@ -232,7 +238,7 @@ struct DownloadsDeriver {
 
         if let previous = entries[task.taskId],
            previous.task == task, previous.runtime == runtime, previous.down == down, previous.up == up,
-           previous.queuePosition == queuePosition, previous.boosted == boosted,
+           previous.queuePosition == queuePosition, previous.boosted == boosted, previous.awaitingDecision == awaitingDecision,
            previous.category == category, previous.queue == queue {
             return previous.item
         }
@@ -246,6 +252,7 @@ struct DownloadsDeriver {
             speedUp: up,
             queuePosition: queuePosition,
             boosted: boosted,
+            awaitingDecision: awaitingDecision,
             category: category,
             queue: queue,
             site: Self.site(of: task),
@@ -260,7 +267,7 @@ struct DownloadsDeriver {
         )
         entries[task.taskId] = Entry(
             task: task, runtime: runtime, down: down, up: up, queuePosition: queuePosition,
-            boosted: boosted, category: category, queue: queue, item: built
+            boosted: boosted, awaitingDecision: awaitingDecision, category: category, queue: queue, item: built
         )
         return built
     }

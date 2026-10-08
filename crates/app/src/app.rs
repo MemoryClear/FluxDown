@@ -354,6 +354,7 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         // 引擎选择请求窗口 / 外部捕获确认（并入新建下载窗口）：跟随会话事件独立开关，
         // 不依赖主窗口存在。
         crate::windows::selection::install(cx);
+        crate::windows::file_conflict::install(cx);
         crate::plugin_notices::install(cx);
         crate::update_notices::install(cx);
         if launch.after_update {

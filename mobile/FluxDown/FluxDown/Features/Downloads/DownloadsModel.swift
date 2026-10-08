@@ -98,6 +98,8 @@ nonisolated struct TaskItem: Identifiable, Equatable {
     /// >0 → 「排队 #n」。
     let queuePosition: Int
     let boosted: Bool
+    /// 有待答的「文件已存在」询问（任务在等用户决定，行上显示「待确认」角标）。
+    let awaitingDecision: Bool
     let category: TaskCategory?
     let queue: TaskQueue?
     /// 来源站点（去 `www.` 与端口）；BT / eD2K 哨兵无 host → 空串。

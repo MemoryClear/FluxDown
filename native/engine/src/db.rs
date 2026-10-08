@@ -1067,6 +1067,10 @@ impl Db {
         // 时已按「全部文件」写 bt_selected_files（既有三态语义，见 create_task）。
         self.add_column_if_missing("tasks", "unattended", "INTEGER NOT NULL DEFAULT 0")
             .await?;
+        // 文件已存在询问的逐任务决定（'' / rename / overwrite / skip）：
+        // 绑定「询问时的文件名」语义由 manager 保证；重命名/改目录/重新下载时清空。
+        self.add_column_if_missing("tasks", "exists_decision", "TEXT NOT NULL DEFAULT ''")
+            .await?;
         // BT 做种：上传量累计 / 完成时基线 / 做种状态机 / 起始时间
         // （见 bt_seeding.rs）。旧库缺列时所有做种写库与 TASK_COLUMNS
         // 查询都会直接报 "no such column"，必须幂等补齐。
@@ -3746,6 +3750,28 @@ impl Db {
         Ok(row
             .map(|r| r.try_get::<i32, _>("unattended").unwrap_or(0) != 0)
             .unwrap_or(false))
+    }
+
+    /// 读取逐任务「文件已存在」决定（'' / rename / overwrite / skip）；任务不存在按 '' 处理。
+    pub async fn get_exists_decision(&self, task_id: &str) -> Result<String, DbError> {
+        let row = sqlx::query("SELECT exists_decision FROM tasks WHERE id = $1")
+            .bind(task_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        match row {
+            Some(r) => Ok(r.try_get::<String, _>("exists_decision")?),
+            None => Ok(String::new()),
+        }
+    }
+
+    /// 写入逐任务「文件已存在」决定；空串 = 清除。
+    pub async fn set_exists_decision(&self, task_id: &str, decision: &str) -> Result<(), DbError> {
+        sqlx::query("UPDATE tasks SET exists_decision = $1 WHERE id = $2")
+            .bind(decision)
+            .bind(task_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// 组内成员任务 ID，按启动顺序排列（`queue_order` → `created_at`）。

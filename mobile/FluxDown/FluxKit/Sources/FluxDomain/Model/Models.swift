@@ -322,6 +322,7 @@ public enum SelectionKind: Sendable, Hashable {
     case hls([HlsOption])
     case bt([BtFile])
     case variant([VariantOption])
+    case fileExists(FileConflict)
 }
 
 public struct HlsOption: Sendable, Hashable {
@@ -382,6 +383,7 @@ public enum SelectionOutcome: Sendable, Hashable {
     case hls(index: Int32)
     case bt(indices: [Int32])
     case variant(index: Int32)
+    case fileExists(action: FileExistsAction)
     case cancelled
 }
 

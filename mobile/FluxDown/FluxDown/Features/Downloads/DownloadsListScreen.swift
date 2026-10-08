@@ -289,7 +289,7 @@ struct DownloadsListScreen: View {
     private var bannerRows: some View {
         let chrome = model.chrome
         let pending = chrome.pendingSelection.flatMap { request in
-            container.router.sheet == .selection(requestId: request.requestId) ? nil : request
+            container.router.sheet == request.route ? nil : request
         }
         if chrome.showsOfflineBanner || pending != nil {
             Section {
@@ -314,13 +314,14 @@ struct DownloadsListScreen: View {
     private func selectionBanner(_ request: PendingSelection) -> some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             let remaining = max(0, Int((Double(request.deadlineUnixMs) / 1000 - context.date.timeIntervalSince1970).rounded(.up)))
-            let title = request.taskName.isEmpty ? L(request.titleKey) : L(request.titleKey) + " · " + request.taskName
+            let heading = request.titleCount.map { L(request.titleKey, ["count": $0]) } ?? L(request.titleKey)
+            let title = request.taskName.isEmpty ? heading : heading + " · " + request.taskName
             Banner(
-                text: title + "\n" + L("selectionAutoDefaultIn", ["seconds": remaining]),
+                text: title + "\n" + L(request.countdownKey, ["seconds": remaining]),
                 tone: .info,
                 systemImage: "checklist",
                 action: BannerAction(title: L("mobileMenuSelect")) {
-                    container.router.sheet = .selection(requestId: request.requestId)
+                    container.router.sheet = request.route
                 }
             )
             .monospacedDigit()

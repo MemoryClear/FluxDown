@@ -111,6 +111,11 @@ final class TaskActions {
         container.router.sheet = .moveToQueue(ids)
     }
 
+    /// 重新打开「文件已存在」对话框（任务行「待确认」角标）。
+    func openFileConflicts() {
+        container.router.sheet = .fileConflicts
+    }
+
     func moveToQueueNow(_ ids: [String], queueId: String, queueName: String) {
         run(onSuccess: { [toasts] in
             toasts.show(text: L("mobileMovedToQueueNamed", ["name": queueName]), tone: .success, systemImage: FluxSymbol.done)

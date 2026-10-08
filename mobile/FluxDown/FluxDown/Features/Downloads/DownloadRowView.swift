@@ -90,9 +90,17 @@ struct DownloadRowView: View, Equatable {
                 .lineLimit(1)
                 .truncationMode(.middle)
             HStack(spacing: 6) {
-                Text(status.text)
-                    .foregroundStyle(status.tone.color(accent: accent))
-                    .lineLimit(1)
+                if item.awaitingDecision {
+                    // 点角标重新打开「文件已存在」对话框（点行其余部分仍进详情）。
+                    Button { actions.openFileConflicts() } label: {
+                        StatusBadge(text: status.text, tone: .warning, systemImage: FluxSymbol.warning)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Text(status.text)
+                        .foregroundStyle(status.tone.color(accent: accent))
+                        .lineLimit(1)
+                }
                 Spacer(minLength: 0)
                 if let percent {
                     Text(percent).foregroundStyle(.secondary)

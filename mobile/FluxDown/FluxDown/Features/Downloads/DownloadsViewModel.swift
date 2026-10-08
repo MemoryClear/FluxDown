@@ -17,11 +17,47 @@ nonisolated struct DownloadsChrome: Equatable {
 }
 
 nonisolated struct PendingSelection: Equatable {
-    let requestId: String
-    /// 标题 i18n 键（BT 文件 / HLS 画质 / 插件规格）。
+    /// 「选择」按钮打开的 Sheet：BT / HLS / 插件规格各自一个请求，文件已存在聚合为 `.fileConflicts`。
+    let route: SheetRoute
+    /// 标题 i18n 键（BT 文件 / HLS 画质 / 插件规格 / 文件已存在）。
     let titleKey: String
+    /// 标题占位符 `{count}`（仅「N 个文件已存在」）。
+    let titleCount: Int?
     let taskName: String
+    /// 倒计时文案键（占位符 `{seconds}`）：默认选择 / 自动重命名。
+    let countdownKey: String
     let deadlineUnixMs: Int64
+
+    /// 横幅对应队首请求；队首是「文件已存在」时聚合全部同类请求（最早的到期时间）。
+    static func make(_ selections: [SelectionRequest], taskName: (String) -> String?) -> PendingSelection? {
+        guard let request = selections.first else { return nil }
+        func plain(_ titleKey: String) -> PendingSelection {
+            PendingSelection(
+                route: .selection(requestId: request.requestId),
+                titleKey: titleKey,
+                titleCount: nil,
+                taskName: taskName(request.taskId) ?? "",
+                countdownKey: "selectionAutoDefaultIn",
+                deadlineUnixMs: request.deadlineUnixMs
+            )
+        }
+        switch request.kind {
+        case .bt: return plain("btFileSelectTitle")
+        case .hls: return plain("hlsQualityTitle")
+        case .variant: return plain("resolveVariantTitle")
+        case let .fileExists(conflict):
+            let conflicts = selections.fileConflicts
+            let many = conflicts.count > 1
+            return PendingSelection(
+                route: .fileConflicts,
+                titleKey: many ? "fileConflictTitleMany" : "fileConflictTitle",
+                titleCount: many ? conflicts.count : nil,
+                taskName: many ? "" : conflict.fileName,
+                countdownKey: "fileConflictAutoRenameIn",
+                deadlineUnixMs: conflicts.map(\.deadlineUnixMs).min() ?? request.deadlineUnixMs
+            )
+        }
+    }
 }
 
 /// 多选的批量能力：继续 / 暂停 / 移动 各自的可用性（Resume / Pause 取「存在」）。
@@ -169,20 +205,7 @@ final class DownloadsModel {
         case .stale: .stale
         case .failed: .failed
         }
-        var pending: PendingSelection?
-        if let request = state.selections.first {
-            let titleKey = switch request.kind {
-            case .bt: "btFileSelectTitle"
-            case .hls: "hlsQualityTitle"
-            case .variant: "resolveVariantTitle"
-            }
-            pending = PendingSelection(
-                requestId: request.requestId,
-                titleKey: titleKey,
-                taskName: state.task(request.taskId)?.fileName ?? "",
-                deadlineUnixMs: request.deadlineUnixMs
-            )
-        }
+        let pending = PendingSelection.make(state.selections) { state.task($0)?.fileName }
         return DownloadsChrome(link: link, diskFree: state.stats.diskFreeBytes, pendingSelection: pending)
     }
 

@@ -233,12 +233,56 @@ pub struct VariantOptionDto {
     pub total_bytes: i64,
 }
 
+/// `FileExistsAction`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum FileExistsActionDto {
+    Rename,
+    Overwrite,
+    Skip,
+}
+
+impl From<proto::FileExistsAction> for FileExistsActionDto {
+    fn from(action: proto::FileExistsAction) -> Self {
+        match action {
+            proto::FileExistsAction::Rename => Self::Rename,
+            proto::FileExistsAction::Overwrite => Self::Overwrite,
+            proto::FileExistsAction::Skip => Self::Skip,
+        }
+    }
+}
+
+impl From<FileExistsActionDto> for proto::FileExistsAction {
+    fn from(action: FileExistsActionDto) -> Self {
+        match action {
+            FileExistsActionDto::Rename => Self::Rename,
+            FileExistsActionDto::Overwrite => Self::Overwrite,
+            FileExistsActionDto::Skip => Self::Skip,
+        }
+    }
+}
+
 /// `SelectionKind`。
 #[derive(Clone, Debug, PartialEq, uniffi::Enum)]
 pub enum SelectionKindDto {
-    Hls { options: Vec<HlsOptionDto> },
-    Bt { files: Vec<BtFileDto> },
-    Variant { options: Vec<VariantOptionDto> },
+    Hls {
+        options: Vec<HlsOptionDto>,
+    },
+    Bt {
+        files: Vec<BtFileDto>,
+    },
+    Variant {
+        options: Vec<VariantOptionDto>,
+    },
+    /// 保存目录里已有同名文件；字段由主机算好。
+    FileExists {
+        file_name: String,
+        save_dir: String,
+        existing_size: Option<u64>,
+        existing_modified_unix_ms: Option<i64>,
+        incoming_size: Option<i64>,
+        rename_preview: String,
+        actions: Vec<FileExistsActionDto>,
+    },
 }
 
 /// `SelectionOutcome`。
@@ -247,6 +291,7 @@ pub enum SelectionOutcomeDto {
     Hls { index: i32 },
     Bt { indices: Vec<i32> },
     Variant { index: i32 },
+    FileExists { action: FileExistsActionDto },
     Cancelled,
 }
 
@@ -288,6 +333,23 @@ impl From<&proto::SelectionKind> for SelectionKindDto {
                     })
                     .collect(),
             },
+            proto::SelectionKind::FileExists {
+                file_name,
+                save_dir,
+                existing_size,
+                existing_modified_unix_ms,
+                incoming_size,
+                rename_preview,
+                actions,
+            } => Self::FileExists {
+                file_name: file_name.clone(),
+                save_dir: save_dir.clone(),
+                existing_size: *existing_size,
+                existing_modified_unix_ms: *existing_modified_unix_ms,
+                incoming_size: *incoming_size,
+                rename_preview: rename_preview.clone(),
+                actions: actions.iter().copied().map(Into::into).collect(),
+            },
         }
     }
 }
@@ -300,6 +362,9 @@ impl From<&proto::SelectionOutcome> for SelectionOutcomeDto {
                 indices: indices.clone(),
             },
             proto::SelectionOutcome::Variant { index } => Self::Variant { index: *index },
+            proto::SelectionOutcome::FileExists { action } => Self::FileExists {
+                action: (*action).into(),
+            },
             proto::SelectionOutcome::Cancelled => Self::Cancelled,
         }
     }
@@ -311,6 +376,9 @@ impl From<SelectionOutcomeDto> for proto::SelectionOutcome {
             SelectionOutcomeDto::Hls { index } => Self::Hls { index },
             SelectionOutcomeDto::Bt { indices } => Self::Bt { indices },
             SelectionOutcomeDto::Variant { index } => Self::Variant { index },
+            SelectionOutcomeDto::FileExists { action } => Self::FileExists {
+                action: action.into(),
+            },
             SelectionOutcomeDto::Cancelled => Self::Cancelled,
         }
     }

@@ -398,12 +398,12 @@ pub struct DownloadParams {
     /// （config `use_server_time`）。服务器未提供该头、解析失败或写入失败时
     /// 保留本地完成时间，绝不影响下载结果。
     pub use_server_time: bool,
-    /// 文件已存在时是否覆盖旧文件（config `file_exists_behavior` ==
-    /// `"overwrite"`，manager 注入）。true 时，起名/终名冲突若**仅**来自
-    /// 磁盘上已存在的最终文件，则保留原名并在 finalize 时删除旧文件后
-    /// 占名；`.fdownloading` 临时文件、并发任务预订（reserved）与 avoid
-    /// 集合仍按编号改名，绝不覆盖其他任务的在途/产物。
-    pub allow_overwrite: bool,
+    /// 覆盖旧文件的授权（manager 注入）：全局 overwrite → `Any`；逐任务
+    /// 「覆盖」答复 → `Only(询问时的文件名)`；其余 `Never`。授权时，起名/
+    /// 终名冲突若**仅**来自磁盘上已存在的最终文件，则保留原名并在 finalize
+    /// 时删除旧文件后占名；`.fdownloading` 临时文件、并发任务预订（reserved）
+    /// 与 avoid 集合仍按编号改名，绝不覆盖其他任务的在途/产物。
+    pub overwrite: crate::file_exists::OverwritePolicy,
     /// 段行布局属主令牌（= manager 的 spawn generation）。多段路径起飞时
     /// 写入 `tasks.segments_epoch`，worker 段进度写入以它作存在性守卫——
     /// 快速 pause→resume 后旧 spawn 迟到的写入全类失效（含段 0），杜绝
@@ -2195,24 +2195,23 @@ async fn resolve_file_info_non_get(
 /// 兄弟任务「已预订但临时文件尚未落盘」的名字造成 DB 指针别名(两任务
 /// file_name 指向同一磁盘名,误删其一即毁对方产物)。
 ///
-/// `allow_overwrite`（config `file_exists_behavior` == "overwrite"）:为
-/// true 时,磁盘上**仅最终文件**存在不算冲突——保留原名,完成时由
-/// finalize 覆盖旧文件;`.fdownloading` 临时文件、`reserved` 预订与
-/// `avoid` 集合命中仍是硬冲突,照旧编号改名。目录同名也照旧改名
-/// (文件不能覆盖目录)。
+/// `overwrite` 允许替换该名字对应的同名旧文件时:磁盘上**仅最终文件**存在
+/// 不算冲突——保留原名,完成时由 finalize 覆盖旧文件;`.fdownloading` 临时
+/// 文件、`reserved` 预订与 `avoid` 集合命中仍是硬冲突,照旧编号改名。目录
+/// 同名也照旧改名(文件不能覆盖目录)。
 pub async fn dedup_filename(
     dir: &Path,
     name: &str,
     reserved: &std::collections::HashSet<std::path::PathBuf>,
     avoid: &std::collections::HashSet<String>,
-    allow_overwrite: bool,
+    overwrite: &crate::file_exists::OverwritePolicy,
 ) -> String {
     // Phase 1: fast probe — most of the time there is no conflict.
     let candidate = dir.join(name);
     let temp_candidate = PathBuf::from(format!("{}{}", candidate.display(), TEMP_EXT));
     // Also check the in-flight reservation set BEFORE the async disk probes
     // so that two tasks starting simultaneously both see each other's claim.
-    let final_conflict = if allow_overwrite {
+    let final_conflict = if overwrite.permits(name) {
         // overwrite 模式:仅目录算最终名冲突(文件不能覆盖目录);普通
         // 文件存在 = 保留原名,finalize 时覆盖。
         tokio::fs::metadata(&candidate)
@@ -2320,15 +2319,15 @@ pub(crate) async fn claim_rename(src: &Path, dst: &Path) -> std::io::Result<()> 
 /// 完成期占名改名:把 `src` 以不覆盖语义落到 `save_dir/name`,返回实际落盘的文件名。
 ///
 /// 基于 [`claim_rename`] 的 `create_new` 占名。占名冲突(`AlreadyExists`)时:
-/// `allow_overwrite`(config `file_exists_behavior` == "overwrite")对原名且不在
-/// 兄弟任务预订名 `avoid`(小写)内的普通旧文件,删除后重试一次;其余情况重新 dedup
-/// 换名(避开 `avoid`)。连续 5 次冲突视为目录被持续抢占,报错并保留 `src`。
+/// `overwrite` 对原名授权且不在兄弟任务预订名 `avoid`(小写)内的普通旧文件,
+/// 删除后重试一次;其余情况重新 dedup 换名(避开 `avoid`)。连续 5 次冲突视为
+/// 目录被持续抢占,报错并保留 `src`。
 /// 调用方须在返回名与 `name` 不同时同步任务的 file_name。
 pub(crate) async fn claim_final_name(
     src: &Path,
     save_dir: &Path,
     name: &str,
-    allow_overwrite: bool,
+    overwrite: &crate::file_exists::OverwritePolicy,
     avoid: &std::collections::HashSet<String>,
 ) -> Result<String, DownloadError> {
     let mut chosen = name.to_string();
@@ -2343,7 +2342,7 @@ pub(crate) async fn claim_final_name(
                 if attempt > 5 {
                     return Err(DownloadError::Io(e));
                 }
-                if allow_overwrite
+                if overwrite.permits(name)
                     && !overwrite_attempted
                     && chosen == name
                     && !avoid.contains(&chosen.to_lowercase())
@@ -2362,7 +2361,7 @@ pub(crate) async fn claim_final_name(
                     name,
                     &std::collections::HashSet::new(),
                     avoid,
-                    false,
+                    &crate::file_exists::OverwritePolicy::Never,
                 )
                 .await;
             }
@@ -3646,7 +3645,7 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
                 // 已存在的普通旧文件(非目录、不在兄弟任务 avoid 集)时,删除
                 // 旧文件后按原名重试占名一次。avoid 命中/目录/删除失败都不覆盖,
                 // 走下方既有换名环。
-                if p.allow_overwrite
+                if p.overwrite.permits(&chosen)
                     && !overwrite_attempted
                     && chosen == target_name
                     && !avoid.contains(&chosen.to_lowercase())
@@ -3682,14 +3681,14 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
                     p.task_id,
                     dst.display()
                 );
-                // re-dedup 恒按保守语义(allow_overwrite=false):此环仅在原名
-                // 已被抢占/覆盖失败后进入,再放行原名会原地打转直到 attempt 耗尽。
+                // re-dedup 恒按保守语义(不授权覆盖):此环仅在原名已被抢占/
+                // 覆盖失败后进入,再放行原名会原地打转直到 attempt 耗尽。
                 chosen = dedup_filename(
                     &save_dir,
                     &target_name,
                     &std::collections::HashSet::new(),
                     &avoid,
-                    false,
+                    &crate::file_exists::OverwritePolicy::Never,
                 )
                 .await;
             }
@@ -5168,7 +5167,7 @@ mod tests {
             "test.txt",
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
-            false,
+            &crate::file_exists::OverwritePolicy::Never,
         )
         .await;
         assert_eq!(result, "test.txt");
@@ -5199,7 +5198,7 @@ mod tests {
             "test.txt",
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
-            false,
+            &crate::file_exists::OverwritePolicy::Never,
         )
         .await;
         assert_eq!(result, "test (1).txt");
@@ -5240,7 +5239,7 @@ mod tests {
             "TEST.txt",
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
-            false,
+            &crate::file_exists::OverwritePolicy::Never,
         )
         .await;
         assert_ne!(
@@ -5273,7 +5272,7 @@ mod tests {
             "test.txt",
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
-            false,
+            &crate::file_exists::OverwritePolicy::Never,
         )
         .await;
         assert_eq!(result, "test (1).txt");
@@ -5303,7 +5302,7 @@ mod tests {
             "README",
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
-            false,
+            &crate::file_exists::OverwritePolicy::Never,
         )
         .await;
         assert_eq!(result, "README (1)");
@@ -5340,7 +5339,7 @@ mod tests {
             "video.mp4",
             &reserved,
             &std::collections::HashSet::new(),
-            false,
+            &crate::file_exists::OverwritePolicy::Never,
         )
         .await;
         assert_eq!(result, "video (1).mp4");
@@ -5376,7 +5375,7 @@ mod tests {
             "video.mp4",
             &reserved,
             &std::collections::HashSet::new(),
-            false,
+            &crate::file_exists::OverwritePolicy::Never,
         )
         .await;
         assert_eq!(result, "video (2).mp4");
@@ -5429,7 +5428,7 @@ mod tests {
             "setup.exe",
             &reserved,
             &std::collections::HashSet::new(),
-            false,
+            &crate::file_exists::OverwritePolicy::Never,
         )
         .await;
         assert_eq!(
@@ -5473,7 +5472,7 @@ mod tests {
             "test.txt",
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
-            true,
+            &crate::file_exists::OverwritePolicy::Any,
         )
         .await;
         assert_eq!(
@@ -5512,7 +5511,7 @@ mod tests {
             "test.txt",
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
-            true,
+            &crate::file_exists::OverwritePolicy::Any,
         )
         .await;
         assert_eq!(result, "test (1).txt");
@@ -5547,7 +5546,7 @@ mod tests {
             "video.mp4",
             &reserved,
             &std::collections::HashSet::new(),
-            true,
+            &crate::file_exists::OverwritePolicy::Any,
         )
         .await;
         assert_eq!(result, "video (1).mp4");
@@ -5560,7 +5559,7 @@ mod tests {
             "Movie.mkv",
             &std::collections::HashSet::new(),
             &avoid,
-            true,
+            &crate::file_exists::OverwritePolicy::Any,
         )
         .await;
         assert_eq!(result, "Movie (1).mkv");
@@ -5592,7 +5591,7 @@ mod tests {
             "data.bin",
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
-            true,
+            &crate::file_exists::OverwritePolicy::Any,
         )
         .await;
         assert_eq!(result, "data (1).bin", "文件不能覆盖同名目录，必须改名");
@@ -6711,9 +6710,14 @@ mod tests {
             .await
             .expect("test filesystem operation succeeds");
 
-        let chosen =
-            super::claim_final_name(&src, &dir, "a.ts", false, &std::collections::HashSet::new())
-                .await;
+        let chosen = super::claim_final_name(
+            &src,
+            &dir,
+            "a.ts",
+            &crate::file_exists::OverwritePolicy::Never,
+            &std::collections::HashSet::new(),
+        )
+        .await;
 
         assert_eq!(chosen.ok().as_deref(), Some("a (1).ts"));
         assert_eq!(
@@ -6755,9 +6759,14 @@ mod tests {
             .await
             .expect("test filesystem operation succeeds");
 
-        let chosen =
-            super::claim_final_name(&src, &dir, "a.ts", true, &std::collections::HashSet::new())
-                .await;
+        let chosen = super::claim_final_name(
+            &src,
+            &dir,
+            "a.ts",
+            &crate::file_exists::OverwritePolicy::Any,
+            &std::collections::HashSet::new(),
+        )
+        .await;
 
         assert_eq!(chosen.ok().as_deref(), Some("a.ts"));
         assert_eq!(
@@ -6769,6 +6778,51 @@ mod tests {
         {
             panic!("test filesystem cleanup failed: {error}");
         }
+    }
+
+    #[tokio::test]
+    async fn claim_final_name_per_task_overwrite_binds_to_the_asked_name() {
+        let dir = std::env::temp_dir().join(format!(
+            "fluxdown_test_claim_final_only_{}",
+            uuid::Uuid::new_v4()
+        ));
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .expect("test filesystem operation succeeds");
+        tokio::fs::write(dir.join("a.ts"), b"original")
+            .await
+            .expect("test filesystem operation succeeds");
+        let avoid = std::collections::HashSet::new();
+        let asked = crate::file_exists::OverwritePolicy::Only("a.ts".to_string());
+
+        let src = dir.join("a.ts.fdownloading");
+        tokio::fs::write(&src, b"incoming")
+            .await
+            .expect("test filesystem operation succeeds");
+        let chosen = super::claim_final_name(&src, &dir, "a.ts", &asked, &avoid).await;
+        assert_eq!(chosen.ok().as_deref(), Some("a.ts"));
+        assert_eq!(
+            tokio::fs::read(dir.join("a.ts")).await.unwrap_or_default(),
+            b"incoming"
+        );
+
+        // 名字被精修成别的名字：授权不随之扩散，已有同名文件保持原样。
+        tokio::fs::write(dir.join("b.ts"), b"other")
+            .await
+            .expect("test filesystem operation succeeds");
+        let src2 = dir.join("b.ts.fdownloading");
+        tokio::fs::write(&src2, b"incoming2")
+            .await
+            .expect("test filesystem operation succeeds");
+        let chosen = super::claim_final_name(&src2, &dir, "b.ts", &asked, &avoid).await;
+        assert_eq!(chosen.ok().as_deref(), Some("b (1).ts"));
+        assert_eq!(
+            tokio::fs::read(dir.join("b.ts")).await.unwrap_or_default(),
+            b"other"
+        );
+        tokio::fs::remove_dir_all(&dir)
+            .await
+            .expect("test filesystem cleanup");
     }
 
     #[tokio::test]
@@ -6794,7 +6848,14 @@ mod tests {
             .expect("test filesystem operation succeeds");
         let avoid: std::collections::HashSet<String> = ["a.ts".to_string()].into();
 
-        let chosen = super::claim_final_name(&src, &dir, "a.ts", true, &avoid).await;
+        let chosen = super::claim_final_name(
+            &src,
+            &dir,
+            "a.ts",
+            &crate::file_exists::OverwritePolicy::Any,
+            &avoid,
+        )
+        .await;
 
         assert_eq!(chosen.ok().as_deref(), Some("a (1).ts"));
         assert_eq!(
@@ -6846,7 +6907,7 @@ mod tests {
             "Movie.mkv",
             &std::collections::HashSet::new(),
             &avoid,
-            false,
+            &crate::file_exists::OverwritePolicy::Never,
         )
         .await;
         assert_eq!(result, "Movie (1).mkv");

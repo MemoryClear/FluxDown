@@ -741,6 +741,41 @@ struct DownloadsRowTextTests {
         #expect(line.text == "statusSeeding · ↑ \(try #require(Format.speed(640 * 1024)).description)")
     }
 
+    @Test func pendingFileConflictMarksOnlyItsTaskAndOverridesTheStatusLine() throws {
+        let conflict = SelectionRequest(
+            requestId: "r", taskId: "a",
+            kind: .fileExists(FileConflict(fileName: "a.bin", saveDir: "/dl", renamePreview: "a (1).bin", actions: [.rename, .overwrite])),
+            defaultChoice: .fileExists(action: .rename), deadlineUnixMs: 0
+        )
+        var state = makeState([makeTask("a", .pending), makeTask("b", .pending)])
+        state.selections = [conflict]
+        let items = try #require(derive(state).list.sections.first?.items)
+        let flagged = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0.awaitingDecision) })
+        #expect(flagged == ["a": true, "b": false])
+        let a = try #require(items.first { $0.id == "a" })
+        #expect(echo.status(a, fields: allFields) == StatusLine(text: "fileConflictPending", tone: .warning))
+    }
+
+    @Test func conflictBannerAggregatesAllConflictsWithEarliestDeadline() {
+        func conflict(_ id: String, deadline: Int64) -> SelectionRequest {
+            SelectionRequest(
+                requestId: id, taskId: "t-\(id)",
+                kind: .fileExists(FileConflict(fileName: "\(id).bin", saveDir: "/dl", renamePreview: "\(id) (1).bin", actions: [.rename, .overwrite])),
+                defaultChoice: .fileExists(action: .rename), deadlineUnixMs: deadline
+            )
+        }
+        let one = PendingSelection.make([conflict("a", deadline: 9)]) { _ in nil }
+        #expect(one?.route == .fileConflicts)
+        #expect(one?.titleKey == "fileConflictTitle" && one?.taskName == "a.bin" && one?.titleCount == nil)
+
+        let many = PendingSelection.make([conflict("a", deadline: 9), conflict("b", deadline: 5)]) { _ in nil }
+        #expect(many?.titleKey == "fileConflictTitleMany" && many?.titleCount == 2)
+        #expect(many?.deadlineUnixMs == 5 && many?.countdownKey == "fileConflictAutoRenameIn")
+
+        let bt = SelectionRequest(requestId: "bt", taskId: "t", kind: .bt([]), defaultChoice: .cancelled, deadlineUnixMs: 1)
+        #expect(PendingSelection.make([bt]) { _ in "x" }?.route == .selection(requestId: "bt"))
+    }
+
     @Test func metaLineByStateAndFields() throws {
         let nowSec: Int64 = 2_000_000
         let downloading = try item(
