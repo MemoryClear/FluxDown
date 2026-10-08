@@ -4,6 +4,8 @@ import com.fluxdown.app.R
 import com.fluxdown.app.data.GroupBy
 import com.fluxdown.app.data.SortKey
 import com.fluxdown.app.data.ViewPrefs
+import com.fluxdown.app.feature.newtask.UrlEntry
+import com.fluxdown.app.feature.newtask.inferName
 import com.fluxdown.app.ui.TaskVisualState
 import com.fluxdown.app.ui.visualState
 import com.fluxdown.core.format.Format
@@ -14,6 +16,13 @@ import com.fluxdown.core.model.Segment
 import com.fluxdown.core.model.Task
 import com.fluxdown.core.model.TaskRuntime
 import com.fluxdown.core.model.TaskStatus
+import com.fluxdown.core.protocol.AgentSessionDto
+import com.fluxdown.core.protocol.HostCapability
+import com.fluxdown.core.protocol.HostSection
+import com.fluxdown.core.protocol.Json
+import com.fluxdown.core.protocol.RemoteTaskDto
+import com.fluxdown.core.protocol.RemoteTaskRules
+import com.fluxdown.core.protocol.has
 import com.fluxdown.core.store.HostState
 import com.fluxdown.fluxui.data.FlowSegmentUi
 import com.fluxdown.fluxui.data.FlowStripState
@@ -49,7 +58,34 @@ internal class DeriveCache {
     var sortSig = 0
     var lastReorderMs = 0L
     var lastPos: Map<String, Int> = emptyMap()
+
+    // 远程任务分区只在分区 / 会话 / 名册变化时重新解析（派生按 10 Hz 运行）
+    var remoteRaw: String? = null
+    var sessionRaw: String? = null
+    var remoteCloud: Any? = null
+    var remote: List<RemoteTaskDto> = emptyList()
 }
+
+/**
+ * 其他设备上执行的远程任务（同 iOS `DownloadsViewModel.remoteTasks`）：主机声明 `agent.remoteTasks` 能力时，
+ * 取 `agent.remoteTasks` 分区并去掉目标为本机的镜像（本地已有真实任务）。本机 id 取会话设备，其次名册 `isCurrent`。
+ */
+private fun remoteTasks(s: HostState, cache: DeriveCache): List<RemoteTaskDto> {
+    if (!s.has(HostCapability.agentRemoteTasks)) return emptyList()
+    val raw = s.sections[HostSection.agentRemoteTasks]
+    val session = s.sections[HostSection.agentSession]
+    if (raw == cache.remoteRaw && session == cache.sessionRaw && s.cloudDevices === cache.remoteCloud) return cache.remote
+    val current = AgentSessionDto.fromJson(Json.parseOrNull(session))?.device?.deviceId?.takeIf { it.isNotEmpty() }
+        ?: s.cloudDevices.firstOrNull { it.isCurrent }?.deviceId
+    cache.remoteRaw = raw
+    cache.sessionRaw = session
+    cache.remoteCloud = s.cloudDevices
+    cache.remote = RemoteTaskRules.visible(RemoteTaskDto.listFromJson(Json.parseOrNull(raw)), current)
+    return cache.remote
+}
+
+/** 显示名：云端未带文件名时按 URL 推断（与新建下载同一规则）。 */
+internal fun RemoteTaskDto.displayName(): String = fileName.ifEmpty { inferName(UrlEntry(url)) }
 
 private class Group(val key: String, val label: GroupLabel, val items: List<TaskItem>, val extra: String? = null)
 
@@ -90,10 +126,25 @@ internal fun derive(input: DeriveInput, cache: DeriveCache, nowMs: Long, interac
     val folderCounts = IntArray(StatusFolder.entries.size)
     for (it in scoped) for (fo in StatusFolder.entries) if (fo.accepts(it.task.status)) folderCounts[fo.ordinal]++
 
+    // 远程任务：队列是本机概念，限定队列时不出现；搜索、文件夹与分类同本地行（同 GPUI 下载页 / iOS）
+    val remoteAll = remoteTasks(s, cache)
+    val remoteScoped = if (f.queueId != null) {
+        emptyList()
+    } else {
+        remoteAll.mapNotNull { r ->
+            val name = r.displayName()
+            if (query.isNotEmpty() && !name.lowercase().contains(query) && !r.url.lowercase().contains(query)) null else r to name
+        }
+    }
+    for ((r, _) in remoteScoped) for (fo in StatusFolder.entries) if (fo.accepts(r.status)) folderCounts[fo.ordinal]++
     // 3. 文件夹内 → 分类计数 → 分类筛选
     val inFolder = scoped.filter { f.folder.accepts(it.task.status) }
     val catCounts = HashMap<String, Int>()
     for (it in inFolder) it.category?.let { c -> catCounts[c.id] = (catCounts[c.id] ?: 0) + 1 }
+    val remoteInFolder = remoteScoped.filter { (r, _) -> f.folder.accepts(r.status) }.map { (r, name) ->
+        Triple(r, name, cache.categoryByName.getOrPut(name) { index.categoryOf(name) })
+    }
+    for ((_, _, c) in remoteInFolder) c?.let { catCounts[it.id] = (catCounts[it.id] ?: 0) + 1 }
     val selectedCat = f.categoryId?.takeIf { id -> index.ordered.any { it.id == id && !it.isAll } }
     val pills = ArrayList<CategoryPill>()
     for (c in index.ordered) {
@@ -102,6 +153,8 @@ internal fun derive(input: DeriveInput, cache: DeriveCache, nowMs: Long, interac
         if (n > 0 || c.id == selectedCat) pills += CategoryPill(c, n)
     }
     val rows = if (selectedCat == null) inFolder else inFolder.filter { it.category?.id == selectedCat }
+    val remoteRows = (if (selectedCat == null) remoteInFolder else remoteInFolder.filter { it.third?.id == selectedCat })
+        .sortedWith(compareBy(RemoteTaskRules.order) { it.first })
 
     // 4. 排序（进度 / 速度键节流重排）
     var retryAt = 0L
@@ -141,6 +194,13 @@ internal fun derive(input: DeriveInput, cache: DeriveCache, nowMs: Long, interac
             }
         }
     }
+    // 远程任务分区恒在末尾，不参与多选（不进 visibleIds）
+    if (remoteRows.isNotEmpty()) {
+        entries += RemoteHeaderEntry(remoteRows.size)
+        remoteRows.forEachIndexed { i, (r, name, c) ->
+            entries += RemoteRowEntry(r, name, c, first = i == 0, last = i == remoteRows.lastIndex)
+        }
+    }
 
     // 6. 队列分面
     val queueCounts = HashMap<String, Int>()
@@ -151,8 +211,8 @@ internal fun derive(input: DeriveInput, cache: DeriveCache, nowMs: Long, interac
     val queueFacets = s.queues.sortedBy { it.position }.map { QueueFacet(it, queueCounts[normQueue(it.queueId)] ?: 0) }
 
     return DeriveResult(
-        list = DownloadsList(entries, visible, s.tasks.size, loaded = true),
-        facets = Facets(folderCounts.asList(), pills, queueFacets, ordered.size),
+        list = DownloadsList(entries, visible, s.tasks.size + remoteAll.size, loaded = true),
+        facets = Facets(folderCounts.asList(), pills, queueFacets, ordered.size + remoteRows.size),
         retryAtMs = retryAt,
     )
 }

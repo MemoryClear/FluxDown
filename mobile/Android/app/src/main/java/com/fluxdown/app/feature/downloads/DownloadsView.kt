@@ -21,6 +21,7 @@ import com.fluxdown.app.data.ViewPrefs
 import com.fluxdown.app.shell.LocalAppContainer
 import com.fluxdown.app.shell.hostState
 import com.fluxdown.core.protocol.FilterBarVisibility
+import com.fluxdown.core.protocol.HostSection
 import com.fluxdown.core.protocol.preferences
 import com.fluxdown.core.format.Format
 import com.fluxdown.core.format.Measure
@@ -107,6 +108,13 @@ class DownloadsView internal constructor(private val container: AppContainer) {
     var conflictTaskIds by mutableStateOf<Set<String>>(emptySet())
         private set
 
+    /** 远程任务的目标设备名 / 在线状态（按 deviceId；名册或云端连接变化才更新）。 */
+    internal var remoteTargets by mutableStateOf<Map<String, RemoteTarget>>(emptyMap())
+        private set
+
+    /** 远程任务命令与行内过渡态。 */
+    internal val remoteCommands = RemoteCommands(container)
+
     internal val wave = WaveBuffer()
 
     /** 最近一次指针活动（动态排序键重排节流用）。 */
@@ -171,6 +179,12 @@ class DownloadsView internal constructor(private val container: AppContainer) {
         }
         launch {
             container.store.state.map { FileConflicts.taskIds(it.selections) }.distinctUntilChanged().collect { conflictTaskIds = it }
+        }
+        launch {
+            container.store.state
+                .map { Triple(it.cloudDevices, it.sections[HostSection.agentCloudConnection], it.connection == Connection.Live) }
+                .distinctUntilChanged()
+                .collect { (devices, connection, live) -> remoteTargets = RemoteTarget.index(devices, connection, live) }
         }
         launch {
             container.store.state.map { it.speedHistory }.distinctUntilChanged().collect { wave.update(it) }

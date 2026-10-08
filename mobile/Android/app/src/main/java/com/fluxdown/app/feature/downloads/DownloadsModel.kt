@@ -6,6 +6,8 @@ import com.fluxdown.core.model.Category
 import com.fluxdown.core.model.Queue
 import com.fluxdown.core.model.Task
 import com.fluxdown.core.model.TaskStatus
+import com.fluxdown.core.protocol.RemoteTaskDto
+import com.fluxdown.core.protocol.RemoteTaskStatus
 import com.fluxdown.fluxui.data.FlowSegmentUi
 import com.fluxdown.fluxui.data.FlowStripState
 
@@ -19,6 +21,19 @@ enum class StatusFolder {
         Completed -> status == TaskStatus.Completed
         Failed -> status == TaskStatus.Failed
         Paused -> status == TaskStatus.Paused
+    }
+
+    /**
+     * 其他设备上的远程任务按 GPUI `DownloadTaskView::remote` 的状态映射归入文件夹（同 iOS）：
+     * 等待接单 / 已接单 / 未知 / 下载中 → 下载中，失败 / 已取消 → 失败。
+     */
+    fun accepts(status: RemoteTaskStatus): Boolean = when (this) {
+        All -> true
+        Active -> status == RemoteTaskStatus.Pending || status == RemoteTaskStatus.Accepted ||
+            status == RemoteTaskStatus.Downloading || status is RemoteTaskStatus.Unknown
+        Completed -> status == RemoteTaskStatus.Completed
+        Failed -> status == RemoteTaskStatus.Failed || status == RemoteTaskStatus.Canceled
+        Paused -> status == RemoteTaskStatus.Paused
     }
 }
 
@@ -92,6 +107,8 @@ internal object ContentType {
     const val Empty = 10
     const val Skeleton = 11
     const val Scope = 12
+    const val RemoteHeader = 13
+    const val RowRemote = 14
 }
 
 /** 「传输中」分区头：右侧实时汇总下行速度 + 任务数。 */
@@ -134,6 +151,26 @@ data class RowEntry(
             RowZone.Card -> ContentType.RowCard
             RowZone.History -> ContentType.RowHistory
         }
+}
+
+/** 「远程任务」分区头（其他设备上执行的云端下发任务，同 PC 下载页的远程行）。 */
+@Immutable
+data class RemoteHeaderEntry(val count: Int) : ListEntry {
+    override val key: String get() = "h:remote"
+    override val contentType: Int get() = ContentType.RemoteHeader
+}
+
+/** 远程任务行：不参与多选；[category] 按显示名解析（同本地行）。 */
+@Immutable
+data class RemoteRowEntry(
+    val task: RemoteTaskDto,
+    val name: String,
+    val category: Category?,
+    val first: Boolean,
+    val last: Boolean,
+) : ListEntry {
+    override val key: String get() = "r:${task.id}"
+    override val contentType: Int get() = ContentType.RowRemote
 }
 
 /** 派生出的列表：条目 + 可见任务 id（全选范围）+ 总任务数（区分「无任务」与「筛选后为空」）。 */

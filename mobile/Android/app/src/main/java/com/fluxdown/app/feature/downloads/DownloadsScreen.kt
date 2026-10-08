@@ -349,6 +349,8 @@ private fun DownloadsListBody(
                         )
                     }
                     is RowEntry -> DownloadRow(e, st, index, gate, a11y)
+                    is RemoteHeaderEntry -> RemoteSectionHeader(e)
+                    is RemoteRowEntry -> RemoteTaskRow(e, st, a11y)
                 }
             }
         }
