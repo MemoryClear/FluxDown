@@ -153,6 +153,16 @@ internal fun RemoteTaskRow(entry: RemoteRowEntry, style: RowStyle, flowIndex: In
         copyLink = str(R.string.mobileSwipeCopyLink),
         more = str(R.string.moreActions),
         offline = str(R.string.errReasonTargetDeviceOffline),
+        urlCopied = str(R.string.urlCopied),
+        deleteTask = str(R.string.deleteTask),
+        deleteTaskAndFile = str(R.string.deleteTaskAndFile),
+        statusError = str(R.string.statusError),
+        statusCompleted = str(R.string.statusCompleted),
+        statusDownloading = str(R.string.statusDownloading),
+        statusPending = str(R.string.statusPending),
+        statusPaused = str(R.string.statusPaused),
+        statusCanceled = str(R.string.statusCanceled),
+        statusUnknown = str(R.string.mobileRemoteStatusUnknown),
     )
 
     fun allows(action: RemoteCommandAction): Boolean =
@@ -168,27 +178,27 @@ internal fun RemoteTaskRow(entry: RemoteRowEntry, style: RowStyle, flowIndex: In
 
     fun copyLink() {
         context.copyText(item.name, latest.url)
-        overlays.toast(context.getString(R.string.urlCopied), FluxToastKind.Success, FluxIcons.Copy)
+        overlays.toast(s.urlCopied, FluxToastKind.Success, FluxIcons.Copy)
     }
 
     fun confirmDelete() {
         overlays.showDialog(
             FluxDialogSpec(
-                title = context.getString(R.string.deleteTask),
+                title = s.deleteTask,
                 message = item.name,
                 icon = FluxIcons.Trash2,
                 buttons = buildList {
-                    add(FluxDialogButton(context.getString(R.string.cancel)))
+                    add(FluxDialogButton(s.cancel))
                     // 目标离线时无法让它删除文件，只能删记录：不提供「同时删除文件」
                     if (online != false) {
                         add(
-                            FluxDialogButton(context.getString(R.string.deleteTaskAndFile), FluxDialogButtonStyle.Destructive) {
+                            FluxDialogButton(s.deleteTaskAndFile, FluxDialogButtonStyle.Destructive) {
                                 issue(RemoteCommandAction.Delete, deleteFiles = true)
                             },
                         )
                     }
                     add(
-                        FluxDialogButton(context.getString(R.string.deleteTask), FluxDialogButtonStyle.Primary) {
+                        FluxDialogButton(s.deleteTask, FluxDialogButtonStyle.Primary) {
                             issue(RemoteCommandAction.Delete)
                         },
                     )
@@ -238,14 +248,14 @@ internal fun RemoteTaskRow(entry: RemoteRowEntry, style: RowStyle, flowIndex: In
             part("→ $targetName", MetaTone.Ink)
             val status = task.status
             when (status) {
-                RemoteTaskStatus.Failed -> part(firstLine(task.error) ?: context.getString(R.string.statusError), MetaTone.Coral)
-                RemoteTaskStatus.Completed -> part(context.getString(R.string.statusCompleted), MetaTone.Mint)
+                RemoteTaskStatus.Failed -> part(firstLine(task.error) ?: s.statusError, MetaTone.Coral)
+                RemoteTaskStatus.Completed -> part(s.statusCompleted, MetaTone.Mint)
                 RemoteTaskStatus.Downloading -> Format.speed(task.speed)?.let { part(it.toString(), MetaTone.Accent) }
-                    ?: part(context.getString(R.string.statusDownloading))
-                RemoteTaskStatus.Pending, RemoteTaskStatus.Accepted -> part(context.getString(R.string.statusPending))
-                RemoteTaskStatus.Paused -> part(context.getString(R.string.statusPaused))
-                RemoteTaskStatus.Canceled -> part(context.getString(R.string.statusCanceled))
-                is RemoteTaskStatus.Unknown -> part(context.getString(R.string.mobileRemoteStatusUnknown))
+                    ?: part(s.statusDownloading)
+                RemoteTaskStatus.Pending, RemoteTaskStatus.Accepted -> part(s.statusPending)
+                RemoteTaskStatus.Paused -> part(s.statusPaused)
+                RemoteTaskStatus.Canceled -> part(s.statusCanceled)
+                is RemoteTaskStatus.Unknown -> part(s.statusUnknown)
             }
             if (status !is RemoteTaskStatus.Unknown && status != RemoteTaskStatus.Failed) {
                 part(Format.percent(task.progress.toFloat().coerceIn(0f, 1f)))
@@ -360,6 +370,16 @@ private data class RemoteRowStrings(
     val copyLink: String,
     val more: String,
     val offline: String,
+    val urlCopied: String,
+    val deleteTask: String,
+    val deleteTaskAndFile: String,
+    val statusError: String,
+    val statusCompleted: String,
+    val statusDownloading: String,
+    val statusPending: String,
+    val statusPaused: String,
+    val statusCanceled: String,
+    val statusUnknown: String,
 )
 
 private fun firstLine(s: String?): String? = s?.lineSequence()?.map { it.trim() }?.firstOrNull { it.isNotEmpty() }
