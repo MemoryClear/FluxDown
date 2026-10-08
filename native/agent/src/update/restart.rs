@@ -11,7 +11,8 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::{Mutex, PoisonError};
 
-/// 桌面程序在更新后重启时带的参数。
+/// 桌面程序在更新后重启时带的参数（只有桌面平台有桌面程序）。
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 pub(crate) const AFTER_UPDATE_ARG: &str = "--after-update";
 
 static PENDING: Mutex<Option<RestartPlan>> = Mutex::new(None);
@@ -26,7 +27,8 @@ pub struct RestartPlan {
 
 #[derive(Debug)]
 enum Action {
-    /// 分离启动一个进程（不等待）。
+    /// 分离启动一个进程（不等待）：桌面平台的桌面重启，及非 Unix 的服务器重启。
+    #[cfg(any(not(unix), target_os = "linux", target_os = "macos"))]
     Spawn {
         program: PathBuf,
         args: Vec<OsString>,
@@ -44,6 +46,7 @@ enum Action {
 
 impl RestartPlan {
     /// 桌面形态：分离启动 `program`。
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     pub(crate) fn desktop(program: PathBuf, args: Vec<OsString>) -> Self {
         Self {
             action: Action::Spawn { program, args },
@@ -74,6 +77,7 @@ impl RestartPlan {
 
     fn run(self) -> std::io::Result<()> {
         match self.action {
+            #[cfg(any(not(unix), target_os = "linux", target_os = "macos"))]
             Action::Spawn { program, args } => {
                 tracing::info!(program = %program.display(), "starting program after update");
                 spawn_detached(&program, &args)
@@ -124,6 +128,7 @@ pub fn run_pending() -> std::io::Result<()> {
 }
 
 /// 分离启动：标准流置空，Unix 进入独立进程组，Windows 不带控制台窗口、独立进程组。
+#[cfg(any(not(unix), target_os = "linux", target_os = "macos"))]
 fn spawn_detached(program: &std::path::Path, args: &[OsString]) -> std::io::Result<()> {
     let mut command = std::process::Command::new(program);
     command
@@ -136,7 +141,7 @@ fn spawn_detached(program: &std::path::Path, args: &[OsString]) -> std::io::Resu
     command.spawn().map(drop)
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn detach(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
 
@@ -192,7 +197,7 @@ fn run_installer(installer: &std::path::Path, log: &std::path::Path) -> std::io:
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(windows, target_os = "linux", target_os = "macos")))]
 mod tests {
     use std::ffi::OsString;
     use std::path::PathBuf;
