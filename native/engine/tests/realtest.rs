@@ -834,7 +834,9 @@ async fn run_coord(
     let speed_limiter = SpeedLimiter::new(0);
     let (tx, rx) = mpsc::channel::<ProgressUpdate>(256);
     let dh = drain(rx);
-    let spec = RequestSpec::empty_get();
+    let spec = std::sync::Arc::new(fluxdown_engine::downloader::DownloadSpec::new(
+        RequestSpec::empty_get(),
+    ));
     let sink = NoopTestSink;
 
     let res = run_coordinated_download(
@@ -1503,7 +1505,9 @@ async fn resume_after_cancel_is_byte_exact() {
     let speed_limiter = SpeedLimiter::new(0);
     let (tx, rx) = mpsc::channel::<ProgressUpdate>(256);
     let dh = drain(rx);
-    let spec = RequestSpec::empty_get();
+    let spec = std::sync::Arc::new(fluxdown_engine::downloader::DownloadSpec::new(
+        RequestSpec::empty_get(),
+    ));
     let sink = NoopTestSink;
     let cancel = CancellationToken::new();
     let cancel2 = cancel.clone();
@@ -3556,7 +3560,9 @@ async fn transient_200_on_resume_is_absorbed_byte_exact() {
     let speed_limiter = SpeedLimiter::new(0);
     let (tx, rx) = mpsc::channel::<ProgressUpdate>(256);
     let dh = drain(rx);
-    let spec = RequestSpec::empty_get();
+    let spec = std::sync::Arc::new(fluxdown_engine::downloader::DownloadSpec::new(
+        RequestSpec::empty_get(),
+    ));
     let sink = NoopTestSink;
     let cancel = CancellationToken::new();
     let result = run_coordinated_download(

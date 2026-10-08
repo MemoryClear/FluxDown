@@ -969,7 +969,7 @@ async fn download_track_coordinated(
         &p.progress_tx,
         &p.cancel_token,
         &p.speed_limiter,
-        &p.spec,
+        &std::sync::Arc::new(crate::downloader::DownloadSpec::new(p.spec.clone())),
         p.sink.as_ref(),
         "",
         "",

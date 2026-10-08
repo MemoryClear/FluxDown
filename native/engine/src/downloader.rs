@@ -1013,9 +1013,11 @@ pub fn maybe_decompress_stream(
 /// behind Cloudflare (e.g. JetBrains' `download-cdn.clf.jetbrains.com.cn`).
 ///
 /// When the browser extension captures a download it passes the real browser
-/// UA via `extra_headers`.  That UA is applied on the first attempt; if the
-/// server returns 4xx we automatically retry *without* the browser UA so that
-/// Cloudflare-protected CDNs also work (see [`resolve_file_info`]).
+/// UA via `extra_headers`.  That UA is applied on the first attempt; when the
+/// probe hits a bot challenge (`cf-mitigated: challenge`, which Cloudflare may
+/// send as 403 *or* 404) the retry explicitly sends `DEFAULT_UA`, overriding
+/// both the extension UA and any browser-like task/queue/global UA (see
+/// [`resolve_file_info`]).
 ///
 /// **Version rule（同 aria2 的 `aria2/<版本>`）**：release 构建为
 /// `FluxDown/<pubspec 版本号>`（build.rs 注入 `FLUXDOWN_APP_VERSION`），
@@ -1287,8 +1289,11 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Maximum retries for the probe phase (HEAD + GET).
 ///
-/// 3 attempts total:
-///   1. Original headers (incl. browser UA from extension, or default UA)
+/// A bot challenge (`cf-mitigated: challenge`, any status — Cloudflare rejects a
+/// browser UA paired with the rustls TLS fingerprint) on any attempt switches the
+/// next attempt to the neutral `DEFAULT_UA`, sent explicitly so it also overrides
+/// a browser-like task/queue/global UA.  Otherwise, 3 attempts total:
+///   1. Original headers (incl. browser UA from extension, or task/queue/global UA)
 ///   2. First adaptive retry:
 ///      - If server rejected (403/429) and request carried a browser UA: strip browser UA
 ///        (handles Cloudflare bot detection rejecting rustls TLS fingerprint with Chrome UA).
@@ -1336,28 +1341,69 @@ pub fn infer_origin_referrer(url: &str) -> Option<String> {
     None
 }
 
-/// 判断探测失败是否为服务端明确拒绝（403 Forbidden / 429 Too Many Requests）。
+/// Cloudflare 判定请求为机器人并下发质询时附带的响应头（值为 `challenge`）。质询
+/// 的状态码不固定：JetBrains 国内 CDN `download-cdn.clf.jetbrains.com.cn` 回的是
+/// 404，单看状态码会被当成「文件不存在」。
+const CF_MITIGATED_HEADER: &str = "cf-mitigated";
+
+/// 探测状态描述里的反机器人质询标记，形如 `404 bot-challenge`；既进用户可见的
+/// 错误文案，也是 [`probe_rejection`] 的识别依据。
+const BOT_CHALLENGE_TAG: &str = "bot-challenge";
+
+/// 探测失败中「服务端主动拒绝」的类别，决定下一轮请求头如何自适应。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeRejection {
+    /// 403 / 429：反爬 / 防盗链 / 限流，可能缺浏览器 UA 或 Referer。
+    Forbidden,
+    /// 反机器人质询（Cloudflare `cf-mitigated: challenge`）：浏览器 UA 与 rustls
+    /// TLS 指纹不符，只有换成非浏览器 UA 才会放行。
+    BotChallenge,
+}
+
+fn is_bot_challenge(headers: &reqwest::header::HeaderMap) -> bool {
+    headers
+        .get(CF_MITIGATED_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("challenge"))
+}
+
+/// 非 2xx 探测响应的状态描述：状态码，命中反机器人质询时追加 [`BOT_CHALLENGE_TAG`]。
+fn probe_status_desc(resp: &reqwest::Response) -> String {
+    let status = resp.status().as_u16();
+    if is_bot_challenge(resp.headers()) {
+        format!("{status} {BOT_CHALLENGE_TAG}")
+    } else {
+        status.to_string()
+    }
+}
+
+/// 判断探测失败是否为服务端明确拒绝及其类别；质询优先于 403 / 429。
 /// 严格解析 probe failure 状态位或 HTTP 状态码，避免误判带 403/429 端口或 URL 的网络错误。
-pub(crate) fn is_probe_server_rejection(e: &DownloadError) -> bool {
+fn probe_rejection(e: &DownloadError) -> Option<ProbeRejection> {
     if is_server_rejection(e) {
-        return true;
+        return Some(ProbeRejection::Forbidden);
     }
-    match e {
-        DownloadError::Other(msg) => {
-            if let Some(rest) = msg.strip_prefix("probes failed: ") {
-                for part in rest.split(", ") {
-                    if let Some((_probe_type, status_desc)) = part.split_once('=') {
-                        let trimmed = status_desc.trim();
-                        if matches!(trimmed, "403" | "429") {
-                            return true;
-                        }
-                    }
-                }
-            }
-            false
+    let DownloadError::Other(msg) = e else {
+        return None;
+    };
+    let rest = msg.strip_prefix("probes failed: ")?;
+    let mut rejection = None;
+    for part in rest.split(", ") {
+        let Some((_probe_type, status_desc)) = part.split_once('=') else {
+            continue;
+        };
+        let trimmed = status_desc.trim();
+        if trimmed
+            .strip_suffix(BOT_CHALLENGE_TAG)
+            .is_some_and(|status| status.trim().parse::<u16>().is_ok())
+        {
+            return Some(ProbeRejection::BotChallenge);
         }
-        _ => false,
+        if matches!(trimmed, "403" | "429") {
+            rejection = Some(ProbeRejection::Forbidden);
+        }
     }
+    rejection
 }
 
 /// Resolve file info with automatic retry on transient failures.
@@ -1388,6 +1434,88 @@ fn spec_without_browser_ua(spec: &RequestSpec) -> RequestSpec {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect(),
         body: spec.body.clone(),
+    }
+}
+
+/// 换成中性下载器 UA（[`DEFAULT_UA`]）并显式写进请求头：既覆盖扩展传入的浏览器
+/// UA，也覆盖 client 级 UA（任务 / 队列 / 全局设置）——后者只删请求头无法摆脱，
+/// 用户若选了 Chrome 预设，删掉请求头后回落的仍是浏览器 UA。
+fn spec_with_neutral_ua(spec: &RequestSpec) -> RequestSpec {
+    let mut s = spec_without_browser_ua(spec);
+    s.extra_headers
+        .insert("User-Agent".to_string(), DEFAULT_UA.to_string());
+    s
+}
+
+/// 请求头是否已显式带中性下载器 UA（[`spec_with_neutral_ua`] 的产物）。
+fn has_neutral_ua(spec: &RequestSpec) -> bool {
+    spec.extra_headers
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case("user-agent") && v == DEFAULT_UA)
+}
+
+/// 一次 HTTP 下载运行内共享的请求头。
+///
+/// 探测被跳过（扩展给了文件大小提示的 hint 模式）时，首个真实下载请求才可能撞上
+/// 反机器人质询（Cloudflare `cf-mitigated: challenge`：浏览器 UA × rustls TLS
+/// 指纹）。请求点经 `escape_bot_challenge` 切到中性 UA 重发一次；切换对本次运行内
+/// 其后的全部请求（其他分段 worker、单流回退、续传窗口）生效，并落库供续传沿用。
+///
+/// ```
+/// use fluxdown_engine::downloader::{DownloadSpec, RequestSpec};
+///
+/// let spec = DownloadSpec::new(RequestSpec::empty_get());
+/// assert!(spec.current().extra_headers.is_empty());
+/// ```
+#[derive(Debug)]
+pub struct DownloadSpec {
+    base: RequestSpec,
+    neutral: std::sync::OnceLock<RequestSpec>,
+}
+
+impl DownloadSpec {
+    /// 以任务（或探测自适应后）的请求头起步。
+    pub fn new(base: RequestSpec) -> Self {
+        Self {
+            base,
+            neutral: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// 当前应使用的请求头：已从质询脱困则为中性 UA 版本，否则为原始请求头。
+    pub fn current(&self) -> &RequestSpec {
+        self.neutral.get().unwrap_or(&self.base)
+    }
+
+    /// `resp` 是用 `used` 发出的下载请求的响应。它是反机器人质询且 `used` 还不是
+    /// 中性 UA 时，返回应重发所用的中性 UA 请求头（首次切换时落库）；否则 `None`，
+    /// 调用方照常按状态码处理。质询由 CDN 边缘直接拦截，源站没收到原请求，重发
+    /// 不会多消耗一次性 URL；`used` 已是中性 UA 时不再重发，每个请求最多多发一次。
+    pub(crate) async fn escape_bot_challenge(
+        &self,
+        used: &RequestSpec,
+        resp: &reqwest::Response,
+        db: &Db,
+        task_id: &str,
+    ) -> Option<&RequestSpec> {
+        if resp.status().is_success() || !is_bot_challenge(resp.headers()) || has_neutral_ua(used) {
+            return None;
+        }
+        let mut first = false;
+        let neutral = self.neutral.get_or_init(|| {
+            first = true;
+            spec_with_neutral_ua(&self.base)
+        });
+        if first {
+            log_info!(
+                "[download] task {} bot challenge (status={}) on download request: switching \
+                 to neutral downloader UA",
+                task_id,
+                resp.status().as_u16()
+            );
+            persist_adapted_spec(db, task_id, neutral).await;
+        }
+        Some(neutral)
     }
 }
 
@@ -1530,12 +1658,18 @@ pub(crate) async fn resolve_file_info_with_ua_fallback(
                     PROBE_MAX_RETRIES,
                     e
                 );
-                let is_rejection = is_probe_server_rejection(&e);
+                let rejection = probe_rejection(&e);
                 last_err = Some(e);
 
                 if attempt + 1 < PROBE_MAX_RETRIES {
-                    // 若收到 403 / 429 等服务端拒绝，根据当前请求头生成自适应候选：
-                    if is_rejection {
+                    if rejection == Some(ProbeRejection::BotChallenge) {
+                        // 反机器人质询（Cloudflare）：浏览器 UA × rustls 指纹冲突，无论 UA
+                        // 来自扩展请求头还是任务 / 队列 / 全局设置，都换成中性 UA。
+                        log_info!("[resolve] bot challenge: switching to neutral downloader UA");
+                        let base = current_adapted.as_ref().unwrap_or(spec);
+                        current_adapted = Some(spec_with_neutral_ua(base));
+                    } else if rejection.is_some() {
+                        // 403 / 429 等服务端拒绝：根据当前请求头生成自适应候选。
                         if has_browser_ua {
                             // 场景 A（Cloudflare 反爬）：浏览器 UA 与 rustls 指纹冲突，剥离 UA
                             if attempt == 0 {
@@ -1577,7 +1711,7 @@ pub(crate) async fn resolve_file_info_with_ua_fallback(
 
                     // 服务端拒绝无需长时退避，短等待 200ms 即可切换新请求头重试；
                     // 网络抖动保持指数退避。
-                    let delay = if is_rejection {
+                    let delay = if rejection.is_some() {
                         Duration::from_millis(200)
                     } else {
                         PROBE_RETRY_BASE_DELAY * 2u32.saturating_pow(attempt)
@@ -1658,7 +1792,7 @@ async fn resolve_file_info_once(
             Some((h, u))
         }
         Ok(r) => {
-            head_status_desc = r.status().as_u16().to_string();
+            head_status_desc = probe_status_desc(&r);
             log_info!(
                 "[resolve] HEAD failed: status={}, url={}, cookies_len={}",
                 r.status(),
@@ -1694,7 +1828,7 @@ async fn resolve_file_info_once(
             Some((h, u, got_206, get_range_compressed))
         }
         Ok(r) => {
-            get_status_desc = r.status().as_u16().to_string();
+            get_status_desc = probe_status_desc(&r);
             log_info!(
                 "[resolve] GET failed: status={}, url={}, cookies_len={}",
                 r.status(),
@@ -1974,7 +2108,7 @@ async fn resolve_file_info_plain_get_fallback(
     {
         Ok(r) if r.status().is_success() => r,
         Ok(r) => {
-            let plain_status_desc = r.status().as_u16().to_string();
+            let plain_status_desc = probe_status_desc(&r);
             log_info!(
                 "[resolve] plain GET fallback also failed: status={}, url={}",
                 r.status(),
@@ -2885,7 +3019,11 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
         record_naming_evidence(&p.db, &p.task_id, disposition, &info.content_type).await;
         info
     };
-    let spec_ref: &RequestSpec = applied_spec.as_ref().unwrap_or(&p.spec);
+    // 本次运行内所有下载请求共享：hint 模式下首个真实请求撞上反机器人质询时，
+    // 切换到中性 UA 对其余分段 worker 与单流回退同时生效。
+    let spec_ref = std::sync::Arc::new(DownloadSpec::new(
+        applied_spec.unwrap_or_else(|| p.spec.clone()),
+    ));
 
     // Safety net (probe 阶段)：服务器在 probe 阶段返回 HTML 但用户期望二进制
     // 文件——典型场景：Lanzou 等 CDN transit page、form-POST 端点用 GET 访问。
@@ -3220,7 +3358,7 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
             &p.progress_tx,
             &p.cancel_token,
             &p.speed_limiter,
-            spec_ref,
+            &spec_ref,
             p.sink.as_ref(),
             &resume_etag,
             &resume_last_modified,
@@ -3326,7 +3464,7 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
                     &p.progress_tx,
                     &p.cancel_token,
                     &p.speed_limiter,
-                    spec_ref,
+                    &spec_ref,
                     &actual_name,
                     &resume_etag,
                     &resume_last_modified,
@@ -3379,7 +3517,7 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
             &p.progress_tx,
             &p.cancel_token,
             &p.speed_limiter,
-            spec_ref,
+            &spec_ref,
             &actual_name,
             &resume_etag,
             &resume_last_modified,
@@ -3926,7 +4064,7 @@ async fn download_single(
     progress_tx: &mpsc::Sender<ProgressUpdate>,
     cancel_token: &CancellationToken,
     speed_limiter: &SpeedLimiter,
-    spec: &RequestSpec,
+    spec: &DownloadSpec,
     expected_filename: &str,
     expected_etag: &str,
     expected_last_modified: &str,
@@ -4051,7 +4189,7 @@ async fn download_single_once(
     progress_tx: &mpsc::Sender<ProgressUpdate>,
     cancel_token: &CancellationToken,
     speed_limiter: &SpeedLimiter,
-    spec: &RequestSpec,
+    spec: &DownloadSpec,
     expected_filename: &str,
     // 续传一致性校验：probe 阶段看到的文件版本标识。Range 206 返回后与响应
     // validator 做后验比对，避免发送可能作废一次性签名 URL 的 If-Range。
@@ -4100,7 +4238,7 @@ async fn download_single_once(
 
     // Resume only when the original method is GET-like. POST + Range is not a
     // portable contract and most servers ignore it, which would corrupt an append.
-    let want_resume = spec.is_get_like()
+    let want_resume = spec.current().is_get_like()
         && supports_range
         && physical_existing_len > 0
         && (total_bytes == 0 || physical_existing_len < total_bytes);
@@ -4131,15 +4269,26 @@ async fn download_single_once(
     } else {
         format!("bytes={existing_len}-")
     };
-    let mut resp = build_request(client, url, spec.method.clone(), spec);
-    if want_resume {
-        // 与 aria2 一致，续传首枪只发送 Range。部分一次性签名端点会把
-        // If-Range 视为签名外请求头并立即作废 URL；收到 403 后再降级已经太晚。
-        // 版本安全由下方对 206 响应的 ETag/Last-Modified 后验校验保证。
-        resp = resp.header("Range", &range);
-    }
+    let build = |used: &RequestSpec| {
+        let req = build_request(client, url, used.method.clone(), used);
+        if want_resume {
+            // 与 aria2 一致，续传首枪只发送 Range。部分一次性签名端点会把
+            // If-Range 视为签名外请求头并立即作废 URL；收到 403 后再降级已经太晚。
+            // 版本安全由下方对 206 响应的 ETag/Last-Modified 后验校验保证。
+            req.header("Range", &range)
+        } else {
+            req
+        }
+    };
+    let mut used = spec.current();
     let mut refetched_full = false;
-    let mut resp = send_cancellable(resp, cancel_token).await?;
+    let mut resp = send_cancellable(build(used), cancel_token).await?;
+    // hint 模式跳过了探测：反机器人质询只能在这里首次暴露，换中性 UA 重发同一请求。
+    if let Some(neutral) = spec.escape_bot_challenge(used, &resp, db, task_id).await {
+        drop(resp);
+        used = neutral;
+        resp = send_cancellable(build(used), cancel_token).await?;
+    }
     // BUG-HTTP-416-RETRY-EXHAUST：续传 Range 偏移越界时服务器回 416（临时文件
     // 被外部截断、或服务器文件在两次探测间缩小）。error_for_status() 会把它
     // 变成不可恢复的错误直接终止任务；416 语义明确——重试同一 Range 必然拿到
@@ -4153,7 +4302,7 @@ async fn download_single_once(
             existing_len
         );
         drop(resp);
-        let full_req = build_request(client, url, spec.method.clone(), spec);
+        let full_req = build_request(client, url, used.method.clone(), used);
         resp = send_cancellable(full_req, cancel_token).await?;
         refetched_full = true;
     }
@@ -4226,7 +4375,7 @@ async fn download_single_once(
                 existing_len
             );
             drop(resp);
-            let full_req = build_request(client, url, spec.method.clone(), spec);
+            let full_req = build_request(client, url, used.method.clone(), used);
             resp = send_cancellable(full_req, cancel_token)
                 .await?
                 .error_for_status()?;
@@ -4592,7 +4741,7 @@ async fn download_multi_segment(
     progress_tx: &mpsc::Sender<ProgressUpdate>,
     cancel_token: &CancellationToken,
     speed_limiter: &SpeedLimiter,
-    spec: &RequestSpec,
+    spec: &std::sync::Arc<DownloadSpec>,
     sink: &dyn EventSink,
     etag: &str,
     last_modified: &str,
@@ -4765,28 +4914,52 @@ mod tests {
     }
 
     #[test]
-    fn is_probe_server_rejection_detects_forbidden_and_rate_limits() {
-        let err403 = super::DownloadError::Other(
-            "probes failed: HEAD=403, ranged GET=403, plain GET=403".to_string(),
-        );
-        assert!(super::is_probe_server_rejection(&err403));
+    fn probe_rejection_classifies_forbidden_and_bot_challenge() {
+        use super::ProbeRejection::{BotChallenge, Forbidden};
+        let probe = |msg: &str| super::probe_rejection(&super::DownloadError::Other(msg.into()));
 
-        let err429 = super::DownloadError::Other(
-            "probes failed: HEAD=405, ranged GET=429, plain GET=429".to_string(),
+        assert_eq!(
+            probe("probes failed: HEAD=403, ranged GET=403, plain GET=403"),
+            Some(Forbidden)
         );
-        assert!(super::is_probe_server_rejection(&err429));
-
-        // 401 Unauthorized is credentials failure, not hotlink/anti-scraping bot rejection
-        let err401 = super::DownloadError::Other(
-            "probes failed: HEAD=401, ranged GET=401, plain GET=401".to_string(),
+        assert_eq!(
+            probe("probes failed: HEAD=405, ranged GET=429, plain GET=429"),
+            Some(Forbidden)
         );
-        assert!(!super::is_probe_server_rejection(&err401));
-
-        // Network error containing numbers like 4010 or 4030 in URL/port must NOT trigger false positive
-        let err_net_port = super::DownloadError::Other(
-            "probes failed: HEAD=network-error: failed to connect to 127.0.0.1:4010, ranged GET=network-error: port 4030 unreachable, plain GET=network-error".to_string(),
+        // Cloudflare 质询以 404 下发（JetBrains 国内 CDN 实测）：不能当成文件不存在。
+        assert_eq!(
+            probe(
+                "probes failed: HEAD=404 bot-challenge, ranged GET=404 bot-challenge, plain GET=404 bot-challenge"
+            ),
+            Some(BotChallenge)
         );
-        assert!(!super::is_probe_server_rejection(&err_net_port));
+        // 质询与 403 并存时按质询处理（需要换中性 UA，而不是补浏览器 UA）。
+        assert_eq!(
+            probe("probes failed: HEAD=403, ranged GET=403 bot-challenge, plain GET=403"),
+            Some(BotChallenge)
+        );
+        // 普通 404 / 401 不是服务端拒绝。
+        assert_eq!(
+            probe("probes failed: HEAD=404, ranged GET=404, plain GET=404"),
+            None
+        );
+        assert_eq!(
+            probe("probes failed: HEAD=401, ranged GET=401, plain GET=401"),
+            None
+        );
+        // 网络错误文本里的 4010 / 4030 / bot-challenge 字样不得误判。
+        assert_eq!(
+            probe(
+                "probes failed: HEAD=network-error: failed to connect to 127.0.0.1:4010, ranged GET=network-error: port 4030 unreachable, plain GET=network-error"
+            ),
+            None
+        );
+        assert_eq!(
+            probe(
+                "probes failed: HEAD=network-error: bot-challenge, ranged GET=network-error, plain GET=network-error"
+            ),
+            None
+        );
     }
 
     #[test]
@@ -5105,6 +5278,74 @@ mod tests {
                 .any(|k| k.eq_ignore_ascii_case("user-agent")),
             "browser UA must be stripped"
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_file_info_escapes_bot_challenge_404_with_browser_client_ua() {
+        // JetBrains 国内 CDN（Cloudflare）对「浏览器 UA × rustls 指纹」回 404 +
+        // `cf-mitigated: challenge`。全局 / 队列 / 任务 UA 选了 Chrome 预设时，只删
+        // 扩展请求头里的 UA 会回落到同样的浏览器 UA，必须显式换成中性 UA。
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 1024];
+                    while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        let n = stream.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                    }
+                    let text = String::from_utf8_lossy(&buf);
+                    let has_browser_ua = text.lines().any(|l| {
+                        let l = l.to_lowercase();
+                        l.starts_with("user-agent:") && l.contains("mozilla")
+                    });
+                    let resp = if has_browser_ua {
+                        "HTTP/1.1 404 Not Found\r\ncf-mitigated: challenge\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    } else if text.starts_with("HEAD") {
+                        "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n"
+                    } else {
+                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-0/1000\r\nContent-Length: 1\r\nConnection: close\r\n\r\nX"
+                    };
+                    let _ = stream.write_all(resp.as_bytes()).await.ok();
+                    let _ = stream.shutdown().await.ok();
+                });
+            }
+        });
+
+        let browser_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/141.0.0.0";
+        let client =
+            super::build_client(&crate::proxy_config::ProxyConfig::default(), browser_ua).unwrap();
+        let url = format!("http://127.0.0.1:{}/JetBrains.Rider.exe", port);
+
+        // 有 / 无扩展传入的浏览器 UA 两种来源都必须脱困。
+        for extension_ua in [Some(browser_ua), None] {
+            let mut spec = super::RequestSpec::empty_get();
+            if let Some(ua) = extension_ua {
+                spec.extra_headers
+                    .insert("User-Agent".to_string(), ua.to_string());
+            }
+
+            let (info, adapted) = super::resolve_file_info_with_ua_fallback(&client, &url, &spec)
+                .await
+                .expect("probe should escape the bot challenge with a neutral UA");
+
+            assert_eq!(info.total_bytes, 1000);
+            let adapted = adapted.expect("neutral UA must be reported for persistence");
+            let ua: Vec<_> = adapted
+                .extra_headers
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+                .map(|(_, v)| v.as_str())
+                .collect();
+            assert_eq!(ua, [super::DEFAULT_UA]);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -7024,7 +7265,7 @@ mod single_resume_tests {
             &tx,
             &CancellationToken::new(),
             &SpeedLimiter::new(0),
-            &spec,
+            &super::DownloadSpec::new(spec),
             "f.bin",
             "",
             "",
@@ -7127,6 +7368,168 @@ mod single_resume_tests {
             && error.kind() != std::io::ErrorKind::NotFound
         {
             tracing::warn!(%error, "test directory cleanup failed");
+        }
+        Ok(())
+    }
+
+    /// hint 模式（扩展给了大小、跳过探测）下首个真实下载请求撞上 Cloudflare 式
+    /// 404 质询：必须换中性 UA 重发并完成下载；切换对其后所有请求生效（整个任务只
+    /// 被质询一次），并落库供续传沿用。单流与多段两条路径都要覆盖。
+    #[tokio::test]
+    async fn hint_mode_download_escapes_bot_challenge_once_and_persists_neutral_ua()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/141.0.0.0";
+        let body = Arc::new(data(4 * MIB));
+        for segments in [4, 1] {
+            let challenged = Arc::new(AtomicUsize::new(0));
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let port = listener.local_addr()?.port();
+            {
+                let challenged = challenged.clone();
+                let body = body.clone();
+                tokio::spawn(async move {
+                    while let Ok((mut stream, _)) = listener.accept().await {
+                        let challenged = challenged.clone();
+                        let body = body.clone();
+                        tokio::spawn(async move {
+                            let mut buf = Vec::new();
+                            let mut tmp = [0u8; 1024];
+                            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                                let n = stream.read(&mut tmp).await.unwrap_or(0);
+                                if n == 0 {
+                                    return;
+                                }
+                                buf.extend_from_slice(&tmp[..n]);
+                            }
+                            let text = String::from_utf8_lossy(&buf).to_lowercase();
+                            let browser = text
+                                .lines()
+                                .any(|l| l.starts_with("user-agent:") && l.contains("mozilla"));
+                            let range = text
+                                .lines()
+                                .find_map(|l| l.strip_prefix("range: bytes="))
+                                .and_then(|r| r.trim().split_once('-'))
+                                .and_then(|(s, e)| {
+                                    let start = s.parse::<usize>().ok()?;
+                                    let end = e
+                                        .parse::<usize>()
+                                        .map_or(body.len() - 1, |end| end.min(body.len() - 1));
+                                    Some((start, end))
+                                });
+                            let resp = if browser {
+                                challenged.fetch_add(1, Ordering::SeqCst);
+                                response("404 Not Found", "cf-mitigated: challenge\r\n", b"")
+                            } else if let Some((start, end)) = range {
+                                response(
+                                    "206 Partial Content",
+                                    &format!(
+                                        "Accept-Ranges: bytes\r\nContent-Range: bytes {start}-{end}/{}\r\n",
+                                        body.len()
+                                    ),
+                                    &body[start..=end],
+                                )
+                            } else {
+                                response("200 OK", "Accept-Ranges: bytes\r\n", &body)
+                            };
+                            if let Err(error) = stream.write_all(&resp).await {
+                                tracing::debug!(%error, "test HTTP client closed connection");
+                            }
+                            if let Err(error) = stream.shutdown().await {
+                                tracing::debug!(%error, "test HTTP client closed connection");
+                            }
+                        });
+                    }
+                });
+            }
+
+            let dir = std::env::temp_dir()
+                .join(format!("fluxdown_hint_challenge_{}", uuid::Uuid::new_v4()));
+            tokio::fs::create_dir_all(&dir).await?;
+            let mut engine = crate::Engine::new(
+                crate::EngineConfig {
+                    max_concurrent: 1,
+                    speed_limit_bps: 0,
+                    upload_limit_bps: 0,
+                    default_save_dir: dir.to_string_lossy().into_owned(),
+                    app_data_dir: dir.to_string_lossy().into_owned(),
+                    bt_config: crate::bt_downloader::BtConfig::default(),
+                    proxy_config: crate::proxy_config::ProxyConfig::default(),
+                    user_agent: String::new(),
+                    data_dir_override: Some(dir.clone()),
+                    database_url: None,
+                },
+                Arc::new(NoopSink),
+                Arc::new(crate::NoopSelection),
+            )
+            .await?;
+            let mut done_rx = engine.manager.take_done_rx().expect("done receiver");
+            let progress_rx = engine
+                .manager
+                .take_progress_rx()
+                .expect("progress receiver");
+            let reporter = tokio::spawn(crate::download_manager::progress_reporter(
+                progress_rx,
+                engine.db.clone(),
+                engine.activity_sink.clone(),
+            ));
+            // 任务级浏览器 UA（Chrome 预设）+ 扩展转发的浏览器 UA：最坏组合。
+            let mut headers = std::collections::HashMap::new();
+            headers.insert("User-Agent".to_string(), BROWSER_UA.to_string());
+            let id = engine
+                .manager
+                .create_task(crate::download_manager::NewTaskSpec {
+                    url: format!("http://127.0.0.1:{port}/Rider.exe"),
+                    save_dir: dir.to_string_lossy().into_owned(),
+                    file_name: "Rider.exe".to_owned(),
+                    segments,
+                    user_agent: BROWSER_UA.to_owned(),
+                    extra_headers: headers,
+                    hint_file_size: body.len() as i64,
+                    ..Default::default()
+                })
+                .await
+                .expect("create HTTP task");
+            let done = tokio::time::timeout(std::time::Duration::from_secs(20), done_rx.recv())
+                .await?
+                .expect("worker reports completion");
+            engine.manager.on_task_done(&done).await;
+
+            let task = engine.db.load_task_by_id(&id).await?.expect("task remains");
+            assert_eq!(
+                task.status, 3,
+                "segments={segments}: {}",
+                task.error_message
+            );
+            assert_eq!(tokio::fs::read(dir.join("Rider.exe")).await?, *body);
+            assert_eq!(
+                challenged.load(Ordering::SeqCst),
+                1,
+                "segments={segments}: neutral UA must stick for every later request"
+            );
+            let (_, _, headers_json) = engine
+                .db
+                .load_task_request_context(&id)
+                .await?
+                .expect("request context");
+            let persisted: std::collections::HashMap<String, String> =
+                serde_json::from_str(&headers_json)?;
+            let ua: Vec<_> = persisted
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+                .map(|(_, v)| v.as_str())
+                .collect();
+            assert_eq!(ua, [super::DEFAULT_UA], "segments={segments}");
+
+            engine.manager.shutdown().await;
+            reporter.abort();
+            drop(engine);
+            if let Err(error) = tokio::fs::remove_dir_all(&dir).await
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(%error, "test directory cleanup failed");
+            }
         }
         Ok(())
     }
@@ -7238,13 +7641,13 @@ mod single_resume_tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(1024);
         let cancel = CancellationToken::new();
         let limiter = SpeedLimiter::new(0);
-        let spec = RequestSpec {
+        let spec = super::DownloadSpec::new(RequestSpec {
             method: reqwest::Method::GET,
             cookies: String::new(),
             referrer: String::new(),
             extra_headers: std::collections::HashMap::new(),
             body: None,
-        };
+        });
         let attempt = || {
             download_single(
                 "second", &url, &dest, 17, false, &client, &db, &NoopSink, &tx, &cancel, &limiter,
