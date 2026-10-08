@@ -596,16 +596,19 @@ fn capture_calls(
     &'static str,
     crate::agent_client::AgentFuture<serde_json::Value>,
 )> {
-    use fluxdown_protocol::capture_link::{OpenAssociation, normalize_capture_url};
+    use fluxdown_protocol::capture_link::{
+        OpenAssociation, deep_link_file_name, normalize_capture_url,
+    };
     let mut calls = Vec::with_capacity(urls.len() + files.len());
     for url in urls {
         // 关联按原始 scheme 判定：`fluxdown:` 深链解码出的 `magnet:` 不受 magnet 开关约束。
         let association = OpenAssociation::of_url(&url);
+        let filename = deep_link_file_name(&url).unwrap_or_default();
         let url = normalize_capture_url(&url);
         let future = client.call::<serde_json::Value, serde_json::Value>(
             fluxdown_protocol::method::AGENT_CAPTURE_SUBMIT,
             Some(serde_json::json!({
-                "request": { "url": url },
+                "request": { "url": url, "filename": filename },
                 "silent": true,
                 "association": association,
             })),

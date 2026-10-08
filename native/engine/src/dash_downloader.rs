@@ -7,7 +7,6 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
 use crate::downloader::{
     DB_SAVE_INTERVAL_SECS, DownloadError, DownloadParams, ProgressUpdate, TEMP_EXT,
-    extract_from_url, sanitize_filename,
 };
 use crate::events::EventSink;
 use crate::hls_downloader::{
@@ -16,6 +15,7 @@ use crate::hls_downloader::{
 };
 use crate::logger::log_info;
 use crate::model::HlsQualityOption;
+use crate::naming::{extract_from_url, sanitize_filename};
 use crate::output;
 use crate::selection::SelectionOutcome;
 use crate::transfer_activity::{TaskRuntime, TaskSegment, TransferTracker};
@@ -1113,7 +1113,8 @@ async fn run_track_pair_inner(p: &DownloadParams, audio_url: &str) -> Result<i64
     // 只更新文件名，不触碰 total_bytes：resume 再入时 total 已是有意义的
     // 轨对合计，若像旧代码那样 update_task_file_info(name, 0) 会在任一
     // re-probe 失败时把总量永久归零（C5），拖垮暂停/重启后的分布图比例尺。
-    p.db.update_task_file_name(&p.task_id, &auto_name).await?;
+    p.db.update_task_file_name(&p.task_id, &auto_name, false)
+        .await?;
 
     if p.cancel_token.is_cancelled() {
         return Err(DownloadError::Cancelled);

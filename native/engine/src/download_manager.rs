@@ -27,6 +27,7 @@ use crate::logger::log_info;
 use crate::model::{
     MAIN_QUEUE_ID, QueueInfo, QueuePosition, SegmentDetail, TaskInfo, is_builtin_queue,
 };
+use crate::naming;
 use crate::proxy_config::{ProxyConfig, ProxyMode};
 use crate::segment_coordinator::is_single_conn_domain;
 use crate::selection::HostSelection;
@@ -561,7 +562,7 @@ fn webhook_provisional_file_name(url: &str) -> String {
     let name = if is_magnet(url) {
         bt_downloader::magnet_display_name(url)
     } else if task_url_protocol(url).is_some() {
-        crate::downloader::extract_from_url(url)
+        naming::extract_from_url(url)
     } else {
         None
     };
@@ -776,6 +777,29 @@ fn is_safe_file_name(name: &str) -> bool {
                     | Component::Prefix(_)
             )
         })
+}
+
+/// aria2 `out` 语义：`file_name` 可带相对 `save_dir` 的子目录（`folder/file.zip`）。
+/// 目录部分逐段经 [`naming::sanitize_filename`] 清洗后并入 `save_dir`，返回的
+/// `file_name` 只剩末段。空段、`.`、`..` 直接丢弃，根 / 盘符前缀（`C:`）被清洗成普通
+/// 目录名，结果恒落在 `save_dir` 之内。不含分隔符或 `save_dir` 为空时原样返回。
+fn split_relative_file_name(save_dir: &str, file_name: &str) -> (String, String) {
+    if save_dir.trim().is_empty() || !file_name.contains(['/', '\\']) {
+        return (save_dir.to_owned(), file_name.to_owned());
+    }
+    let mut parts: Vec<&str> = file_name
+        .split(['/', '\\'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty() && *part != "." && *part != "..")
+        .collect();
+    let Some(base) = parts.pop() else {
+        return (save_dir.to_owned(), String::new());
+    };
+    let mut dir = PathBuf::from(save_dir);
+    for part in parts {
+        dir.push(naming::sanitize_filename(part));
+    }
+    (dir.to_string_lossy().into_owned(), base.to_owned())
 }
 
 /// 「删除任务并删除文件」/「重新下载」是否可以删除 `save_dir/file_name`
@@ -1118,7 +1142,7 @@ fn restore_non_hls_file_name(
     reserved: &Mutex<HashSet<std::path::PathBuf>>,
 ) -> DownloadParams {
     let restored =
-        downloader::extract_from_url(&params.url).unwrap_or_else(|| "download.m3u8".to_string());
+        naming::extract_from_url(&params.url).unwrap_or_else(|| "download.m3u8".to_string());
     let save_path = std::path::PathBuf::from(&params.save_dir);
     let deduped = {
         let guard = lock_reserved(reserved);
@@ -1143,6 +1167,17 @@ enum StartPrelude {
     /// 序幕在 dedup 之前就地判定完成——不产生任何网络流量、不改名、不
     /// 触碰已有文件。调用方应跳过下载器，直接把任务标记为已完成。
     SkipExisting { size: i64 },
+}
+
+/// 启动序幕落库引擎选定的名字及其来源（`name_inferred`，见 db schema 注释）。
+async fn persist_start_name(
+    db: &crate::db::Db,
+    task_id: &str,
+    file_name: &str,
+    inferred: bool,
+) -> Result<(), crate::db::DbError> {
+    db.set_task_file_name_with_source(task_id, file_name, inferred)
+        .await
 }
 
 /// spawned task 启动序幕：文件名最终决策。manager 仍是唯一决策链——本函数
@@ -1194,10 +1229,12 @@ async fn finalize_start_file_name(
         }
     }
 
-    // Step 2: probe（名称仍未知时）。
-    if params.file_name.is_empty() {
-        let (probed_name, _probed_size) = tokio::select! {
-            _ = params.cancel_token.cancelled() => (String::new(), 0),
+    // Step 2: probe（名称仍未知时）。hint 任务（浏览器扩展 / 插件给了大小）不探测：
+    // 一次性签名 URL 会被任何请求消耗，下载器也承诺跳过 probe；名字由下方 URL 兜底
+    // 占位，完成期再按实际 GET 响应精修。
+    if params.file_name.is_empty() && params.hint_file_size == 0 {
+        let probed = tokio::select! {
+            _ = params.cancel_token.cancelled() => crate::meta_prober::ProbedMeta::default(),
             r = crate::meta_prober::probe_task_meta(
                 &params.url,
                 &params.file_name,
@@ -1206,12 +1243,15 @@ async fn finalize_start_file_name(
                 &params.spec,
             ) => r,
         };
-        if !probed_name.is_empty() {
-            params.file_name = probed_name;
-            if let Err(error) = params
-                .db
-                .set_task_file_name(&params.task_id, &params.file_name)
-                .await
+        if !probed.file_name.is_empty() {
+            params.file_name = probed.file_name;
+            if let Err(error) = persist_start_name(
+                &params.db,
+                &params.task_id,
+                &params.file_name,
+                probed.name_inferred,
+            )
+            .await
             {
                 return StartPrelude::Failed {
                     error: error.into(),
@@ -1232,7 +1272,7 @@ async fn finalize_start_file_name(
     // 塌缩为同一 .ts 并互相 truncate/交错写入而损坏内容。
     if hls_downloader::is_hls_url(&params.url) {
         let base = if params.file_name.is_empty() {
-            downloader::extract_from_url(&params.url).unwrap_or_else(|| "download.ts".to_string())
+            naming::extract_from_url(&params.url).unwrap_or_else(|| "download.ts".to_string())
         } else {
             params.file_name.clone()
         };
@@ -1259,8 +1299,7 @@ async fn finalize_start_file_name(
         let is_mpd = params.file_name.to_ascii_lowercase().ends_with(".mpd");
         if params.file_name.is_empty() || is_mpd {
             let base = if params.file_name.is_empty() {
-                downloader::extract_from_url(&params.url)
-                    .unwrap_or_else(|| "download.mpd".to_string())
+                naming::extract_from_url(&params.url).unwrap_or_else(|| "download.mpd".to_string())
             } else {
                 params.file_name.clone()
             };
@@ -1285,16 +1324,20 @@ async fn finalize_start_file_name(
         && (params.url.starts_with("http://") || params.url.starts_with("https://"))
         && !hls_downloader::is_hls_url(&params.url)
         && !is_torrent_file_url(&params.url)
-        && let Some(url_name) = downloader::extract_from_url(&params.url)
+        && let Some(url_name) = naming::name_from_url(&params.url)
     {
         // 探测失败（超时/连接错误/HEAD 被挡）时名称仍空：若放任 Proceed(None)，
         // 同名任务（常见于同一 URL 重复添加）会在下载器内得到同一个名字而共享
-        // 同一个 .fdownloading。用 URL 末段兜底，使其同样纳入 dedup + 预订。
-        params.file_name = url_name;
-        if let Err(error) = params
-            .db
-            .set_task_file_name(&params.task_id, &params.file_name)
-            .await
+        // 同一个 .fdownloading。用 URL 末段兜底，使其同样纳入 dedup + 预订；
+        // 路径段只是占位（标记为推断名），完成期按实际 GET 响应精修。
+        params.file_name = url_name.name;
+        if let Err(error) = persist_start_name(
+            &params.db,
+            &params.task_id,
+            &params.file_name,
+            url_name.source != naming::NameSource::QueryDisposition,
+        )
+        .await
         {
             return StartPrelude::Failed {
                 error: error.into(),
@@ -2899,7 +2942,7 @@ impl DownloadManager {
             manifest.items[0].name.clone()
         };
         let group_save_dir =
-            join_manifest_path(&task.save_dir, &downloader::sanitize_filename(&group_name));
+            join_manifest_path(&task.save_dir, &naming::sanitize_filename(&group_name));
 
         let total_size: i64 = manifest
             .items
@@ -6007,6 +6050,14 @@ impl DownloadManager {
         } else {
             (file_name, hint_file_size)
         };
+        // aria2 `out` / REST / 新建对话框 `out=` 允许 `子目录/文件名`（相对 save_dir）。
+        // 下载器只把 file_name 当单个组件清洗（防穿越），子目录必须在落库前并入
+        // save_dir，否则会被压平成 `子目录_文件名`（#716）。BT 的名字另有语义，不拆。
+        let (save_dir, file_name) = if is_magnet(&url) || !torrent_file_bytes.is_empty() {
+            (save_dir, file_name)
+        } else {
+            split_relative_file_name(&save_dir, &file_name)
+        };
         // When segments <= 0 ("auto"), store 0 in DB and let the downloader
         // dynamically calculate the optimal count after probing file size,
         // CPU cores, and bandwidth.
@@ -6202,7 +6253,10 @@ impl DownloadManager {
             // 稍后下载：不启动、不排队。后台 probe 让 UI 尽快拿到文件名/
             // 大小；带 resolver（探测原始页面 URL 无意义）或 BT（无 HTTP
             // 元数据可探）任务跳过，语义与排队/直启分支一致。
-            if !has_resolver && !is_bt {
+            if !has_resolver && !is_bt && hint_file_size != 0 {
+                self.fill_provisional_name(&task_id, &db_url, &file_name)
+                    .await;
+            } else if !has_resolver && !is_bt {
                 let probe_spec = downloader::RequestSpec::from_captured(
                     method.as_deref(),
                     cookies.clone(),
@@ -6284,6 +6338,7 @@ impl DownloadManager {
             let probe_tid = queued.task_id.clone();
             let probe_url = queued.url.clone();
             let probe_name = queued.file_name.clone();
+            let queued_hint = queued.hint_file_size;
             let probe_spec = downloader::RequestSpec::from_captured(
                 queued.method.as_deref(),
                 queued.cookies.clone(),
@@ -6303,8 +6358,13 @@ impl DownloadManager {
             if !self.suppress_bulk_broadcasts {
                 self.broadcast_queue_positions();
             }
-            // 带 resolver 的任务跳过 probe（探测原始页面 URL 无意义）。
-            if !has_resolver {
+            // 带 resolver 的任务跳过 probe（探测原始页面 URL 无意义）；hint 任务
+            // （浏览器扩展给了大小）不发 HEAD——一次性签名 URL 会被任何请求消耗，
+            // 只落 URL 推断的占位名，真名由实际下载的 GET 响应在完成期确定。
+            if !has_resolver && queued_hint != 0 {
+                self.fill_provisional_name(&probe_tid, &probe_url, &probe_name)
+                    .await;
+            } else if !has_resolver {
                 self.spawn_meta_probe(
                     probe_tid,
                     probe_url,
@@ -6583,6 +6643,36 @@ impl DownloadManager {
         }
     }
 
+    /// hint 任务（不得发探测请求）的占位名：名字为空时按 URL（含预签名 URL 的
+    /// `response-content-disposition`）推断并以推断名落库，供排队期间 UI 显示；HTTP
+    /// 完成期按实际 GET 响应精修。无网络 I/O。
+    async fn fill_provisional_name(&self, task_id: &str, url: &str, file_name: &str) {
+        if !file_name.is_empty() || !(url.starts_with("http://") || url.starts_with("https://")) {
+            return;
+        }
+        let Some(resolved) = naming::name_from_url(url) else {
+            return;
+        };
+        let inferred = resolved.source != naming::NameSource::QueryDisposition;
+        if let Err(error) = self
+            .db
+            .update_task_file_name(task_id, &resolved.name, inferred)
+            .await
+        {
+            crate::logger::report_error(
+                "download-manager",
+                "persist provisional task name",
+                &error,
+            );
+            return;
+        }
+        self.sink.emit(EngineEvent::TaskMetaProbed {
+            task_id: task_id.to_owned(),
+            file_name: resolved.name,
+            total_bytes: 0,
+        });
+    }
+
     /// 后台元数据探测（HEAD → GET Range:0-0，非阻塞）：探得文件名/大小后
     /// 更新 DB 并广播 [`EngineEvent::TaskMetaProbed`]；失败静默。
     ///
@@ -6604,7 +6694,7 @@ impl DownloadManager {
         #[cfg(feature = "plugins")]
         let probe_pm = self.plugin_manager.clone();
         tokio::spawn(async move {
-            let (name, size) = crate::meta_prober::probe_task_meta(
+            let probed = crate::meta_prober::probe_task_meta(
                 &probe_url,
                 &current_name,
                 &probe_client,
@@ -6612,9 +6702,12 @@ impl DownloadManager {
                 &probe_spec,
             )
             .await;
+            let (name, size) = (probed.file_name, probed.total_bytes);
             if !name.is_empty() || size > 0 {
                 if !name.is_empty()
-                    && let Err(error) = probe_db.update_task_file_name(&task_id, &name).await
+                    && let Err(error) = probe_db
+                        .update_task_file_name(&task_id, &name, probed.name_inferred)
+                        .await
                 {
                     crate::logger::report_error("download-manager", "persist task state", &error);
                     return;
@@ -10599,7 +10692,7 @@ impl DownloadManager {
             spec.base_save_dir.clone()
         } else {
             PathBuf::from(&spec.base_save_dir)
-                .join(downloader::sanitize_filename(&spec.group_name))
+                .join(naming::sanitize_filename(&spec.group_name))
                 .to_string_lossy()
                 .into_owned()
         };
@@ -10865,7 +10958,11 @@ impl DownloadManager {
                 }
             }
         }
-        if let Err(error) = self.db.set_task_file_name(task_id, new_name).await {
+        if let Err(error) = self
+            .db
+            .set_task_file_name_with_source(task_id, new_name, false)
+            .await
+        {
             return Err(rollback_rename(&paths, &moved, format!("db: {error}")).await);
         }
         log_info!(
@@ -10954,6 +11051,13 @@ impl DownloadManager {
         if let Err(e) = self.db.set_task_validator(task_id, "", "").await {
             log_info!(
                 "[manager] change_task_url {} clear validator error: {}",
+                task_id,
+                e
+            );
+        }
+        if let Err(e) = self.db.clear_task_response_naming(task_id).await {
+            log_info!(
+                "[manager] change_task_url {} clear response naming evidence error: {}",
                 task_id,
                 e
             );
@@ -12506,6 +12610,41 @@ mod tests {
         assert!(is_safe_file_name("name_without_ext"));
         // BT 单顶层目录名（无分隔符）仍是合法的直接子项。
         assert!(is_safe_file_name("My Torrent Folder"));
+    }
+
+    #[test]
+    fn split_relative_file_name_moves_subdirs_into_save_dir() {
+        let base = std::path::Path::new("dl");
+        let joined = |parts: &[&str]| {
+            parts
+                .iter()
+                .fold(base.to_path_buf(), |dir, part| dir.join(part))
+                .to_string_lossy()
+                .into_owned()
+        };
+        // #716：aria2 `out=folder/file.zip` 落到 `dl/folder/file.zip`，不是 `folder_file.zip`。
+        assert_eq!(
+            split_relative_file_name("dl", "folder/sub\\file.zip"),
+            (joined(&["folder", "sub"]), "file.zip".to_string())
+        );
+        // 穿越与根前缀不能逃出 save_dir。
+        assert_eq!(
+            split_relative_file_name("dl", "../../etc/passwd"),
+            (joined(&["etc"]), "passwd".to_string())
+        );
+        assert_eq!(
+            split_relative_file_name("dl", "C:\\x\\a.bin"),
+            (joined(&["C_", "x"]), "a.bin".to_string())
+        );
+        // 无分隔符、或 save_dir 未定时原样返回。
+        assert_eq!(
+            split_relative_file_name("dl", "a b.zip"),
+            ("dl".to_string(), "a b.zip".to_string())
+        );
+        assert_eq!(
+            split_relative_file_name("", "x/a.zip"),
+            (String::new(), "x/a.zip".to_string())
+        );
     }
 
     /// F041 守卫前提：取消标记不能被 `is_retriable_error` 误判为可重试。
