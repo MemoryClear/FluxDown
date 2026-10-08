@@ -8,7 +8,8 @@ struct PreferencesProtocolTests {
 
     @Test func syncCatalogMirrorsFiftySevenSpecs() {
         // iOS 镜像 57 项：29 个 daemon 键 + 27 个偏好 / agent 键 + 集合范围键 `appearance.custom_themes`
-        // （Rust 目录 58 项，多出的 `ui.show_activity_account` 是 GPUI / Web 专属入口开关，iOS 尚未镜像）。
+        // （Rust 目录 59 项，多出的 `ui.show_activity_account` 与 `appearance.file_icon_pack` 是 GPUI / Web 专属，
+        // iOS 尚未镜像）。
         #expect(SettingsCatalog.daemonSyncNames.count == 29)
         #expect(SettingsCatalog.syncedPreferenceKeys.count == 27)
         #expect(SettingsCatalog.daemonSyncNames.count + SettingsCatalog.syncedPreferenceKeys.count + 1 == 57)

@@ -213,7 +213,7 @@ private struct BtMseModePage: View {
                             SettingsText(title: L(mode.titleKey), detail: L(mode.detailKey))
                             Spacer(minLength: 8)
                             if mode == current {
-                                Image(systemName: "checkmark").fontWeight(.semibold).foregroundStyle(.tint)
+                                Image(systemName: FluxSymbol.done).fontWeight(.semibold).foregroundStyle(.tint)
                             }
                         }
                         .frame(minHeight: 44)
