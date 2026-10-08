@@ -18,6 +18,22 @@ nonisolated enum StatusFolder: CaseIterable, Hashable {
         case .paused: status == .paused
         }
     }
+
+    /// 其他设备上的远程任务按 GPUI `DownloadTaskView::remote` 的状态映射归入文件夹：等待接单 / 已接单 /
+    /// 未知 / 下载中 → 下载中，失败 / 已取消 → 失败。
+    func accepts(_ status: RemoteTaskStatus) -> Bool {
+        switch self {
+        case .all: true
+        case .active:
+            switch status {
+            case .pending, .accepted, .downloading, .unknown: true
+            case .paused, .completed, .failed, .canceled: false
+            }
+        case .completed: status == .completed
+        case .failed: status == .failed || status == .canceled
+        case .paused: status == .paused
+        }
+    }
 }
 
 /// 列表筛选：状态文件夹 · 分类 · 队列范围 · 搜索词。
@@ -143,12 +159,15 @@ nonisolated struct DownloadsSection: Identifiable, Equatable {
 nonisolated struct DownloadsList: Equatable {
     let sections: [DownloadsSection]
     let visibleIds: [String]
+    /// 本机任务 + 远程任务总数（区分「无任务」与「筛选后为空」）。
     let taskTotal: Int
     let loaded: Bool
+    /// 通过筛选的远程任务（其他设备执行，同 PC 下载页的远程行），已排序；不参与多选。
+    var remote: [RemoteTaskDto] = []
 
     static let initial = DownloadsList(sections: [], visibleIds: [], taskTotal: 0, loaded: false)
 
-    var isEmpty: Bool { sections.allSatisfy { $0.count == 0 } }
+    var isEmpty: Bool { sections.allSatisfy { $0.count == 0 } && remote.isEmpty }
 }
 
 nonisolated struct CategoryPill: Equatable, Identifiable {

@@ -11,6 +11,8 @@ struct DeriveInput {
     let filter: DownloadsFilter
     /// 已折叠的分组键（仅在分组视图生效）。
     let collapsed: Set<String>
+    /// 其他设备上执行的远程任务（已去掉目标为本机的镜像）；组详情等本机专属视图不传。
+    var remote: [RemoteTaskDto] = []
 }
 
 struct DeriveResult {
@@ -86,18 +88,35 @@ struct DownloadsDeriver {
             if !query.isEmpty, !Self.matches(it, query: query) { continue }
             scoped.append(it)
         }
+        // 远程任务：队列 / 任务组是本机概念，限定时不出现；搜索、文件夹与分类同本地行（同 GPUI 下载页）。
+        let remoteScoped = f.groupId == nil && f.queueId == nil
+            ? input.remote.filter { query.isEmpty || Self.matches($0, query: query) }
+            : []
         var folderCounts = Array(repeating: 0, count: StatusFolder.allCases.count)
         for it in scoped {
             for (i, folder) in StatusFolder.allCases.enumerated() where folder.accepts(it.task.status) {
                 folderCounts[i] += 1
             }
         }
+        for task in remoteScoped {
+            for (i, folder) in StatusFolder.allCases.enumerated() where folder.accepts(task.status) {
+                folderCounts[i] += 1
+            }
+        }
 
         // 3. 文件夹内 → 分类计数 → 分类筛选
         let inFolder = scoped.filter { f.folder.accepts($0.task.status) }
+        let remoteInFolder = remoteScoped.filter { f.folder.accepts($0.status) }
         var categoryCounts: [String: Int] = [:]
         for it in inFolder {
             if let category = it.category { categoryCounts[category.id, default: 0] += 1 }
+        }
+        var remoteCategoryIds: [String: String] = [:]
+        for task in remoteInFolder {
+            if let found = resolveCategory(task.displayName) {
+                remoteCategoryIds[task.id] = found.id
+                categoryCounts[found.id, default: 0] += 1
+            }
         }
         let selectedCategory = f.categoryId.flatMap { id in index.ordered.first { $0.id == id && !$0.isAll }?.id }
         var pills: [CategoryPill] = []
@@ -106,6 +125,9 @@ struct DownloadsDeriver {
             if n > 0 || category.id == selectedCategory { pills.append(CategoryPill(category: category, count: n)) }
         }
         let rows = selectedCategory.map { id in inFolder.filter { $0.category?.id == id } } ?? inFolder
+        let remoteRows = RemoteTaskRules.sorted(
+            selectedCategory.map { id in remoteInFolder.filter { remoteCategoryIds[$0.id] == id } } ?? remoteInFolder
+        )
 
         // 4. 排序（进度 / 速度键节流重排）
         var retryAt: Int64 = 0
@@ -171,10 +193,29 @@ struct DownloadsDeriver {
             .map { QueueFacet(queue: $0, count: queueCounts[normalizedQueueId($0.queueId)] ?? 0) }
 
         return DeriveResult(
-            list: DownloadsList(sections: sections, visibleIds: visible, taskTotal: s.tasks.count, loaded: true),
-            facets: Facets(folderCounts: folderCounts, categories: pills, queues: queueFacets, matching: ordered.count),
+            list: DownloadsList(
+                sections: sections,
+                visibleIds: visible,
+                taskTotal: s.tasks.count + input.remote.count,
+                loaded: true,
+                remote: remoteRows
+            ),
+            facets: Facets(
+                folderCounts: folderCounts,
+                categories: pills,
+                queues: queueFacets,
+                matching: ordered.count + remoteRows.count
+            ),
             retryAtMs: retryAt
         )
+    }
+
+    /// 按文件名解析分类（与本地行共用同一缓存）。
+    private mutating func resolveCategory(_ name: String) -> TaskCategory? {
+        if let cached = categoryByName[name] { return cached }
+        let category = index.categoryOf(name)
+        categoryByName[name] = .some(category)
+        return category
     }
 
     // MARK: 行模型
@@ -186,13 +227,7 @@ struct DownloadsDeriver {
         let runtime = s.runtime[task.taskId]
         let queuePosition = Int(s.queuePositions[task.taskId] ?? 0)
         let boosted = s.priorityTaskId == task.taskId
-        let category: TaskCategory?
-        if let cached = categoryByName[task.fileName] {
-            category = cached
-        } else {
-            category = index.categoryOf(task.fileName)
-            categoryByName[task.fileName] = .some(category)
-        }
+        let category = resolveCategory(task.fileName)
         let queue = queuesById[normalizedQueueId(task.queueId)]
 
         if let previous = entries[task.taskId],
@@ -249,6 +284,10 @@ struct DownloadsDeriver {
             || task.url.lowercased().contains(query)
             || task.originUrl.lowercased().contains(query)
             || item.site.lowercased().contains(query)
+    }
+
+    private static func matches(_ task: RemoteTaskDto, query: String) -> Bool {
+        task.displayName.lowercased().contains(query) || task.url.lowercased().contains(query)
     }
 
     /// 进度条：按真实字节区间投影；无分段退化为单条总进度。完成 / 做种 / 文件已删除行不显示（§3.5）。

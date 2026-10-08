@@ -69,6 +69,8 @@ final class DownloadsModel {
     @ObservationIgnored private var lastInteractionMs: Int64 = 0
     @ObservationIgnored private var retryTask: Task<Void, Never>?
     @ObservationIgnored private let defaults: UserDefaults
+    /// 远程任务 / 会话分区的缓存解码（只在分区字节变化时重新解码）。
+    @ObservationIgnored private let agentSections = AgentSections()
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -122,7 +124,8 @@ final class DownloadsModel {
                 state: state,
                 order: ViewOrder(groupBy: prefs.groupBy, sortKey: prefs.sortKey, ascending: prefs.ascending),
                 filter: filter,
-                collapsed: collapsed
+                collapsed: collapsed,
+                remote: remoteTasks(state)
             ),
             nowMs: now,
             interactionMs: lastInteractionMs
@@ -148,6 +151,15 @@ final class DownloadsModel {
                 self?.recompute()
             }
         }
+    }
+
+    /// 其他设备上执行的远程任务（同 PC 下载页的远程行）：主机支持远程任务时才有；目标为本机的云端镜像
+    /// 不显示（本地已有真实任务）。本机 id 取会话设备，其次名册里的 `isCurrent`。
+    private func remoteTasks(_ state: HostState) -> [RemoteTaskDto] {
+        guard state.has(HostCapability.agentRemoteTasks) else { return [] }
+        let current = agentSections.session(state)?.device.deviceId
+            ?? state.cloudDevices.first(where: \.isCurrent)?.deviceId
+        return RemoteTaskRules.visible(agentSections.remoteTasks(state), currentDeviceId: current)
     }
 
     private static func chrome(for state: HostState) -> DownloadsChrome {

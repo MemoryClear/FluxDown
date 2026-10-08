@@ -199,6 +199,75 @@ struct DownloadsFilterTests {
     }
 }
 
+// MARK: - 远程任务行
+
+@MainActor
+struct DownloadsRemoteRowsTests {
+    private let local = [makeTask("a", .downloading, name: "a.mp4"), makeTask("b", .completed, name: "b.zip")]
+    private let remote = [
+        RemoteTaskDto(id: "r1", toDevice: "pc", url: "https://e.com/movie.mp4", status: .accepted, updatedAt: "2026-10-08T01:00:00Z"),
+        RemoteTaskDto(id: "r2", toDevice: "pc", url: "https://e.com/x", fileName: "song.mp3", status: .downloading, updatedAt: "2026-10-08T02:00:00Z"),
+        RemoteTaskDto(id: "r3", toDevice: "pc", fileName: "doc.pdf", status: .canceled, updatedAt: "2026-10-08T03:00:00Z"),
+        RemoteTaskDto(id: "r4", toDevice: "pc", fileName: "app.zip", status: .paused, updatedAt: "2026-10-08T04:00:00Z"),
+    ]
+
+    private func run(_ filter: DownloadsFilter = DownloadsFilter()) -> DeriveResult {
+        var deriver = DownloadsDeriver()
+        return deriver.derive(
+            DeriveInput(state: makeState(local), order: smart, filter: filter, collapsed: [], remote: remote),
+            nowMs: 1_000_000,
+            interactionMs: 0
+        )
+    }
+
+    @Test func remoteTasksCountInFoldersWithGpuiStatusMapping() {
+        let result = run()
+        let facets = result.facets
+        #expect(facets.count(.all) == 6)
+        // 已接单 / 下载中 → 下载中；已取消 → 失败。
+        #expect(facets.count(.active) == 3)
+        #expect(facets.count(.failed) == 1)
+        #expect(facets.count(.paused) == 1)
+        #expect(facets.count(.completed) == 1)
+        #expect(facets.matching == 6)
+        #expect(result.list.taskTotal == 6)
+        // 未结束优先，同组按更新时间降序；已结束的已取消排最后。
+        #expect(result.list.remote.map(\.id) == ["r4", "r2", "r1", "r3"])
+        #expect(ids(result) == ["a", "b"])
+    }
+
+    @Test func folderSearchAndCategoryFilterRemoteRowsLikeLocalRows() {
+        var filter = DownloadsFilter()
+        filter.folder = .active
+        #expect(run(filter).list.remote.map(\.id) == ["r2", "r1"])
+        // 文件名为空时按 URL 推断名称参与分类与搜索。
+        filter.categoryId = "builtin_video"
+        let video = run(filter)
+        #expect(video.list.remote.map(\.id) == ["r1"])
+        #expect(ids(video) == ["a"])
+        #expect(video.facets.categories.first { $0.id == "builtin_video" }?.count == 2)
+        filter = DownloadsFilter()
+        filter.query = "SONG"
+        #expect(run(filter).list.remote.map(\.id) == ["r2"])
+    }
+
+    @Test func queueScopeHidesRemoteRowsAndOnlyRemoteIsNotEmpty() {
+        var filter = DownloadsFilter()
+        filter.queueId = TaskQueue.main
+        let scoped = run(filter)
+        #expect(scoped.list.remote.isEmpty)
+        #expect(scoped.facets.count(.all) == 2)
+
+        var deriver = DownloadsDeriver()
+        let onlyRemote = deriver.derive(
+            DeriveInput(state: makeState([]), order: smart, filter: DownloadsFilter(), collapsed: [], remote: remote),
+            nowMs: 1, interactionMs: 0
+        )
+        #expect(!onlyRemote.list.isEmpty)
+        #expect(onlyRemote.list.sections.isEmpty)
+    }
+}
+
 private extension DownloadTask {
     func with(originUrl: String) -> DownloadTask {
         var copy = self

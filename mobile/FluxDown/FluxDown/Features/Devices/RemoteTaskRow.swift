@@ -106,9 +106,7 @@ struct RemoteTaskRow: View {
         return !RemoteTaskRules.canIssue(action, to: task, targetOnline: targetOnline)
     }
 
-    private var displayName: String {
-        task.fileName.isEmpty ? inferName(UrlEntry(url: task.url)) : task.fileName
-    }
+    private var displayName: String { task.displayName }
 
     private var errorText: String? {
         guard let error = task.error?.trimmingCharacters(in: .whitespacesAndNewlines), !error.isEmpty else { return nil }
@@ -218,5 +216,12 @@ struct RemoteStatusChip: View {
         case .unknown:
             StatusBadge(text: L("mobileRemoteStatusUnknown"), tone: .neutral, systemImage: "questionmark.circle")
         }
+    }
+}
+
+extension RemoteTaskDto {
+    /// 显示名：云端未带文件名时按 URL 推断（与新建下载同一规则）。
+    var displayName: String {
+        fileName.isEmpty ? inferName(UrlEntry(url: url)) : fileName
     }
 }

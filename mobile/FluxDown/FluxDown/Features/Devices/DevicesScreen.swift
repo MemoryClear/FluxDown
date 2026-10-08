@@ -7,10 +7,8 @@ import UIKit
 /// 局域网已配对设备 · 远程任务。账户 / 局域网 / 远程任务三组各自按主机能力（`agent.auth` / `agent.deviceLink` /
 /// `agent.remoteTasks`）整段显示或隐藏；内容层全部是系统 `List` 分组，不上玻璃（玻璃只来自系统导航栏 / Tab 栏 / 浮动按钮）。
 struct DevicesScreen: View {
-    @Environment(AppContainer.self) private var container
-
     var body: some View {
-        DevicesContent(container: container)
+        DevicesContent()
     }
 }
 
@@ -39,7 +37,7 @@ private nonisolated enum DevicesSheet: Identifiable {
 private struct DevicesContent: View {
     @Environment(AppContainer.self) private var container
     @Environment(\.dynamicTypeSize) private var typeSize
-    @State private var model: DevicesModel
+    private var model: DevicesModel { container.devices }
     @State private var path: [DevicesRoute] = []
 
     /// 正在切换到的主机 id；非空时其余主机行不可点。
@@ -57,10 +55,6 @@ private struct DevicesContent: View {
 
     /// 已信任设备分组最多直接显示的行数，其余进入「管理全部」。
     private static let cloudPreviewLimit = 5
-
-    init(container: AppContainer) {
-        _model = State(initialValue: DevicesModel(container: container))
-    }
 
     var body: some View {
         let state = container.store.state
