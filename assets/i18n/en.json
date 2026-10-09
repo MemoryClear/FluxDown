@@ -372,6 +372,8 @@
   "detailFollowGlobal": "Follow global",
   "detailActionFolder": "Folder",
   "detailActionCopyLink": "Copy link",
+  "detailActionShare": "Share",
+  "detailActionMore": "More",
   "addDownloadTask": "Add a new download task",
   "startDownload": "Start",
   "downloadUrl": "Download URL",

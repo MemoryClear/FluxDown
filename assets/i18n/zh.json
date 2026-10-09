@@ -372,6 +372,8 @@
   "detailFollowGlobal": "跟随全局",
   "detailActionFolder": "文件夹",
   "detailActionCopyLink": "复制链接",
+  "detailActionShare": "分享",
+  "detailActionMore": "更多",
   "addDownloadTask": "添加新的下载任务",
   "startDownload": "开始下载",
   "downloadUrl": "下载链接",

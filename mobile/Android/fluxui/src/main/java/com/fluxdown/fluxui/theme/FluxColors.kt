@@ -113,7 +113,8 @@ class FluxColors(
                 highlight = w.copy(alpha = if (dark) .13f else .90f),
                 sheetBg = if (dark) Color(20, 22, 28).copy(alpha = .74f) else Color(250, 250, 247).copy(alpha = .80f),
                 menuBg = if (dark) Color(26, 29, 36).copy(alpha = .78f) else Color(252, 252, 249).copy(alpha = .84f),
-                dim = if (dark) Color(2, 3, 5).copy(alpha = .55f) else Color(244, 244, 241).copy(alpha = .55f),
+                // 浅色模式压暗而非提亮：白雾遮罩会让浅色对话框 / Sheet 与背景糊成一片，失去层次
+                dim = if (dark) Color(2, 3, 5).copy(alpha = .55f) else Color(15, 15, 13).copy(alpha = .22f),
                 scrimTopFrom = canvas.copy(alpha = if (dark) .85f else .90f),
                 accent = seed,
                 accentHi = acc.hi,
