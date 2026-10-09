@@ -16,6 +16,7 @@ use std::{
 };
 
 use crate::{
+    components::threads_risk::threads_risk_callout,
     controller::{
         DownloadsCommand, DownloadsPort, DownloadsResult, LAST_DOWNLOAD_TARGET_PREF,
         LAST_SAVE_DIR_PREF, REMEMBER_LAST_SAVE_DIR_PREF,
@@ -62,8 +63,8 @@ use gpui_component::{
     v_flex,
 };
 
-/// 「自定义线程数」数字输入宽度。
-const CUSTOM_THREADS_WIDTH: f32 = 96.;
+/// 线程数选「自定义」时下拉收窄到的定宽（只需容纳「自定义」），右侧输入框吃满剩余宽度。
+const CUSTOM_THREADS_DROPDOWN_WIDTH: f32 = 104.;
 /// 预设下拉（UA、校验算法）定宽，右侧输入框吃满剩余宽度。
 const PRESET_DROPDOWN_WIDTH: f32 = 140.;
 /// 请求头名称列宽。
@@ -1491,7 +1492,7 @@ impl NewDownloadView {
         )
     }
 
-    /// 线程数：下拉铺满字段；选「自定义」时右侧追加数字输入。
+    /// 线程数：下拉铺满字段；选「自定义」时下拉收窄定宽，右侧数字输入吃满剩余宽度。
     fn render_threads(&self, cx: &mut Context<Self>) -> Div {
         let spacing = active_theme(cx).tokens().spacing;
         let mut options = vec![(ThreadChoice::Auto, self.strings.threads_auto.clone(), false)];
@@ -1515,22 +1516,30 @@ impl NewDownloadView {
             |this, choice, window, cx| this.set_threads(choice, window, cx),
             cx,
         );
+        let custom = self.threads == ThreadChoice::Custom;
+        let dropdown_slot = if custom {
+            div()
+                .flex_none()
+                .w(active_theme(cx).text_extent(CUSTOM_THREADS_DROPDOWN_WIDTH))
+        } else {
+            div().flex_1().min_w_0()
+        };
         let control = h_flex()
             .w_full()
             .gap(spacing.sm)
-            .child(div().flex_1().min_w_0().child(dropdown))
-            .when(self.threads == ThreadChoice::Custom, |this| {
+            .child(dropdown_slot.child(dropdown))
+            .when(custom, |this| {
                 this.child(
                     Input::new(&self.custom_threads)
                         .control(cx)
-                        .flex_none()
-                        .w(active_theme(cx).text_extent(CUSTOM_THREADS_WIDTH)),
+                        .flex_1()
+                        .min_w_0(),
                 )
             });
         form_field(self.strings.threads.clone(), control, None, cx)
     }
 
-    /// 文件名 | 线程数并排；批量隐藏文件名，全磁力隐藏线程数。
+    /// 文件名 | 线程数并排；批量隐藏文件名，全磁力隐藏线程数。线程数过高时下方展开风险提示。
     fn render_name_threads(&self, cx: &mut Context<Self>) -> Option<Div> {
         let mut fields = Vec::with_capacity(2);
         if !self.is_batch() {
@@ -1545,10 +1554,23 @@ impl NewDownloadView {
             );
         }
         // 分段数只对本机下载有意义；下发只带链接 / 文件名 / 保存目录。
-        if !self.all_magnet() && !self.is_remote() {
+        let show_threads = !self.all_magnet() && !self.is_remote();
+        if show_threads {
             fields.push(self.render_threads(cx).into_any_element());
         }
-        (!fields.is_empty()).then(|| form_row(fields, cx))
+        if fields.is_empty() {
+            return None;
+        }
+        let row = form_row(fields, cx);
+        if !show_threads {
+            return Some(row);
+        }
+        let risk = threads_risk_callout(
+            "new-download-threads-risk",
+            i64::from(self.segments(cx)),
+            self.translator.read(cx),
+        );
+        Some(v_flex().w_full().child(row).child(risk))
     }
 
     fn render_http_auth(&self, cx: &mut Context<Self>) -> Div {
