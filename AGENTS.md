@@ -102,6 +102,7 @@ cd mobile/Android && ./gradlew :core:testDebugUnitTest :bridge:testDebugUnitTest
 mobile/FluxDown/scripts/build-core.sh [--release]   # 原生 iOS：编 fluxdown_mobile 为 xcframework + 生成 Swift 绑定（改 Rust 后必须重跑；产物 gitignore）
 cd mobile/FluxDown/FluxKit && xcodebuild test -scheme FluxKit-Package -destination 'platform=iOS Simulator,name=iPhone 18 Pro'   # iOS 领域层 + 真实 FFI 冒烟
 cd mobile/FluxDown && xcodebuild build -project FluxDown.xcodeproj -scheme FluxDown -destination 'generic/platform=iOS Simulator' && python3 scripts/check-i18n.py   # iOS App 构建 + 文案键校验
+mobile/FluxDown/scripts/testflight.sh --version X.Y.Z --build N [--upload]   # iOS App Store 签名 IPA；缺省只 altool 校验，CI = ios-testflight.yml（见 .omp/knowledge/ops.md「iOS TestFlight」）
 
 # ── OpenAPI / 图标 / 发布 ──
 cargo run -p fluxdown_api --example gen_openapi > website-v2/public/openapi.json   # 改 API 后重生成
