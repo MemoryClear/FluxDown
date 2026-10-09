@@ -33,7 +33,7 @@ on:
         default: true
         type: boolean
       groups:
-        description: "额外加入的 TestFlight 组（逗号分隔；内部组 Internal 自动分发无需填写）"
+        description: "额外加入的 TestFlight 组（逗号分隔；留空 = 仓库变量 IOS_TESTFLIGHT_GROUPS；内部组 Internal 自动分发）"
         required: false
         default: ""
         type: string
@@ -100,7 +100,7 @@ jobs:
           if [ -n "$INPUT_VERSION" ]; then
             VERSION="$INPUT_VERSION"
             UPLOAD="$INPUT_UPLOAD"
-            GROUPS_CSV="$INPUT_GROUPS"
+            GROUPS_CSV="${INPUT_GROUPS:-$VAR_GROUPS}"
             WHATS_NEW="$INPUT_WHATS_NEW"
           else
             VERSION="${GITHUB_REF_NAME#v}"
