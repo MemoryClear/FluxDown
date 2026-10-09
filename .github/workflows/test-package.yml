@@ -5,6 +5,8 @@ name: Manual Client Test Packages
 # macOS scripts/package_gpui_macos.sh，测试包为 ad-hoc 签名、不公证）。
 # iOS（原生 mobile/FluxDown）复用 ios-testflight.yml：App Store 签名后直接上传 TestFlight，
 # 内部组「Internal」自动可用；IPA 只能经 TestFlight 安装，artifact 里的 IPA / dSYM 仅供排查。
+# android-native（原生 mobile/Android）复用 android-package.yml：原生版自己的密钥签名，artifact 里直接装；
+# android 仍是 Flutter 版测试 APK。两者签名不同，不能互相覆盖安装。
 on:
   workflow_dispatch:
     inputs:
@@ -30,6 +32,7 @@ on:
           - linux
           - macos
           - android
+          - android-native
           - ios
           - extension
 
@@ -340,3 +343,13 @@ jobs:
       ref: ${{ inputs.ref }}
       version: ${{ needs.version.outputs.clean_version }}
       whats_new: "测试包 ${{ inputs.ref }} · ${{ needs.version.outputs.version }}"
+
+  build-android-native:
+    name: Test Android native APK
+    needs: version
+    if: inputs.target == 'all' || inputs.target == 'android-native'
+    uses: ./.github/workflows/android-package.yml
+    secrets: inherit
+    with:
+      ref: ${{ inputs.ref }}
+      version: ${{ needs.version.outputs.version }}

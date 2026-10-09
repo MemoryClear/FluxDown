@@ -99,6 +99,7 @@ cd web && bun run dev                 # Web SPA localhost:5173（/rpc、/api、/
 cd website && npm run dev             # 官网 Astro localhost:4321
 cd fluxDown && npm run dev            # 扩展开发（Chrome）；dev:firefox / build / zip
 cd mobile/Android && ./gradlew :core:testDebugUnitTest :bridge:testDebugUnitTest :app:assembleDebug   # 原生 Android（JAVA_HOME = Android Studio 自带 JBR；:bridge 经 cargo-ndk 编译 fluxdown_mobile）
+mobile/Android/scripts/package.sh --version X.Y.Z[-后缀] --signing <签名属性文件>   # 原生 Android release 签名 APK（universal + 各 ABI）；CI = android-package.yml（见 .omp/knowledge/ops.md「原生 Android 打包」）
 mobile/FluxDown/scripts/build-core.sh [--release]   # 原生 iOS：编 fluxdown_mobile 为 xcframework + 生成 Swift 绑定（改 Rust 后必须重跑；产物 gitignore）
 cd mobile/FluxDown/FluxKit && xcodebuild test -scheme FluxKit-Package -destination 'platform=iOS Simulator,name=iPhone 18 Pro'   # iOS 领域层 + 真实 FFI 冒烟
 cd mobile/FluxDown && xcodebuild build -project FluxDown.xcodeproj -scheme FluxDown -destination 'generic/platform=iOS Simulator' && python3 scripts/check-i18n.py   # iOS App 构建 + 文案键校验
