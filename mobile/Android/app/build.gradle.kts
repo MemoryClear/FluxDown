@@ -160,9 +160,11 @@ android {
     buildTypes {
         release {
             signingConfig = signingConfigs.findByName("release")
+            // 全量 R8（不用实验性的 packageScope）：packageScope 下被范围外代码引用的 kotlin 多文件门面父类
+            // （如 SequencesKt__SequenceBuilderKt）保持包私有，子类却被重打包进默认包，启动即 IllegalAccessError。
+            // JNA / UniFFI 绑定的保留规则在 :bridge 的 consumer-rules.pro。
             optimization {
                 enable = true
-                packageScope = setOf("androidx.**", "kotlin.**", "kotlinx.**")
             }
         }
     }
