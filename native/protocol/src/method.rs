@@ -192,6 +192,33 @@ pub const AGENT_REFERRAL_DELETE_CODE: &str = "agent.referral.deleteCode";
 pub const AGENT_REFERRAL_LIST_RECORDS: &str = "agent.referral.listRecords";
 pub const AGENT_REFERRAL_VALIDATE: &str = "agent.referral.validate";
 
+/// 云端推送状态 → `CloudNotifyStateDto`（读本机缓存；过期时后台刷新并经 `CloudNotifyChanged` 推送）。
+pub const AGENT_CLOUD_NOTIFY_GET: &str = "agent.cloudNotify.get";
+/// 立即向 FluxCloud 拉取概览 → `CloudNotifyStateDto`。
+pub const AGENT_CLOUD_NOTIFY_REFRESH: &str = "agent.cloudNotify.refresh";
+/// `CloudNotifyReportingParams` → `CloudNotifyStateDto`：本设备上报开关（设备本地）。
+pub const AGENT_CLOUD_NOTIFY_SET_REPORTING: &str = "agent.cloudNotify.setReporting";
+/// `CloudNotifyPrivacyParams` → `CloudNotifyStateDto`：上报附带字段（设备本地）。
+pub const AGENT_CLOUD_NOTIFY_SET_PRIVACY: &str = "agent.cloudNotify.setPrivacy";
+/// `CloudNotifyChannelCreateParams` → `CloudNotifyChannelDto`。
+pub const AGENT_CLOUD_NOTIFY_CREATE_CHANNEL: &str = "agent.cloudNotify.createChannel";
+/// `CloudNotifyChannelUpdateParams` → `CloudNotifyChannelDto`。
+pub const AGENT_CLOUD_NOTIFY_UPDATE_CHANNEL: &str = "agent.cloudNotify.updateChannel";
+/// `CloudNotifyChannelIdParams` → `{ "ok": true }`。
+pub const AGENT_CLOUD_NOTIFY_DELETE_CHANNEL: &str = "agent.cloudNotify.deleteChannel";
+/// `CloudNotifyChannelIdParams` → `CloudNotifyTestResult`（不计入额度）。
+pub const AGENT_CLOUD_NOTIFY_TEST_CHANNEL: &str = "agent.cloudNotify.testChannel";
+/// → `CloudNotifyTelegramBindDto`：生成一次性 Telegram 绑定码。
+pub const AGENT_CLOUD_NOTIFY_TELEGRAM_BIND_START: &str = "agent.cloudNotify.telegramBindStart";
+/// `CloudNotifyTelegramBindStatusParams` → `CloudNotifyTelegramBindStatusDto`。
+pub const AGENT_CLOUD_NOTIFY_TELEGRAM_BIND_STATUS: &str = "agent.cloudNotify.telegramBindStatus";
+/// `CloudNotifyDeliveriesParams` → `CloudNotifyDeliveriesPage`。
+pub const AGENT_CLOUD_NOTIFY_DELIVERIES: &str = "agent.cloudNotify.deliveries";
+/// `CloudNotifyEmailCodeParams` → `CloudNotifyEmailCodeResult`：向非账号邮箱发通知渠道验证码。
+pub const AGENT_CLOUD_NOTIFY_SEND_EMAIL_CODE: &str = "agent.cloudNotify.sendEmailCode";
+/// `CloudNotifyEmailVerifyParams` → `{ "ok": true }`：校验验证码，把地址记为本账号已验证的通知邮箱。
+pub const AGENT_CLOUD_NOTIFY_VERIFY_EMAIL: &str = "agent.cloudNotify.verifyEmail";
+
 pub const AGENT_PLATFORM_OPEN_TASK: &str = "agent.platform.openTask";
 pub const AGENT_PLATFORM_REVEAL_TASK: &str = "agent.platform.revealTask";
 pub const AGENT_PLATFORM_OPEN_PATH: &str = "agent.platform.openPath";
@@ -407,6 +434,19 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_REFERRAL_DELETE_CODE,
     AGENT_REFERRAL_LIST_RECORDS,
     AGENT_REFERRAL_VALIDATE,
+    AGENT_CLOUD_NOTIFY_GET,
+    AGENT_CLOUD_NOTIFY_REFRESH,
+    AGENT_CLOUD_NOTIFY_SET_REPORTING,
+    AGENT_CLOUD_NOTIFY_SET_PRIVACY,
+    AGENT_CLOUD_NOTIFY_CREATE_CHANNEL,
+    AGENT_CLOUD_NOTIFY_UPDATE_CHANNEL,
+    AGENT_CLOUD_NOTIFY_DELETE_CHANNEL,
+    AGENT_CLOUD_NOTIFY_TEST_CHANNEL,
+    AGENT_CLOUD_NOTIFY_TELEGRAM_BIND_START,
+    AGENT_CLOUD_NOTIFY_TELEGRAM_BIND_STATUS,
+    AGENT_CLOUD_NOTIFY_DELIVERIES,
+    AGENT_CLOUD_NOTIFY_SEND_EMAIL_CODE,
+    AGENT_CLOUD_NOTIFY_VERIFY_EMAIL,
     AGENT_PLATFORM_OPEN_TASK,
     AGENT_PLATFORM_REVEAL_TASK,
     AGENT_PLATFORM_OPEN_PATH,

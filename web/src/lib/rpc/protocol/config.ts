@@ -166,7 +166,7 @@ const readOnly = (key: string, dflt = ''): DaemonConfigField => ({
 export const DAEMON_CONFIG_FIELDS: readonly DaemonConfigField[] = [
   // 下载
   text('default_save_dir'),
-  int('default_segments', '0', 0, 64),
+  int('default_segments', '0', 0, 512),
   int('auto_max_connections', '16', 0, 128),
   bool('cdn_multi_enabled', 'false'),
   int('cdn_max_nodes', '0', 0, 8),

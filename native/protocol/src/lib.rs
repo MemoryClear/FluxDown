@@ -4,6 +4,7 @@
 
 pub mod agent;
 pub mod capture_link;
+pub mod cloud_notify;
 pub mod daemon;
 pub mod daemon_config;
 mod digest;
@@ -40,6 +41,17 @@ pub use agent::{
     UpdateCheckParams, UpdateFailure, UpdateInstallKind, UpdateManualReason, UpdatePhase,
     UpdateStatusDto,
 };
+pub use cloud_notify::{
+    CLOUD_NOTIFY_EMAIL_MAX_ADDRESSES, CLOUD_NOTIFY_RECENT_DELIVERIES,
+    CloudNotifyChannelCreateParams, CloudNotifyChannelDto, CloudNotifyChannelIdParams,
+    CloudNotifyChannelUpdateParams, CloudNotifyDeliveriesPage, CloudNotifyDeliveriesParams,
+    CloudNotifyDeliveryDto, CloudNotifyEmailCodeParams, CloudNotifyEmailCodeResult,
+    CloudNotifyEmailVerifyParams, CloudNotifyKindDto, CloudNotifyOverviewDto,
+    CloudNotifyPrivacyParams, CloudNotifyReportingParams, CloudNotifyStateDto,
+    CloudNotifyTelegramBindDto, CloudNotifyTelegramBindStatusDto,
+    CloudNotifyTelegramBindStatusParams, CloudNotifyTestResult, CloudNotifyUsageDto, TaskNoticeDto,
+    TaskNoticeTaskDto,
+};
 pub use daemon::{
     ApiInfo, BtFileDto, CdnConfigApplyParams, CdnNodeDto, CdnReportAckParams, CdnReportLeaseDto,
     ChangeTaskUrlParams, ComponentFfmpegStatus, ComponentInstallParams, ComponentKind,
@@ -74,7 +86,8 @@ pub use daemon::{
 pub use daemon_config::{
     BT_MSE_MODES, BT_SEED_LIMIT_OPERATORS, BT_SEED_THEN_ACTIONS, BT_SEED_TIME_UNITS,
     DAEMON_CONFIG_FIELDS, DaemonConfigError, DaemonConfigField, DaemonConfigKind,
-    FILE_EXISTS_BEHAVIORS, FILE_MISSING_ACTIONS, PROXY_MODES, PROXY_TYPES, daemon_config_default,
+    FILE_EXISTS_BEHAVIORS, FILE_MISSING_ACTIONS, HIGH_SEGMENTS_WARN_ABOVE, MAX_TASK_SEGMENTS,
+    PROXY_MODES, PROXY_TYPES, SEVERE_SEGMENTS_WARN_ABOVE, daemon_config_default,
     daemon_config_field, is_public_daemon_config_key, normalize_daemon_config_patch,
     normalize_daemon_config_value,
 };

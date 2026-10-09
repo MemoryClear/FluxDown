@@ -215,6 +215,19 @@ object HostMethod {
     /** 完成后关机：`{delaySecs}`；无活跃任务时拒绝（`InvalidArgument`）。 */
     const val agentPowerArm = "agent.power.arm"
     const val agentPowerDisarm = "agent.power.disarm"
+    const val agentCloudNotifyGet = "agent.cloudNotify.get"
+    const val agentCloudNotifyRefresh = "agent.cloudNotify.refresh"
+    const val agentCloudNotifySetReporting = "agent.cloudNotify.setReporting"
+    const val agentCloudNotifySetPrivacy = "agent.cloudNotify.setPrivacy"
+    const val agentCloudNotifyCreateChannel = "agent.cloudNotify.createChannel"
+    const val agentCloudNotifyUpdateChannel = "agent.cloudNotify.updateChannel"
+    const val agentCloudNotifyDeleteChannel = "agent.cloudNotify.deleteChannel"
+    const val agentCloudNotifyTestChannel = "agent.cloudNotify.testChannel"
+    const val agentCloudNotifyTelegramBindStart = "agent.cloudNotify.telegramBindStart"
+    const val agentCloudNotifyTelegramBindStatus = "agent.cloudNotify.telegramBindStatus"
+    const val agentCloudNotifyDeliveries = "agent.cloudNotify.deliveries"
+    const val agentCloudNotifySendEmailCode = "agent.cloudNotify.sendEmailCode"
+    const val agentCloudNotifyVerifyEmail = "agent.cloudNotify.verifyEmail"
     const val serviceEvent = "service.event"
 }
 

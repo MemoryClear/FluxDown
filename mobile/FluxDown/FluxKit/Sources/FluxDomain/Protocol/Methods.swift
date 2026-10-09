@@ -216,6 +216,19 @@ public enum HostMethod {
     /// 完成后关机：`{delaySecs}`；无活跃任务时拒绝（`InvalidArgument`）。
     public static let agentPowerArm = "agent.power.arm"
     public static let agentPowerDisarm = "agent.power.disarm"
+    public static let agentCloudNotifyGet = "agent.cloudNotify.get"
+    public static let agentCloudNotifyRefresh = "agent.cloudNotify.refresh"
+    public static let agentCloudNotifySetReporting = "agent.cloudNotify.setReporting"
+    public static let agentCloudNotifySetPrivacy = "agent.cloudNotify.setPrivacy"
+    public static let agentCloudNotifyCreateChannel = "agent.cloudNotify.createChannel"
+    public static let agentCloudNotifyUpdateChannel = "agent.cloudNotify.updateChannel"
+    public static let agentCloudNotifyDeleteChannel = "agent.cloudNotify.deleteChannel"
+    public static let agentCloudNotifyTestChannel = "agent.cloudNotify.testChannel"
+    public static let agentCloudNotifyTelegramBindStart = "agent.cloudNotify.telegramBindStart"
+    public static let agentCloudNotifyTelegramBindStatus = "agent.cloudNotify.telegramBindStatus"
+    public static let agentCloudNotifyDeliveries = "agent.cloudNotify.deliveries"
+    public static let agentCloudNotifySendEmailCode = "agent.cloudNotify.sendEmailCode"
+    public static let agentCloudNotifyVerifyEmail = "agent.cloudNotify.verifyEmail"
     public static let serviceEvent = "service.event"
 }
 
