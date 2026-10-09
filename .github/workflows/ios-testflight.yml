@@ -75,7 +75,8 @@ concurrency:
 jobs:
   testflight:
     name: Build and upload to TestFlight
-    runs-on: macos-26
+    # 工程是 Xcode 27 格式（objectVersion 110）且用了 iOS 27 SDK API；macos-26 镜像只到 Xcode 26.x。
+    runs-on: xcode-27
     timeout-minutes: 120
     env:
       CARGO_HTTP_MULTIPLEXING: "false"
