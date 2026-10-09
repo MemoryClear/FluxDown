@@ -68,6 +68,7 @@ export const METHOD = {
   DAEMON_RSS_REFRESH_SOURCE: 'daemon.rss.refreshSource',
   DAEMON_RSS_ITEM_ACTION: 'daemon.rss.itemAction',
   DAEMON_RSS_VALIDATE: 'daemon.rss.validate',
+  DAEMON_LINK_PROBE: 'daemon.link.probe',
 
   DAEMON_PLUGIN_LIST: 'daemon.plugin.list',
   DAEMON_PLUGIN_AUTH: 'daemon.plugin.auth',

@@ -11802,6 +11802,31 @@ impl DownloadManager {
         )
     }
 
+    /// 剪贴板识别用的只读链接探测（`daemon.link.probe`）：只发一次 HEAD。
+    ///
+    /// client 与 meta-probe 同源（全局代理 / UA / Auto 路由）；返回的 future 可在 actor 之外
+    /// `await`。非 http(s) 链接不联网，直接 `Unknown`。
+    pub fn link_probe_future(
+        &self,
+        url: String,
+    ) -> impl Future<Output = crate::meta_prober::LinkProbe> + Send + use<> {
+        let client = self.task_http_context(&url, "", "", "", false).0;
+        async move {
+            let lower = url.get(..8).unwrap_or(&url).to_ascii_lowercase();
+            if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+                return crate::meta_prober::LinkProbe {
+                    verdict: crate::meta_prober::LinkVerdict::Unknown,
+                    final_url: url,
+                    file_name: String::new(),
+                    mime: String::new(),
+                    total_bytes: 0,
+                };
+            }
+            let spec = crate::downloader::RequestSpec::empty_get();
+            crate::meta_prober::probe_link_kind(&url, &client, &spec).await
+        }
+    }
+
     /// RSS off-actor 回流的唯一入口（宿主 actor 的 `rss_rx` 分支调用）。
     ///
     /// 抓取结果先经 `RssManager` 完成去重/过滤/落库，再把「应下载」的条目

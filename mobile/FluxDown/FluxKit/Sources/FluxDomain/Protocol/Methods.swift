@@ -73,6 +73,7 @@ public enum HostMethod {
     public static let daemonRssRefreshSource = "daemon.rss.refreshSource"
     public static let daemonRssItemAction = "daemon.rss.itemAction"
     public static let daemonRssValidate = "daemon.rss.validate"
+    public static let daemonLinkProbe = "daemon.link.probe"
     public static let daemonPluginList = "daemon.plugin.list"
     public static let daemonPluginAuth = "daemon.plugin.auth"
     public static let daemonPluginSetEnabled = "daemon.plugin.setEnabled"

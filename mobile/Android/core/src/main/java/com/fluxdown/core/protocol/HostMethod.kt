@@ -73,6 +73,7 @@ object HostMethod {
     const val daemonRssRefreshSource = "daemon.rss.refreshSource"
     const val daemonRssItemAction = "daemon.rss.itemAction"
     const val daemonRssValidate = "daemon.rss.validate"
+    const val daemonLinkProbe = "daemon.link.probe"
     const val daemonPluginList = "daemon.plugin.list"
     const val daemonPluginAuth = "daemon.plugin.auth"
     const val daemonPluginSetEnabled = "daemon.plugin.setEnabled"

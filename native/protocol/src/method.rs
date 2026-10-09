@@ -72,6 +72,8 @@ pub const DAEMON_RSS_DELETE_SOURCE: &str = "daemon.rss.deleteSource";
 pub const DAEMON_RSS_REFRESH_SOURCE: &str = "daemon.rss.refreshSource";
 pub const DAEMON_RSS_ITEM_ACTION: &str = "daemon.rss.itemAction";
 pub const DAEMON_RSS_VALIDATE: &str = "daemon.rss.validate";
+/// 剪贴板识别用的只读链接探测：daemon 以全局代理/UA 只发一次 HEAD（不发 GET），判定是否下载资源。
+pub const DAEMON_LINK_PROBE: &str = "daemon.link.probe";
 
 pub const DAEMON_PLUGIN_LIST: &str = "daemon.plugin.list";
 pub const DAEMON_PLUGIN_AUTH: &str = "daemon.plugin.auth";
@@ -341,6 +343,7 @@ pub const ALL_METHODS: &[&str] = &[
     DAEMON_RSS_REFRESH_SOURCE,
     DAEMON_RSS_ITEM_ACTION,
     DAEMON_RSS_VALIDATE,
+    DAEMON_LINK_PROBE,
     DAEMON_PLUGIN_LIST,
     DAEMON_PLUGIN_AUTH,
     DAEMON_PLUGIN_SET_ENABLED,
@@ -487,6 +490,7 @@ pub const SLOW_DAEMON_METHODS: &[&str] = &[
     DAEMON_PLUGIN_MARKET_INSTALL,
     DAEMON_GROUP_RESOLVE_PREVIEW,
     DAEMON_RSS_VALIDATE,
+    DAEMON_LINK_PROBE,
     DAEMON_CONFIG_PROXY_TEST,
     DAEMON_WEBHOOK_TEST,
     DAEMON_BT_TRACKER_SUBSCRIPTION_REFRESH,

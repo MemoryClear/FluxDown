@@ -41,6 +41,24 @@ export interface ProxyTestResponse {
   latencyMs: number;
 }
 
+/** `daemon.link.probe` 参数：只读 HEAD 探测下载链接。 */
+export interface LinkProbeParams {
+  url: string;
+}
+
+export type LinkProbeVerdict = 'resource' | 'notResource' | 'unknown';
+
+export interface LinkProbeResult {
+  verdict: LinkProbeVerdict;
+  /** 跟随重定向后的地址；未拿到响应时等于原 url。 */
+  finalUrl: string;
+  fileName: string;
+  /** 小写 MIME essence，无则空。 */
+  mime: string;
+  /** 0 = 未知。 */
+  totalBytes: number;
+}
+
 /** 按域连接上限摘要。 */
 export interface ConnPolicySummaryDto {
   domainCount: number;
