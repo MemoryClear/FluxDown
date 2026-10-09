@@ -1238,7 +1238,7 @@
   "ed2kServerSubUpdateNow": "立即更新",
   "ed2kServerSubUpdating": "更新中…",
   "ed2kServerSubUpdateFailed": "更新失败",
-  "ed2kServerSubPlaceholder": "每行一个 server.met 地址，例如：\nhttp://upd.emule-security.org/server.met\nhttps://www.shortypower.org/server.met",
+  "ed2kServerSubPlaceholder": "每行一个 server.met 地址，例如：\nhttps://upd.emule-security.org/server.met\nhttps://www.shortypower.org/server.met",
   "ed2kServerSubResetConfirm": "确定要恢复默认的订阅地址吗？",
   "ed2kServerSubUrls": "订阅地址",
   "ed2kServerSubUrlsDesc": "要订阅的 server.met 地址，每行一个；支持 ed2k://|serverlist|…|/ 链接",

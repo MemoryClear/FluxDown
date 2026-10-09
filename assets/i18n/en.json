@@ -1238,7 +1238,7 @@
   "ed2kServerSubUpdateNow": "Update Now",
   "ed2kServerSubUpdating": "Updating…",
   "ed2kServerSubUpdateFailed": "Update failed",
-  "ed2kServerSubPlaceholder": "One server.met URL per line, e.g.:\nhttp://upd.emule-security.org/server.met\nhttps://www.shortypower.org/server.met",
+  "ed2kServerSubPlaceholder": "One server.met URL per line, e.g.:\nhttps://upd.emule-security.org/server.met\nhttps://www.shortypower.org/server.met",
   "ed2kServerSubResetConfirm": "Reset subscription URLs to defaults?",
   "ed2kServerSubUrls": "Subscription URLs",
   "ed2kServerSubUrlsDesc": "server.met URLs to subscribe to, one per line; ed2k://|serverlist|…|/ links are supported",
