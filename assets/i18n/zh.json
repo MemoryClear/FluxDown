@@ -2095,8 +2095,6 @@
   "cloudNotifyChannelName": "名称",
   "cloudNotifyEvents": "推送事件",
   "cloudNotifyEventsEmpty": "至少选择一个事件",
-  "cloudNotifyDevices": "来源设备",
-  "cloudNotifyDevicesAll": "全部设备",
   "cloudNotifySave": "保存",
   "cloudNotifyTestOk": "测试通知已发送",
   "cloudNotifyTestFail": "发送失败 · {error}",

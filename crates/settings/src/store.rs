@@ -103,7 +103,7 @@ pub struct SettingsStore {
     components: Vec<ComponentStatusDto>,
     webhook_deliveries: Vec<WebhookDeliveryDto>,
     session: Option<fluxdown_protocol::AgentSessionDto>,
-    /// 云账号下的全部设备（含本机）：侧栏设备区「未设置时自动显示」与云端推送「来源设备」的依据。
+    /// 云账号下的全部设备（含本机）：侧栏设备区「未设置时自动显示」的依据。
     cloud_devices: Vec<fluxdown_protocol::CloudDevice>,
     /// 云端推送的本机状态投影（`AgentSnapshot.cloud_notify`）。
     cloud_notify: fluxdown_protocol::CloudNotifyStateDto,

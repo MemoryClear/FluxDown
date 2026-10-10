@@ -2095,8 +2095,6 @@
   "cloudNotifyChannelName": "Name",
   "cloudNotifyEvents": "Events",
   "cloudNotifyEventsEmpty": "Pick at least one event",
-  "cloudNotifyDevices": "Source devices",
-  "cloudNotifyDevicesAll": "All devices",
   "cloudNotifySave": "Save",
   "cloudNotifyTestOk": "Test notification sent",
   "cloudNotifyTestFail": "Failed · {error}",
