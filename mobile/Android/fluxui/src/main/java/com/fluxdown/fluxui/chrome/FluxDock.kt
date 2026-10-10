@@ -282,7 +282,7 @@ private fun DockBody(
     }
 }
 
-/** 液态指示器：`accentLo` 纯底 + accent 发丝描边（选中态统一语义；无渐变、无辉光）。 */
+/** 液态指示器：`accentLo` 纯底 + accent 发丝描边（选中态统一语义；无渐变、无辉光）。浅色描边更轻，免得像按钮外框。 */
 @Composable
 private fun DockIndicator() {
     val c = FluxTheme.colors
@@ -291,7 +291,7 @@ private fun DockIndicator() {
         Modifier
             .drawWithCache {
                 val outline = shape.createOutline(size, layoutDirection, this)
-                val line = c.accent.copy(alpha = 0.30f)
+                val line = c.accent.copy(alpha = if (c.dark) 0.30f else 0.20f)
                 val hw = 0.5.dp.toPx()
                 onDrawBehind {
                     drawOutline(outline, c.accentLo)
