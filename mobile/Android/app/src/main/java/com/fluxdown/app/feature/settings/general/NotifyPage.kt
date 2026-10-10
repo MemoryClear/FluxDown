@@ -140,7 +140,7 @@ internal fun NotifyPage() {
             }
         }
         flowItem(index++, gate, NotifyIds.ITEM_SYSTEM) {
-            GlassSection(title = str(R.string.notifyGroupSystem), footer = str(R.string.mobileNotifSystemFooter)) {
+            GlassSection(title = str(R.string.notifyGroupSystem), footer = str(R.string.mobileNotifSystemFooterAndroid)) {
                 settingSwitch(
                     ctx, COMPLETE_KEY, R.string.notifyOnComplete, R.string.notifyOnCompleteDesc, id = NotifyIds.COMPLETE,
                     onChange = { on ->
