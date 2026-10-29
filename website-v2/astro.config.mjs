@@ -240,6 +240,14 @@ export default defineConfig({
         access: "secret",
         optional: true,
       }),
+      // 官网浏览器下载的验证码通行证（src/lib/download-pass.ts）：HMAC 密钥，随机 32 字节以上。
+      // 配置后浏览器（非 FluxDown 更新器 UA）须先过 ESA AI 验证码才拿 dl-cn 镜像，否则 GitHub；留空则不要求。
+      // 先在两个站点的反代写好 X-Fluxdown-Edge（见 .omp/knowledge/ops.md「下载准入」）再配置，否则浏览器全部回落 GitHub。
+      DOWNLOAD_PASS_SECRET: envField.string({
+        context: "server",
+        access: "secret",
+        optional: true,
+      }),
       // 123 云盘下载源（src/lib/pan123.ts）：.github/scripts/pan123_mirror.sh 经 WebDAV 上传到同一对象键；
       // 仅 ≥ 0.6.0 的应用内更新（规则见 download-gate.ts::isPan123Updater）优先 302 到 123 直链（10 分钟有效），失败再走 dl-cn / GitHub；官网浏览器下载不走 123。
       // WebDAV 账号 / 应用密码（只授权发布目录）用于 PROPFIND 确认资产；UID + 鉴权密钥用于签直链。缺任一项则关闭。
