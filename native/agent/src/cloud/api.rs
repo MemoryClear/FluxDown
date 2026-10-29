@@ -151,6 +151,19 @@ impl CloudApi {
             .await
     }
 
+    /// 任务实时通道（WebSocket）：心跳在连接内收发，取代 `remote_events` + `ping_presence`。
+    pub(crate) async fn remote_socket(
+        &self,
+        device_id: &str,
+    ) -> Result<super::CloudSocket, CloudError> {
+        self.client
+            .authenticated_socket_epoch(
+                &format!("/api/v1/tasks/ws?deviceId={}", encode(device_id)),
+                self.request_epoch(),
+            )
+            .await
+    }
+
     pub async fn plans(&self) -> Result<Value, CloudError> {
         self.client
             .public::<Value, Value>(Method::GET, "/api/v1/plans/catalog", None)
