@@ -8,7 +8,7 @@ mock.module("wxt/browser", () => ({
   browser: { storage: { local, sync } },
 }));
 // wxt/browser 必须先 mock 再加载被测模块（与 i18n.test.ts 同一约定），故此处动态导入。
-const { DEFAULT_SETTINGS, loadSettings, migrateSettings, shouldIntercept } = await import(
+const { DEFAULT_SETTINGS, isLikelyDownloadClick, loadSettings, migrateSettings, shouldIntercept } = await import(
   "./settings"
 );
 const { DEFAULT_SITE_PROFILE } = await import("./site-profiles");
@@ -80,6 +80,28 @@ describe("shouldIntercept 站点配置", () => {
         profiles,
       ),
     ).toBe(false);
+  });
+});
+
+describe("isLikelyDownloadClick 点击预热信号", () => {
+  const settings = { ...DEFAULT_SETTINGS };
+  const page = "https://www.example.com/page";
+
+  test("普通网页链接不预热（预热会拉起 App）", () => {
+    expect(isLikelyDownloadClick("https://www.example.com/about", false, page, settings)).toBe(false);
+    expect(isLikelyDownloadClick("https://www.example.com/download?id=1", false, page, settings)).toBe(false);
+  });
+
+  test("扩展名命中或带 download 属性即预热", () => {
+    expect(isLikelyDownloadClick("https://cdn.example.com/a.zip", false, page, settings)).toBe(true);
+    expect(isLikelyDownloadClick("https://www.example.com/get", true, page, settings)).toBe(true);
+  });
+
+  test("总开关关闭、排除扩展名、站点 never 均不预热", () => {
+    const url = "https://cdn.example.com/a.zip";
+    expect(isLikelyDownloadClick(url, true, page, { ...settings, enabled: false })).toBe(false);
+    expect(isLikelyDownloadClick(url, true, page, { ...settings, excludeExtensions: [".zip"] })).toBe(false);
+    expect(isLikelyDownloadClick(url, false, page, settings, { "example.com": profile("never") })).toBe(false);
   });
 });
 

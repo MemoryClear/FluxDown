@@ -626,6 +626,21 @@ export default defineContentScript({
       reportBypassKey(false);
     }
 
+    // ===== 链接按下预热 =====
+    // 浏览器要等对方响应头才把点击变成下载（标签页转圈），之后才轮到拦截层投递；按下时就请
+    // background 判断并预热 NMH，让 App 冷启动与这段等待并行。pointerdown 是最早的点击信号。
+    function onLinkPress(e: PointerEvent): void {
+      if (config?.warmOnLinkPress !== true || !e.isTrusted || e.button > 1) return;
+      const key = bypassModifier();
+      if ((key === "Alt" && e.altKey) || (key === "Shift" && e.shiftKey)) return;
+      const origin = e.composedPath()[0];
+      const link = origin instanceof Element ? origin.closest("a[href]") : null;
+      if (!(link instanceof HTMLAnchorElement)) return;
+      const href = link.href;
+      if (!href.startsWith("http:") && !href.startsWith("https:")) return;
+      swallow(sendAction({ action: "linkPress", href, download: link.hasAttribute("download") }));
+    }
+
     function onVisibility(): void {
       if (document.visibilityState === "hidden") reportBypassKey(false);
     }
@@ -633,6 +648,7 @@ export default defineContentScript({
     window.addEventListener("keydown", onBypassKey, true);
     window.addEventListener("keyup", onBypassKey, true);
     window.addEventListener("pointerdown", onBypassPointer, true);
+    window.addEventListener("pointerdown", onLinkPress, true);
     window.addEventListener("blur", onBypassRelease);
     document.addEventListener("visibilitychange", onVisibility);
 
@@ -678,6 +694,7 @@ export default defineContentScript({
       window.removeEventListener("keydown", onBypassKey, true);
       window.removeEventListener("keyup", onBypassKey, true);
       window.removeEventListener("pointerdown", onBypassPointer, true);
+      window.removeEventListener("pointerdown", onLinkPress, true);
       window.removeEventListener("blur", onBypassRelease);
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("pageshow", onPageShow);

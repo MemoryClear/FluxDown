@@ -78,6 +78,8 @@ export interface PageConfig {
   interceptMagnet: boolean;
   /** 跳过接管修饰键：settings.enabled 关闭时为 "off"（没有接管可跳过）。 */
   bypassKey: "alt" | "shift" | "off";
+  /** 按下链接时上报以预热 NMH：settings.enabled && 站点 intercept !== "never"。 */
+  warmOnLinkPress: boolean;
   /** settings.sniffImages：DOM 扫描是否把图片链接算作可下载。 */
   sniffImages: boolean;
   /**

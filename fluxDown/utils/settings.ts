@@ -615,6 +615,40 @@ export function shouldIntercept(
 }
 
 /**
+ * 点击链接时（响应头到达前）是否像一次会被接管的下载：用于提前预热 NMH，让 App 冷启动与
+ * 对方服务器首字节等待并行。只认强信号——`<a download>` 或 URL 扩展名命中生效拦截列表；
+ * 预热会拉起 App，普通网页链接绝不能触发。站点 never、排除扩展名、自身远程 Web UI 一律否。
+ */
+export function isLikelyDownloadClick(
+  url: string,
+  hasDownloadAttr: boolean,
+  pageUrl: string | undefined,
+  settings: FluxDownSettings,
+  profiles: Record<string, SiteProfile> = {},
+): boolean {
+  if (!settings.enabled) return false;
+  if (isFluxDownServerDownload(url, pageUrl, settings.remoteUrl)) return false;
+  for (const target of [url, pageUrl]) {
+    if (!target) continue;
+    let host: string;
+    try {
+      host = new URL(target).hostname;
+    } catch {
+      if (target === url) return false;
+      continue;
+    }
+    if (profileFor(profiles, host).profile.intercept === "never") return false;
+  }
+  if (
+    settings.excludeExtensions.length > 0 &&
+    matchByExtension(url, undefined, settings.excludeExtensions)
+  ) {
+    return false;
+  }
+  return hasDownloadAttr || matchByExtension(url, undefined, effectiveExtensions(settings));
+}
+
+/**
  * fluxdown headless 服务（native/agent server_mode）给自身 Web UI 提供的
  * 文件/导出下载端点；旧的 /api/v1 路由（冻结的 native/server）一并保留兼容。
  */
