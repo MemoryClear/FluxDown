@@ -170,7 +170,7 @@ cd mobile/FluxDown && xcodebuild build -project FluxDown.xcodeproj -scheme FluxD
 **Rust**
 - Edition 2024；Clippy deny `unwrap_used` / `expect_used` / `wildcard_imports`（根 `clippy.toml` 允许测试 unwrap / expect），非测试代码用 `?` + `thiserror`。
 - 禁 `todo!` / `unimplemented!` 与静默忽略错误（workspace lints deny，所有 crate `[lints] workspace = true`）；禁止 `allow` / `drop(Result)` / 空错误分支绕过（`rule://no-ignored-errors-in-rust`）。
-- 默认安全：unsafe 仅限无语义等价安全替代的平台 FFI 边界，最小范围 + SAFETY + 健全接口（`rule://no-unsafe-in-rust`）；workspace deny `unsafe_op_in_unsafe_fn` 与 `clippy::undocumented_unsafe_blocks`。
+- 默认安全：unsafe 仅限无语义等价安全替代的平台 FFI 边界，最小范围 + SAFETY + 健全接口（`rule://no-unsafe-in-rust`）；workspace deny `unsafe_op_in_unsafe_fn` 与 `clippy::undocumented_unsafe_blocks`。`crates/*` 零 unsafe，唯一例外是 `crates/app/src/app_icon.rs` 的 macOS `setApplicationIconImage(Some)`。
 - 公开 API `///` + doctest；异步优先，阻塞走 `spawn_blocking`；重试指数退避（MAX=3，base=2s）；task panic 用 `AssertUnwindSafe` + `catch_unwind`。
 - 日志：`use crate::logger::log_info; log_info!("[mod] ...")`（每文件显式 use），格式 `HH:MM:SS.mmm [Tag] message`。
 - 解析不可信输入（文件名 / 头部 / 种子元数据 / 协议帧）：字符串用 `get(a..b)` / `split_at_checked` / 先 `is_char_boundary`，下标用 `get`，长度转换用 `try_from`。

@@ -128,7 +128,7 @@ iOS job 跑在 `runs-on: xcode-27`（GitHub 的 Xcode 27 镜像）：工程是 X
 > ⚠️ `docs/` 在 `.gitignore` 里（零文件入库），下列设计文档**只存在于本机工作副本**；契约与不变式一律写回 `AGENTS.md` / 本目录，别只留在 `docs/`。
 
 避免混淆——**已实现** vs **仅设计**：
-- **已实现**：多文件任务组（`multi-file-task-group-design.md`）、插件系统 + 去中心化市场（`fluxdown-plugin-marketplace-plan.md` 等）。
+- **已实现**：多文件任务组（`multi-file-task-group-design.md`）、插件系统 + 去中心化市场（`fluxdown-plugin-marketplace-plan.md` 等）、GPUI 应用图标自定义（`app-icon-customization-design.md`，落点见 clients.md「应用图标」与 hosts-and-api.md `agent.platform.setAppIcon`）。
 - **部分实现（客户端 + agent）**：多设备协作 / FluxCloud 配置同步（`multi-device-collab-design.md`）——`native/agent` 的云同步 / 远程任务 / 设备元数据已落地，GPUI / Web / 原生移动端通过同一 agent 协议使用；LAN 设备互联 L1（配对 / mDNS / 直连下发）在 agent 实现（协议 crate `native/link`）；L2 跨网发现 / 打洞 / 中继与 E2E 仍在设计阶段（FluxCloud 无对应端点）。
 - **已实现（GitHub 规则仓 + 登记仓库）**：浏览器扩展嗅探规则经 `zerx-lab/fluxdown-sniff-rules` 分发。官方规则在 `rules/official/`；社区规则两条通道：作者自己的公开仓库（模板 `zerx-lab/fluxdown-sniff-rules-template`）在 `registry.json` 登记一次（命名空间 `community.<ns>.*` + 独占站点认领，`registry-check` 拉 Release 评论），之后发含 `sniff-rules.json` 的 Release 由 `publish` 每小时收录到 `sources/<ns>/`（sha256 固定、附件替换 / 版本不升 / 越界站点拒收，失败开 `stage-fail` issue 保留旧版）；一次性提交走 Issue 表单 → `submit` 开 PR，落 `community.misc.*`。全部合并为一个 `community.json` 统一签名，agent 验签下发扩展（细节见 clients.md 扩展段、hosts-and-api.md「嗅探规则包」）。**仅设计**：以 FluxCloud 为锚的规则市场（`sniff-rule-market-design.md`）。
 - **已实现**：RSS 订阅自动下载（`rss-subscription-design.md`，issue #97）——引擎 `native/engine/src/rss/`、REST `/api/v1/rss/*`、daemon/agent RPC 与规范事件、GPUI/Web/原生移动端入口、CLI `fluxdown rss`、MCP `rss_list`/`rss_add`/`rss_remove`。

@@ -356,6 +356,13 @@ pub const AGENT_PLATFORM_SET_FILE_ASSOCIATION: &str = "agent.platform.setFileAss
 pub const AGENT_PLATFORM_SET_URL_PROTOCOL: &str = "agent.platform.setUrlProtocol";
 /// 系统文件管理器为文件显示的图标（PNG）；参数见 `PlatformFileIconParams`。
 pub const AGENT_PLATFORM_FILE_ICON: &str = "agent.platform.fileIcon";
+/// `app_icon::PlatformSetAppIconParams` → `app_icon::AppIconStateDto`：切换 / 导入桌面应用图标，成功后
+/// agent 写入偏好 `desktop.app_icon` 并同步托盘、窗口与快捷方式图标。
+pub const AGENT_PLATFORM_SET_APP_ICON: &str = "agent.platform.setAppIcon";
+/// `app_icon::PlatformAppIconImageParams` → `app_icon::PlatformAppIconImageDto`：当前自定义应用图标的 PNG。
+pub const AGENT_PLATFORM_APP_ICON_IMAGE: &str = "agent.platform.appIconImage";
+/// `{}` → `{ "ok": true }`：为桌面界面进程现有窗口补设当前应用图标（Windows / X11；其余平台无操作）。
+pub const AGENT_PLATFORM_SYNC_WINDOW_ICONS: &str = "agent.platform.syncWindowIcons";
 /// `SoundPreviewParams` → `{ "ok": true }`：由 agent 在本机播放一次提示音偏好值（`off` / `system` / `file:<绝对路径>`）。
 pub const AGENT_SOUND_PREVIEW: &str = "agent.sound.preview";
 pub const AGENT_CAPTURE_SUBMIT: &str = "agent.capture.submit";
@@ -648,6 +655,9 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_PLATFORM_SET_FILE_ASSOCIATION,
     AGENT_PLATFORM_SET_URL_PROTOCOL,
     AGENT_PLATFORM_FILE_ICON,
+    AGENT_PLATFORM_SET_APP_ICON,
+    AGENT_PLATFORM_APP_ICON_IMAGE,
+    AGENT_PLATFORM_SYNC_WINDOW_ICONS,
     AGENT_SOUND_PREVIEW,
     AGENT_CAPTURE_SUBMIT,
     AGENT_CAPTURE_SUBMIT_TORRENT_FILE,

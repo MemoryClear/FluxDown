@@ -238,7 +238,7 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
             log::error!("plugin desktop interfaces unavailable: {error}");
         }
         crate::logging::install_ui_watchdog(cx);
-        crate::app_icon::install();
+        crate::app_icon::install(cx);
         // 先定汉字字体偏好再装主题：首次安装即用对的主字体与回退链，不重装第二次。
         fluxdown_ui_theme::set_han_font_preference(han_font_preference(&translator), cx);
         fluxdown_ui_theme::init(cx);
@@ -305,6 +305,8 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         after_first_snapshot(cx, crate::legacy_themes::migrate);
         cx.subscribe(&session, |_, signal, cx| match signal {
             SessionSignal::Snapshot(snapshot) => {
+                #[cfg(windows)]
+                crate::app_icon::agent_link_changed(true, cx);
                 if let Some(body) = crate::session::agent_body(snapshot) {
                     let stats = body.daemon.runtime_stats.clone();
                     let shell = body.shell.clone();
@@ -335,7 +337,10 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
                 log::error!("fatal FluxDown agent error: {:?}", error.code);
             }
             SessionSignal::ServiceStopped => crate::lifecycle::service_stopped(cx),
-            SessionSignal::Stale | SessionSignal::ServiceFailed(_) => {}
+            SessionSignal::Stale | SessionSignal::ServiceFailed(_) => {
+                #[cfg(windows)]
+                crate::app_icon::agent_link_changed(false, cx);
+            }
         })
         .detach();
 
@@ -662,6 +667,10 @@ fn apply_preferences(values: &BTreeMap<String, serde_json::Value>, cx: &mut App)
     }
     fluxdown_ui_theme::apply_appearance_preferences(values, cx);
     fluxdown_ui_icon_pack::apply_icon_pack_preference(values, cx);
+    {
+        let client = Arc::clone(&Desktop::global(cx).client);
+        crate::app_icon::apply_preference(values, &client, cx);
+    }
     apply_activity_bar_preferences(values, cx);
     if let Some(locale) = values
         .get("general.locale")

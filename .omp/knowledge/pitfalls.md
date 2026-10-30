@@ -138,6 +138,7 @@
 
 ## Windows 专属
 
+- **macOS 包上贴了 Finder 自定义图标（`Icon\r`）后 `codesign --verify --deep --strict` 必失败**（"resource fork, Finder information, or similar detritus not allowed"；`-dv` 与非 strict 仍可用，2026-10-30 ad-hoc 包实测）：应用图标功能会给已安装的 `FluxDown.app` / 辅助包贴图标，所以只能对**下载的新包**做 strict 校验，对已安装包做 strict 校验或重签名前必须先 `setIcon(nil)` 撤掉 → `native/agent/src/platform/app_icon/macos.rs`、`native/agent/src/update/install/macos.rs::verify`。
 另见 AGENTS.md §4：每个 console 子进程 spawn 必须包 `proc::no_console_window`、本机端口 WSAEACCES 回退、BT `dht.json` 撞端口排除区间。其余按领域散落在上面各节（`sync_all` 写句柄、`ERROR_LOCK_VIOLATION`、WSAECONNRESET、BT 目录 rename、最大化判定），此处只收仅在 Windows 触发且不属于上述领域的条目。
 
 - **Windows toast 线程不得逐条 `RoInitialize` / `RoUninitialize`**：headless `--server` 无其它 apartment，拆掉最后一个会卸载 WinRT 服务端，进程级缓存的激活工厂悬空，下一条通知 `0xC0000005` 崩溃。用从未初始化过 COM 的短命线程，让 windows-core 经 `CoIncrementMTAUsage` 常驻进程 MTA → `native/agent/src/notification/windows.rs`（`runtime::show` 调用处注释）、`native/agent/src/sound/backend.rs`（同模式）。
