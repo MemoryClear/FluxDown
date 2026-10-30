@@ -26,7 +26,7 @@ interruptMode: never
 2. 各端通过已有 i18n 查表/生成入口消费共享键，参数化文案使用 `{name}` 占位；不要建立平行翻译表。
 3. 删键同理两边一起删；改键名等于删旧加新。
 4. **不要手补 `assets/i18n/` 的非基线语言**：缺键在运行时按键级回退英文，不是 bug；自动化每天发现并开 PR 补齐。人工修正某条已有译文可以直接改（自动化只重译缺失键与 en 原文变化的键，不覆盖人工修正）；同类术语问题优先改 `i18n/glossary/<locale>.md`。
-5. GPUI 自动发现 `assets/i18n/*.json`、iOS 运行时列举同一目录；Web SPA 需在 `web/src/i18n/catalog.ts` 的 `TABLES` 登记，Android 需在 `mobile/Android/app/build.gradle.kts` 的语言 → `values-*` 映射登记。新增一门语言 = 加 JSON + 两处登记 + `i18n/glossary/<locale>.md`，之后自动化负责补全。官网 v2 的语言集固定在 `website-v2/src/i18n/config.ts::LANGS`（en + zh），不做翻译。
+5. GPUI（`build.rs`）、Web（Vite 插件 / bun 预加载生成 `virtual:i18n-tables`，见 `web/i18n-tables.ts`）、Android（`GenerateI18nResources` + `localeFilters`）与 iOS 运行时都自动发现 `assets/i18n/*.json`；唯一手动项是 iOS 的 `mobile/FluxDown/Config/Info.plist` `CFBundleLocalizations` 与工程 `knownRegions`（否则系统 App 语言设置不列出），`mobile/FluxDown/scripts/check-i18n.py` 会报未声明的语言。新增一门语言 = 加 JSON（至少含 `languageNativeName`）+ iOS 两处声明 + `i18n/glossary/<locale>.md`，之后自动化负责补全。官网 v2 的语言集固定在 `website-v2/src/i18n/config.ts::LANGS`（en + zh），不做翻译。
 6. 原生移动端：Android 构建期由共享 JSON 生成 `R.string.<键>`，**禁止**在 `res/` 手写同名文案；iOS 经 FluxKit 符号链接打包同一 JSON、`L("键")` 查表，`mobile/FluxDown/scripts/check-i18n.py` 校验漏键。
 
 ## 非基线语言（自动化维护）
