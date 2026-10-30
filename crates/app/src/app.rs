@@ -239,6 +239,8 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         }
         crate::logging::install_ui_watchdog(cx);
         crate::app_icon::install();
+        // 先定汉字字体偏好再装主题：首次安装即用对的主字体与回退链，不重装第二次。
+        fluxdown_ui_theme::set_han_font_preference(han_font_preference(&translator), cx);
         fluxdown_ui_theme::init(cx);
         gpui_component::set_locale(&locale);
         let translator = cx.new(|_| translator);
@@ -683,6 +685,27 @@ fn apply_preferences(values: &BTreeMap<String, serde_json::Value>, cx: &mut App)
             // 下只有整窗刷新才能让没读 Translator 的库控件换成新语言。
             cx.refresh_windows();
         }
+    }
+    // 界面语言（含跟随系统）一变，汉字主字体与回退链随之更新；未变时为空操作。
+    let preference = han_font_preference(translator.read(cx));
+    fluxdown_ui_theme::set_han_font_preference(preference, cx);
+}
+
+/// 界面语言 → 汉字字体偏好：中文界面按界面语言的简 / 繁；非中文界面按系统语言推导回退链
+/// 里优先的字形（文件名等用户数据多与系统语言同字形），推不出时取简体。
+fn han_font_preference(translator: &Translator) -> fluxdown_ui_theme::HanFontPreference {
+    use fluxdown_ui_theme::{HanFontPreference, HanScript};
+    if let Some(script) = HanScript::from_locale(translator.locale()) {
+        return HanFontPreference {
+            script,
+            chinese_ui: true,
+        };
+    }
+    let mut system = translator.clone();
+    system.set_locale(&system_locale());
+    HanFontPreference {
+        script: HanScript::from_locale(system.locale()).unwrap_or_default(),
+        chinese_ui: false,
     }
 }
 

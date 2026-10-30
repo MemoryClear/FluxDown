@@ -90,6 +90,7 @@
 - **GPUI 剪贴板写不了文件**：`ClipboardEntry::ExternalPaths` 在 gpui-fast 三个平台的写入路径都是空操作（macOS `pasteboard.rs::write`、Windows `clipboard.rs::write_to_clipboard`、Linux 只 `set_text`），`cx.write_to_clipboard` 不报错但剪贴板没有文件；「复制文件」改由常驻 agent 经 arboard `Set::file_list` 写入（Linux X11 内容归写入进程，实例须常驻）→ `native/agent/src/platform/clipboard_files.rs`、入口 `crates/downloads/src/pages/task_copy.rs`。
 - **`overflow_y_scrollbar` 页面里的定高 `uniform_list`：收不到滚轮，或滚到边后把页面「卡住」**：gpui-kit `Scrollable` 内的 `ScrollBounce` 在子树之前的捕获监听里认领指针下的滚轮、在子树之后的捕获监听里滚动并 `stop_propagation`，裸 `uniform_list` 只在冒泡阶段滚动，于是列表纹丝不动；而给列表再包一层 `gpui_base::ScrollBounce` 又走另一个极端——它按平台惯例让最内层独占整个手势、到边也不交还，列表滚到顶后指针停在列表上就再也滚不动页面。内嵌列表改用 `NestedScroll::area`：自己在两次页面监听之间注册捕获监听，按手势锁定归属（手势开始时列表还能朝该方向滚 → 整次手势归列表并截停；已在边上 / 不溢出 → 不动作交给页面；停顿 ≥250ms 或触控板 `Started` 重新判定）→ `crates/share/src/nested_scroll.rs`（使用方 `network.rs` 指标表 / 日志 / 原始快照）。
 - **弹层 / 滚动区的高度上限不能写固定 px**：行高（`density().nav_row` 等）随字体度量与界面缩放抬升，固定 `max_h(px(420.))` 在放大后装不下末行，「重置为默认列」被裁到滚动区底边外、看着像显示不全；上限按行高倍数推导，再按窗口可见高度收紧 → `crates/downloads/src/components/title_bar.rs`（`VIEW_MENU_MAX_BODY_ROWS`）。
+- **Windows 上汉字缺字回退按系统区域、不按应用语言，且 Windows 列字体用本地化名**：`.SystemUIFont` 在台湾版是正黑体（只覆盖繁体），简体专用字由 DirectWrite 按 zh-TW 回退到明体，界面割裂、细笔画破碎（#1003）；中文界面主字体按界面语言换成雅黑 UI / 正黑体 UI，并由 Root 插件给每个窗口根节点挂汉字回退链。判断字体是否安装不能拿英文名比 `all_font_names`（会是「微軟正黑體 UI」），改为解析后比族名 → `crates/theme/src/cjk.rs`、偏好推导 `crates/app/src/app.rs::han_font_preference`。
 
 ## Web SPA
 
