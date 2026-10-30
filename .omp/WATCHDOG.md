@@ -14,7 +14,7 @@
 ## Concern（转向提醒）
 - 改 native/api 未重新生成 openapi.json；改移动 FFI 未更新 Kotlin / Swift 绑定
 - 同步阻塞调用未包 `spawn_blocking`
-- 翻译只改单语（en/zh 基线必须成对补齐；ja 等社区语言不检查，也不该由 AI 补）；UI 里硬编码中文文案未走 i18n 查表；新增依赖未见用户确认
+- 翻译只改单语（en/zh 基线必须成对补齐；`assets/i18n` 的 zh-TW 等语言由翻译自动化维护，开发中不检查也不手补）；UI 里硬编码中文文案未走 i18n 查表；新增依赖未见用户确认
 - 绕过已有 trait/error/日志宏平行造轮子
 - workspace clippy 遗漏测试目标；正确门禁为 `cargo clippy --workspace --all-targets -- -D warnings`（见 `.github/workflows/ci.yml`；`clippy.toml` 仅允许测试 unwrap/expect，其余 lint 一视同仁）
 
