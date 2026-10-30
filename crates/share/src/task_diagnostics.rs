@@ -150,6 +150,9 @@ impl ShareDiagnosticsView {
     }
 
     fn start_fetch(&mut self, session_id: String, cx: &mut Context<Self>) {
+        if !self.hub.read(cx).available() {
+            return;
+        }
         self.request += 1;
         let request = self.request;
         let future = self

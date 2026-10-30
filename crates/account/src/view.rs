@@ -57,6 +57,8 @@ pub struct AccountView {
     had_session: bool,
     /// app 注入的额度视图（共享加速额度 / 贡献）；登录态下显示在资料卡之后。
     share_usage: Option<AnyView>,
+    /// 额度卡是否显示：FluxMesh 不可用（未启用 / 云端未开放）时隐藏，由 app 随 hub 推送。
+    share_usage_visible: bool,
     _endpoint_subscription: Subscription,
     _host_subscription: Subscription,
 }
@@ -109,6 +111,7 @@ impl AccountView {
             signing_out: false,
             had_session,
             share_usage: None,
+            share_usage_visible: false,
             _endpoint_subscription,
             _host_subscription,
         };
@@ -121,6 +124,14 @@ impl AccountView {
     pub fn set_share_usage(&mut self, view: AnyView, cx: &mut Context<Self>) {
         self.share_usage = Some(view);
         cx.notify();
+    }
+
+    /// 额度卡显隐（FluxMesh 可用性）；隐藏时视图不渲染，也就不会触发额度刷新。
+    pub fn set_share_usage_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.share_usage_visible != visible {
+            self.share_usage_visible = visible;
+            cx.notify();
+        }
     }
 
     /// 「上次同步 N 分钟前」由时钟推进，不在任何被追踪的状态里：retained 渲染只在依赖变化时
@@ -603,7 +614,10 @@ impl Render for AccountView {
         };
 
         let logged_in = session.is_some();
-        if logged_in && let Some(usage) = self.share_usage.clone() {
+        if logged_in
+            && self.share_usage_visible
+            && let Some(usage) = self.share_usage.clone()
+        {
             column = column.child(
                 div()
                     .flex()

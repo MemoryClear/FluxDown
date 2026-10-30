@@ -249,10 +249,12 @@ pub const AGENT_LINK_CONTROL_CREDENTIAL: &str = "agent.link.controlCredential";
 pub const AGENT_LINK_DISPATCH: &str = "agent.link.dispatch";
 
 /// FluxMesh（临时文件分享）。仅当 agent 编入FluxMesh服务时可用（否则 `Unsupported`，hello 不带
-/// `agent.share` 能力；已编入但被云端关闭时返回 `Unavailable` + `ShareUnavailable`）。
-/// 刷新云端策略并返回 → `ShareConfigDto`（云端策略摘要 + 本机设置）。
+/// `agent.share` 能力；已编入但本机开关未开启（`ShareLocalConfigDto.enabled`，实验性、默认关）或被
+/// 云端关闭时返回 `Unavailable` + `ShareUnavailable`——开关关闭时只有 `config` / `setLocalConfig` 可用）。
+/// 刷新云端策略并返回 → `ShareConfigDto`（云端策略摘要 + 本机设置）；开关关闭时不访问云端、策略摘要为空。
 pub const AGENT_SHARE_CONFIG: &str = "agent.share.config";
 /// `ShareLocalConfigDto` → `ShareLocalConfigDto`：整体替换本机FluxMesh设置，返回规范化后的值。
+/// 也是开启 / 关闭FluxMesh的唯一入口（`enabled`）。
 pub const AGENT_SHARE_SET_LOCAL_CONFIG: &str = "agent.share.setLocalConfig";
 /// `ShareCreateParams` → `ShareDto`：从已完成的本机任务创建分享（多任务合成一个分享）。
 pub const AGENT_SHARE_CREATE: &str = "agent.share.create";

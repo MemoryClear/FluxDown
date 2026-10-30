@@ -233,6 +233,9 @@ impl ShareNetworkView {
 
     /// 取诊断与日志（不通知：由渲染或事件处理方负责重绘）。
     fn start_fetch(&mut self, cx: &mut Context<Self>) {
+        if !self.hub.read(cx).available() {
+            return;
+        }
         self.request += 1;
         let request = self.request;
         self.loading = true;
@@ -292,6 +295,9 @@ impl ShareNetworkView {
 
     /// 日志取数（级别 / 正则变化或随诊断一起刷新）。
     fn start_logs(&mut self, cx: &mut Context<Self>) {
+        if !self.hub.read(cx).available() {
+            return;
+        }
         self.logs.request += 1;
         let request = self.logs.request;
         self.logs.loading = true;
@@ -422,9 +428,20 @@ fn level_color(level: ShareLogLevel, cx: &App) -> Hsla {
 impl Render for ShareNetworkView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_placeholders(window, cx);
-        self.refresh_if_needed(cx);
         let tokens = active_theme(cx).tokens().clone();
         let translator = self.translator.read(cx).clone();
+        // 功能未启用 / 不可用：不取数，只给空态。
+        if !self.hub.read(cx).available() {
+            return empty_state(
+                FluxIcon::Network,
+                None,
+                text(&translator, "shareSetUnavailable"),
+                None,
+                cx,
+            )
+            .into_any_element();
+        }
+        self.refresh_if_needed(cx);
         let stale = self.hub.read(cx).is_stale();
 
         let mut page = v_flex()
@@ -476,7 +493,9 @@ impl Render for ShareNetworkView {
         if snapshot_present && !self.json_lines.is_empty() {
             page = page.child(self.render_snapshot(&translator, cx));
         }
-        page.overflow_y_scrollbar().id("share-net-scroll")
+        page.overflow_y_scrollbar()
+            .id("share-net-scroll")
+            .into_any_element()
     }
 }
 
