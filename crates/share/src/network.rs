@@ -11,8 +11,8 @@ use fluxdown_protocol::{
     ShareSessionDetailDto, ShareSessionRole,
 };
 use fluxdown_ui_components::{
-    ButtonVariant, ControlExt as _, FluxIcon, card, icon_button, loading_icon_button,
-    tabular_numbers, tooltip_view,
+    BusyExt as _, BusyHold, ButtonVariant, ControlExt as _, FluxIcon, card, icon_button,
+    loading_icon_button, tabular_numbers, tooltip_view,
 };
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
@@ -95,6 +95,8 @@ struct LogsState {
     regex_placeholder: SharedString,
     rows: Vec<LogRow>,
     loading: bool,
+    /// 用户点「刷新日志」后的最短转圈保持。
+    hold: BusyHold,
     error: LogsError,
     debounce: Debounce,
     request: u64,
@@ -110,6 +112,10 @@ pub struct ShareNetworkView {
     request: u64,
     load: Load,
     loading: bool,
+    /// 用户点头部「刷新」后的最短转圈保持。
+    refresh_hold: BusyHold,
+    /// 用户点「重试」后的最短转圈保持。
+    retry_hold: BusyHold,
     diagnostics: Option<ShareDiagnosticsDto>,
     metric_rows: Vec<MetricRow>,
     json_lines: Vec<String>,
@@ -163,6 +169,8 @@ impl ShareNetworkView {
             request: 0,
             load: Load::Idle,
             loading: false,
+            refresh_hold: BusyHold::default(),
+            retry_hold: BusyHold::default(),
             refresh: VisibleRefresh::new(MIN_REFRESH_MS),
             diagnostics: None,
             metric_rows: Vec::new(),
@@ -176,6 +184,7 @@ impl ShareNetworkView {
                 regex_placeholder,
                 rows: Vec::new(),
                 loading: false,
+                hold: BusyHold::default(),
                 error: LogsError::None,
                 debounce: Debounce::default(),
                 request: 0,
@@ -508,12 +517,15 @@ impl ShareNetworkView {
             label.clone(),
             icon,
             ButtonVariant::Ghost,
-            self.loading,
+            self.loading || self.refresh_hold.is_held(),
             cx,
         )
         .tooltip(tooltip_builder(label))
-        .disabled(stale || self.loading)
-        .on_click(cx.listener(|this, _, _, cx| this.refresh_now(cx)))
+        .disabled(stale || self.loading || self.refresh_hold.is_held())
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.refresh_hold.start(cx);
+            this.refresh_now(cx);
+        }))
         .into_any_element()
     }
 
@@ -556,8 +568,12 @@ impl ShareNetworkView {
                 .outline()
                 .label(text(translator, "shareRetry"))
                 .control(cx)
-                .disabled(stale)
-                .on_click(cx.listener(|this, _, _, cx| this.refresh_now(cx))),
+                .busy(self.loading || self.retry_hold.is_held())
+                .disabled(stale || self.loading || self.retry_hold.is_held())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.retry_hold.start(cx);
+                    this.refresh_now(cx);
+                })),
         )
     }
 
@@ -1168,12 +1184,13 @@ impl ShareNetworkView {
                     label_refresh.clone(),
                     Icon::new(FluxIcon::RotateCw).size(icon_md),
                     ButtonVariant::Ghost,
-                    self.logs.loading,
+                    self.logs.loading || self.logs.hold.is_held(),
                     cx,
                 )
                 .tooltip(tooltip_builder(label_refresh))
-                .disabled(stale || self.logs.loading)
+                .disabled(stale || self.logs.loading || self.logs.hold.is_held())
                 .on_click(cx.listener(|this, _, _, cx| {
+                    this.logs.hold.start(cx);
                     this.start_logs(cx);
                     cx.notify();
                 })),
